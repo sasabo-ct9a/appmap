@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/*
+ * Color tokens — provisional for the @theme vs arbitrary-values comparison.
+ * If we end up choosing case B (pure arbitrary), this whole @theme block goes away.
+ * Source of truth for color values: CLAUDE.md §10.2.
+ */
+@theme {
+  --color-charcoal: #111827;
+  --color-slate: #1f2937;
+  --color-soft-grid: #e5e7eb;
+  --color-off-white: #f9fafb;
+  --color-electric-teal: #14b8a6;
+  --color-muted-amber: #d4a373;
+  --color-alert-red: #ef4444;
+  --color-cool-blue: #60a5fa;
+}

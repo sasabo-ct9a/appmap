@@ -1,0 +1,80 @@
+name: Release
+
+# トリガ:
+#   - `v` で始まるタグ push(v0.1.0 など)→ 正式リリース。Win + Mac の installer を
+#     GitHub Releases にアップロード(初期は draft)
+#   - Actions タブから手動実行(workflow_dispatch)→ 動作確認用
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+          - platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Mac の場合は両アーキ向けターゲットも追加
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux deps (none for now, placeholder)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build & bundle Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "AppMap ${{ github.ref_name }}"
+          releaseBody: |
+            ## ダウンロード
+
+            - **Windows**: `AppMap_x.y.z_x64_en-US.msi`(MSI)または `AppMap_x.y.z_x64-setup.exe`(NSIS)
+            - **Mac (Apple Silicon)**: `AppMap_x.y.z_aarch64.dmg`
+            - **Mac (Intel)**: `AppMap_x.y.z_x64.dmg`
+
+            ## インストール
+
+            セットアップは `GETTING_STARTED.md` を参照してください。
+            初回起動時、未署名アプリのため OS の警告が出ますが、安全な配布元なので案内に従って許可してください。
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
