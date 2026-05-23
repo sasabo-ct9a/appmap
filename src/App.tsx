@@ -3,7 +3,6 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import Header from "./components/layout/Header";
 import MapCanvas from "./components/canvas/MapCanvas";
 import InspectorPanel from "./components/inspector/InspectorPanel";
-import DiffPanel from "./components/inspector/DiffPanel";
 import Button from "./components/ui/Button";
 import Spinner from "./components/ui/Spinner";
 import HistoryDropdown from "./components/ui/HistoryDropdown";
@@ -28,7 +27,6 @@ import {
   saveOpenTabs,
   type StoredAnalysis,
 } from "./lib/storage";
-import { computeScreenDiff } from "./lib/screenDiff";
 
 /**
  * Phase 3 Step 3-5(polish 込み完成版):
@@ -75,11 +73,6 @@ function App() {
   const [dragOffsetsX, setDragOffsetsX] = useState<Record<string, number>>({});
   // v0.1.4 タブ機能:今開いているタブの folderPath 一覧
   const [openTabPaths, setOpenTabPaths] = useState<string[]>([]);
-  // v0.1.4 比較モード
-  const [compareMode, setCompareMode] = useState<boolean>(false);
-  const [compareTargetPath, setCompareTargetPath] = useState<string | null>(
-    null,
-  );
 
   // localStorage から最新の履歴を読み直す(削除や保存の後に呼ぶ)
   const refreshHistory = () => {
@@ -105,15 +98,10 @@ function App() {
       saveOpenTabs(next);
       return next;
     });
-    // 閉じたタブが比較対象なら解除、アクティブなら別タブに切替 or サンプル
-    if (compareTargetPath === folderPath) {
-      setCompareTargetPath(null);
-      setCompareMode(false);
-    }
+    // アクティブだったタブを閉じたら別タブに切替 or サンプル
     if (lastAnalyzedFolder === folderPath) {
       const remaining = openTabPaths.filter((p) => p !== folderPath);
       if (remaining.length > 0) {
-        // 残ってる中で folderPath != closing のものを active に
         const next = history.find((h) => h.folderPath === remaining[0]);
         if (next) {
           handleSelectFromHistory(next);
@@ -217,23 +205,6 @@ function App() {
       .map((p) => history.find((h) => h.folderPath === p))
       .filter((e): e is StoredAnalysis => e !== undefined);
   }, [openTabPaths, history]);
-
-  // v0.1.4: 比較モード時の比較対象 StoredAnalysis
-  const compareEntry = useMemo(() => {
-    if (!compareMode || compareTargetPath === null) return null;
-    return history.find((h) => h.folderPath === compareTargetPath) ?? null;
-  }, [compareMode, compareTargetPath, history]);
-
-  // v0.1.4: 比較 diff(両方揃ったときだけ計算)
-  const diffResult = useMemo(() => {
-    if (!compareMode || !compareEntry || aiResult === null) return null;
-    const sameFolder = compareEntry.folderPath === lastAnalyzedFolder;
-    return computeScreenDiff(
-      aiResult,
-      normalizeAndSanitizeScreenMap(compareEntry.screens),
-      sameFolder,
-    );
-  }, [compareMode, compareEntry, aiResult, lastAnalyzedFolder]);
 
   const handlePickFolder = async () => {
     setAnalysisError(null);
@@ -344,37 +315,17 @@ function App() {
     if (entry) handleSelectFromHistory(entry);
   };
 
-  /** v0.1.4: 比較モードの切替。OFF→ON のときデフォルト比較対象を設定 */
-  const handleToggleCompareMode = () => {
-    setCompareMode((prev) => {
-      const next = !prev;
-      if (next) {
-        // ON にする時:アクティブ以外の最初のタブを比較対象に
-        const other = openTabPaths.find((p) => p !== lastAnalyzedFolder);
-        setCompareTargetPath(other ?? null);
-      } else {
-        setCompareTargetPath(null);
-      }
-      return next;
-    });
-  };
-
-  /** 履歴から 1 件削除。現在表示中だったらサンプルに戻る。タブと比較対象もクリーンアップ。 */
+  /** 履歴から 1 件削除。現在表示中だったらサンプルに戻る。タブからも除外。 */
   const handleRemoveFromHistory = (path: string) => {
     removeAnalysis(path);
     if (lastAnalyzedFolder === path) {
       handleResetToSample();
     }
-    // v0.1.4: タブ一覧と比較対象からも除外
     setOpenTabPaths((prev) => {
       const next = prev.filter((p) => p !== path);
       saveOpenTabs(next);
       return next;
     });
-    if (compareTargetPath === path) {
-      setCompareTargetPath(null);
-      setCompareMode(false);
-    }
     refreshHistory();
   };
 
@@ -451,12 +402,8 @@ function App() {
             <TabBar
               tabs={tabEntries}
               activeFolderPath={lastAnalyzedFolder}
-              comparedFolderPath={compareTargetPath}
-              compareMode={compareMode}
               onSelectTab={handleSelectTab}
               onCloseTab={closeTab}
-              onToggleCompareMode={handleToggleCompareMode}
-              onSetCompareTarget={setCompareTargetPath}
             />
 
             {/* ツールバー */}
@@ -539,34 +486,13 @@ function App() {
             </div>
           </div>
         </main>
-        {/* 右パネル:比較モードなら DiffPanel、通常は InspectorPanel。
-            両方同時表示はしない(画面幅の都合 + 認知負荷)。 */}
-        {compareMode && diffResult && compareEntry ? (
-          <DiffPanel
-            diff={diffResult}
-            baseLabel={
-              lastAnalyzedFolder
-                ? lastAnalyzedFolder.split(/[\\/]/).slice(-2).join("/")
-                : "アクティブ"
-            }
-            compareLabel={compareEntry.folderPath
-              .split(/[\\/]/)
-              .slice(-2)
-              .join("/")}
-            onClose={() => {
-              setCompareMode(false);
-              setCompareTargetPath(null);
-            }}
-          />
-        ) : (
-          <InspectorPanel
-            node={selectedNode}
-            allNodes={screens.nodes}
-            allEdges={screens.edges}
-            onClose={() => setSelectedNodeId(null)}
-            noCodeMode={noCodeMode}
-          />
-        )}
+        <InspectorPanel
+          node={selectedNode}
+          allNodes={screens.nodes}
+          allEdges={screens.edges}
+          onClose={() => setSelectedNodeId(null)}
+          noCodeMode={noCodeMode}
+        />
       </div>
     </div>
   );
