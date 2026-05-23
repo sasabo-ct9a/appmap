@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import Header from "./components/layout/Header";
 import MapCanvas from "./components/canvas/MapCanvas";
 import InspectorPanel from "./components/inspector/InspectorPanel";
+import DiffPanel from "./components/inspector/DiffPanel";
 import Button from "./components/ui/Button";
 import Spinner from "./components/ui/Spinner";
 import HistoryDropdown from "./components/ui/HistoryDropdown";
 import SetupWizard from "./components/ui/SetupWizard";
+import TabBar from "./components/ui/TabBar";
 import { sampleScreens } from "./data/sampleScreens";
 import { pickFolderAndListFiles } from "./lib/folderPicker";
 import {
@@ -23,8 +25,10 @@ import {
   removeAnalysis,
   markLoginCompleted,
   saveDragOffsets,
+  saveOpenTabs,
   type StoredAnalysis,
 } from "./lib/storage";
+import { computeScreenDiff } from "./lib/screenDiff";
 
 /**
  * Phase 3 Step 3-5(polish 込み完成版):
@@ -69,11 +73,55 @@ function App() {
   const [history, setHistory] = useState<StoredAnalysis[]>([]);
   // v0.1.2 ドラッグ機能:現在表示中の分析に紐づく X 軸オフセット
   const [dragOffsetsX, setDragOffsetsX] = useState<Record<string, number>>({});
+  // v0.1.4 タブ機能:今開いているタブの folderPath 一覧
+  const [openTabPaths, setOpenTabPaths] = useState<string[]>([]);
+  // v0.1.4 比較モード
+  const [compareMode, setCompareMode] = useState<boolean>(false);
+  const [compareTargetPath, setCompareTargetPath] = useState<string | null>(
+    null,
+  );
 
   // localStorage から最新の履歴を読み直す(削除や保存の後に呼ぶ)
   const refreshHistory = () => {
     const store = loadStore();
     setHistory(store.history);
+  };
+
+  /**
+   * v0.1.4 タブを開く(既に開いてれば順序維持、なければ末尾に追加)→ localStorage 永続化
+   */
+  const openTabFor = (folderPath: string) => {
+    setOpenTabPaths((prev) => {
+      const next = prev.includes(folderPath) ? prev : [...prev, folderPath];
+      saveOpenTabs(next);
+      return next;
+    });
+  };
+
+  /** v0.1.4 タブを閉じる(履歴は残るが workspace から外れる) */
+  const closeTab = (folderPath: string) => {
+    setOpenTabPaths((prev) => {
+      const next = prev.filter((p) => p !== folderPath);
+      saveOpenTabs(next);
+      return next;
+    });
+    // 閉じたタブが比較対象なら解除、アクティブなら別タブに切替 or サンプル
+    if (compareTargetPath === folderPath) {
+      setCompareTargetPath(null);
+      setCompareMode(false);
+    }
+    if (lastAnalyzedFolder === folderPath) {
+      const remaining = openTabPaths.filter((p) => p !== folderPath);
+      if (remaining.length > 0) {
+        // 残ってる中で folderPath != closing のものを active に
+        const next = history.find((h) => h.folderPath === remaining[0]);
+        if (next) {
+          handleSelectFromHistory(next);
+          return;
+        }
+      }
+      handleResetToSample();
+    }
   };
 
   /**
@@ -108,6 +156,18 @@ function App() {
     } else {
       setLoginCompletedAt(store.loginCompletedAt ?? null);
     }
+    // v0.1.4: タブ一覧を復元(履歴に存在するパスだけに絞る)
+    const validPaths = new Set(store.history.map((e) => e.folderPath));
+    const restoredTabs = (store.openTabFolderPaths ?? []).filter((p) =>
+      validPaths.has(p),
+    );
+    // current が tabs に無ければ先頭に追加(歴史的データとの整合性)
+    if (store.currentFolderPath && validPaths.has(store.currentFolderPath)) {
+      if (!restoredTabs.includes(store.currentFolderPath)) {
+        restoredTabs.unshift(store.currentFolderPath);
+      }
+    }
+    setOpenTabPaths(restoredTabs);
     if (store.currentFolderPath) {
       const entry = store.history.find(
         (e) => e.folderPath === store.currentFolderPath,
@@ -150,6 +210,30 @@ function App() {
     selectedNodeId !== null
       ? screens.nodes.find((n) => n.id === selectedNodeId) ?? null
       : null;
+
+  // v0.1.4: タブとして開いている StoredAnalysis 配列(順序保持、無いものは除外)
+  const tabEntries = useMemo(() => {
+    return openTabPaths
+      .map((p) => history.find((h) => h.folderPath === p))
+      .filter((e): e is StoredAnalysis => e !== undefined);
+  }, [openTabPaths, history]);
+
+  // v0.1.4: 比較モード時の比較対象 StoredAnalysis
+  const compareEntry = useMemo(() => {
+    if (!compareMode || compareTargetPath === null) return null;
+    return history.find((h) => h.folderPath === compareTargetPath) ?? null;
+  }, [compareMode, compareTargetPath, history]);
+
+  // v0.1.4: 比較 diff(両方揃ったときだけ計算)
+  const diffResult = useMemo(() => {
+    if (!compareMode || !compareEntry || aiResult === null) return null;
+    const sameFolder = compareEntry.folderPath === lastAnalyzedFolder;
+    return computeScreenDiff(
+      aiResult,
+      normalizeAndSanitizeScreenMap(compareEntry.screens),
+      sameFolder,
+    );
+  }, [compareMode, compareEntry, aiResult, lastAnalyzedFolder]);
 
   const handlePickFolder = async () => {
     setAnalysisError(null);
@@ -200,6 +284,7 @@ function App() {
         analyzedAt: Date.now(),
       });
       refreshHistory();
+      openTabFor(result.folder); // v0.1.4: 分析完了で自動でタブに追加
       // 分析が通った = 認証も通っている。SetupWizard の login ステップを完了扱いに。
       if (loginCompletedAt === null) {
         markLoginCompleted();
@@ -239,6 +324,7 @@ function App() {
     setCurrent(entry.folderPath);
     setDragOffsetsX(entry.dragOffsetsX ?? {}); // v0.1.2: 切替先のドラッグオフセットを反映
     refreshHistory();
+    openTabFor(entry.folderPath); // v0.1.4: 履歴から開いたものをタブに追加
   };
 
   /**
@@ -252,11 +338,42 @@ function App() {
     }
   };
 
-  /** 履歴から 1 件削除。現在表示中だったらサンプルに戻る。 */
+  /** v0.1.4: タブをクリックでアクティブに切替 */
+  const handleSelectTab = (folderPath: string) => {
+    const entry = history.find((h) => h.folderPath === folderPath);
+    if (entry) handleSelectFromHistory(entry);
+  };
+
+  /** v0.1.4: 比較モードの切替。OFF→ON のときデフォルト比較対象を設定 */
+  const handleToggleCompareMode = () => {
+    setCompareMode((prev) => {
+      const next = !prev;
+      if (next) {
+        // ON にする時:アクティブ以外の最初のタブを比較対象に
+        const other = openTabPaths.find((p) => p !== lastAnalyzedFolder);
+        setCompareTargetPath(other ?? null);
+      } else {
+        setCompareTargetPath(null);
+      }
+      return next;
+    });
+  };
+
+  /** 履歴から 1 件削除。現在表示中だったらサンプルに戻る。タブと比較対象もクリーンアップ。 */
   const handleRemoveFromHistory = (path: string) => {
     removeAnalysis(path);
     if (lastAnalyzedFolder === path) {
       handleResetToSample();
+    }
+    // v0.1.4: タブ一覧と比較対象からも除外
+    setOpenTabPaths((prev) => {
+      const next = prev.filter((p) => p !== path);
+      saveOpenTabs(next);
+      return next;
+    });
+    if (compareTargetPath === path) {
+      setCompareTargetPath(null);
+      setCompareMode(false);
     }
     refreshHistory();
   };
@@ -329,6 +446,18 @@ function App() {
         <main className="flex-1 overflow-auto px-6 py-12">
           <div className="mx-auto max-w-3xl">
             {setupWizard}
+
+            {/* v0.1.4 タブバー(タブが 0 件の時は自動的に非表示) */}
+            <TabBar
+              tabs={tabEntries}
+              activeFolderPath={lastAnalyzedFolder}
+              comparedFolderPath={compareTargetPath}
+              compareMode={compareMode}
+              onSelectTab={handleSelectTab}
+              onCloseTab={closeTab}
+              onToggleCompareMode={handleToggleCompareMode}
+              onSetCompareTarget={setCompareTargetPath}
+            />
 
             {/* ツールバー */}
             <div className="flex items-center gap-3 mb-3 flex-wrap">
@@ -410,13 +539,34 @@ function App() {
             </div>
           </div>
         </main>
-        <InspectorPanel
-          node={selectedNode}
-          allNodes={screens.nodes}
-          allEdges={screens.edges}
-          onClose={() => setSelectedNodeId(null)}
-          noCodeMode={noCodeMode}
-        />
+        {/* 右パネル:比較モードなら DiffPanel、通常は InspectorPanel。
+            両方同時表示はしない(画面幅の都合 + 認知負荷)。 */}
+        {compareMode && diffResult && compareEntry ? (
+          <DiffPanel
+            diff={diffResult}
+            baseLabel={
+              lastAnalyzedFolder
+                ? lastAnalyzedFolder.split(/[\\/]/).slice(-2).join("/")
+                : "アクティブ"
+            }
+            compareLabel={compareEntry.folderPath
+              .split(/[\\/]/)
+              .slice(-2)
+              .join("/")}
+            onClose={() => {
+              setCompareMode(false);
+              setCompareTargetPath(null);
+            }}
+          />
+        ) : (
+          <InspectorPanel
+            node={selectedNode}
+            allNodes={screens.nodes}
+            allEdges={screens.edges}
+            onClose={() => setSelectedNodeId(null)}
+            noCodeMode={noCodeMode}
+          />
+        )}
       </div>
     </div>
   );

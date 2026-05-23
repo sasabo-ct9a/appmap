@@ -48,6 +48,12 @@ type AppMapStore = {
    * 一度ログイン完走したことだけ覚えておく。再起動を跨いで wizard を黙らせる用。
    */
   loginCompletedAt?: number;
+  /**
+   * v0.1.4 タブ機能:今開いているタブの folderPath 一覧(順序保持)。
+   * history はアーカイブ、これは「今ワークスペースに広げてるもの」を表す。
+   * 履歴に存在しないパスは load 時に弾く。
+   */
+  openTabFolderPaths?: string[];
 };
 
 const EMPTY: AppMapStore = {
@@ -122,6 +128,17 @@ export function removeAnalysis(folderPath: string): void {
 export function markLoginCompleted(): void {
   const store = loadStore();
   saveStore({ ...store, loginCompletedAt: Date.now() });
+}
+
+/**
+ * v0.1.4 タブ機能:開いているタブの folderPath 一覧を保存。
+ * 履歴に存在しないパスは弾く(整合性維持)。
+ */
+export function saveOpenTabs(paths: string[]): void {
+  const store = loadStore();
+  const validIds = new Set(store.history.map((e) => e.folderPath));
+  const filtered = paths.filter((p) => validIds.has(p));
+  saveStore({ ...store, openTabFolderPaths: filtered });
 }
 
 /**
