@@ -26,9 +26,7 @@ type NodeTileProps = {
   selected: boolean;
   onClick: (id: number) => void;
   /**
-   * SVG `<defs>` グラデーション id。Phase 3 polish v5 で 2 つの MapCanvas を
-   * 同時描画するようになり、id が衝突するため呼び出し側から固有 id を渡す。
-   * 省略時は従来通り `"node-gradient"`(単一 SVG モード後方互換)。
+   * SVG `<defs>` グラデーション id。複数 MapCanvas インスタンスでの id 衝突回避用。
    */
   gradientId?: string;
   /**
@@ -37,6 +35,11 @@ type NodeTileProps = {
    * userIntent をタイル中央に表示する(ユーザー視点のフレーズ)。
    */
   noCodeMode?: boolean;
+  /**
+   * v0.1.2 ドラッグ機能(A 案):マウスダウンを親(MapCanvas)に伝搬する。
+   * 親側で document 全体の mousemove / mouseup を捕捉してドラッグ処理する設計。
+   */
+  onMouseDown?: (e: React.MouseEvent, nodeId: number) => void;
 };
 
 function NodeTile({
@@ -45,6 +48,7 @@ function NodeTile({
   onClick,
   gradientId = "node-gradient",
   noCodeMode = false,
+  onMouseDown,
 }: NodeTileProps) {
   const x = node.position.x;
   const y = node.position.y;
@@ -72,7 +76,8 @@ function NodeTile({
   return (
     <g
       onClick={() => onClick(node.id)}
-      className="cursor-pointer"
+      onMouseDown={(e) => onMouseDown?.(e, node.id)}
+      className="cursor-grab active:cursor-grabbing"
       style={{ filter }}
     >
       {/* メイン:グラデーション fill + 外ストローク */}

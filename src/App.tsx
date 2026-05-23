@@ -22,6 +22,7 @@ import {
   setCurrent,
   removeAnalysis,
   markLoginCompleted,
+  saveDragOffsets,
   type StoredAnalysis,
 } from "./lib/storage";
 
@@ -66,6 +67,8 @@ function App() {
   const [loginCompletedAt, setLoginCompletedAt] = useState<number | null>(null);
   // 履歴(localStorage 由来)。初期マウント時に load、変更時に refreshHistory() で再ロード。
   const [history, setHistory] = useState<StoredAnalysis[]>([]);
+  // v0.1.2 ドラッグ機能:現在表示中の分析に紐づく X 軸オフセット
+  const [dragOffsetsX, setDragOffsetsX] = useState<Record<string, number>>({});
 
   // localStorage から最新の履歴を読み直す(削除や保存の後に呼ぶ)
   const refreshHistory = () => {
@@ -118,6 +121,8 @@ function App() {
         setLastCostUsd(entry.costUsd);
         setLastAnalyzedFolder(entry.folderPath);
         setAnalysisStatus("done");
+        // v0.1.2: ドラッグオフセットも復元
+        setDragOffsetsX(entry.dragOffsetsX ?? {});
       }
     }
   }, []);
@@ -183,6 +188,7 @@ function App() {
       setLastAnalyzedFolder(result.folder);
       setAnalysisStatus("done");
       setSelectedNodeId(null); // 新マップに切替時、サンプルでの選択を解除
+      setDragOffsetsX({}); // v0.1.2: 新規 / 再分析でノード id が変わるのでオフセットをクリア
 
       // 永続化:再起動でも復元できるよう localStorage に保存し、履歴に積む
       saveAnalysis({
@@ -214,6 +220,7 @@ function App() {
     setFileCount(null);
     setLastCostUsd(null);
     setLastAnalyzedFolder(null);
+    setDragOffsetsX({}); // v0.1.2: サンプルに戻すときドラッグオフセットもリセット
     // 次回起動時もサンプルで起動するように current をクリア(履歴は残す)
     setCurrent(null);
   };
@@ -230,7 +237,19 @@ function App() {
     setSelectedNodeId(null);
     setAnalysisError(null);
     setCurrent(entry.folderPath);
+    setDragOffsetsX(entry.dragOffsetsX ?? {}); // v0.1.2: 切替先のドラッグオフセットを反映
     refreshHistory();
+  };
+
+  /**
+   * v0.1.2 ドラッグ確定:MapCanvas から呼ばれる。state を更新しつつ、
+   * 現在の分析フォルダに紐づけて localStorage にも保存する。
+   */
+  const handleDragOffsetsChange = (offsets: Record<string, number>) => {
+    setDragOffsetsX(offsets);
+    if (lastAnalyzedFolder !== null) {
+      saveDragOffsets(lastAnalyzedFolder, offsets);
+    }
   };
 
   /** 履歴から 1 件削除。現在表示中だったらサンプルに戻る。 */
@@ -385,6 +404,8 @@ function App() {
                 selectedNodeId={selectedNodeId}
                 onNodeClick={(id) => setSelectedNodeId(id)}
                 noCodeMode={noCodeMode}
+                dragOffsetsX={dragOffsetsX}
+                onDragOffsetsChange={handleDragOffsetsChange}
               />
             </div>
           </div>

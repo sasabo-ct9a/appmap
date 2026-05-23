@@ -29,6 +29,13 @@ export type StoredAnalysis = {
   costUsd: number | null;
   durationMs: number | null;
   analyzedAt: number; // Date.now()
+  /**
+   * v0.1.2 機能拡張:ユーザーがドラッグで調整した X 軸オフセット。
+   *   - キーはノード id(文字列化)、値は元の position.x からの差分(px、viewBox 単位)
+   *   - 同 depth プレーン内での横並び順を直す用途
+   *   - 新規 AI 分析(同じ folder の再分析)で上書き保存される際にもクリア
+   */
+  dragOffsetsX?: Record<string, number>;
 };
 
 type AppMapStore = {
@@ -115,4 +122,27 @@ export function removeAnalysis(folderPath: string): void {
 export function markLoginCompleted(): void {
   const store = loadStore();
   saveStore({ ...store, loginCompletedAt: Date.now() });
+}
+
+/**
+ * 特定のフォルダのドラッグオフセット(X 軸)を保存(v0.1.2)。
+ *   - folderPath が history に存在しないなら何もしない(サンプル分析時等は呼ばれない想定)
+ *   - 値が空 {} のときは dragOffsetsX を削除して綺麗にする
+ */
+export function saveDragOffsets(
+  folderPath: string,
+  offsets: Record<string, number>,
+): void {
+  const store = loadStore();
+  const idx = store.history.findIndex((e) => e.folderPath === folderPath);
+  if (idx === -1) return;
+  const updated: StoredAnalysis = { ...store.history[idx] };
+  if (Object.keys(offsets).length === 0) {
+    delete updated.dragOffsetsX;
+  } else {
+    updated.dragOffsetsX = offsets;
+  }
+  const newHistory = [...store.history];
+  newHistory[idx] = updated;
+  saveStore({ ...store, history: newHistory });
 }
