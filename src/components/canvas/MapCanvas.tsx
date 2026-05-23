@@ -42,6 +42,9 @@ type MapCanvasProps = {
 
 const PLANE_HEIGHT = 150; // 1 フロアの SVG 内高さ(縦に広めに)
 const PLANE_GAP = 28; // フロア間の隙間
+/** ドラッグ時にノードを「フロアの中」に保つマージン(SVG 座標 px)。
+ *  floor rect は x=8 から始まるので、24 = フロア境界から +16 内側を許容。 */
+const DRAG_BOUND_MARGIN = 24;
 
 /** 各 depth で、ノードの top y(SVG 座標)を求める。 */
 function nodeYForDepth(depth: number): number {
@@ -126,6 +129,10 @@ function MapCanvas({
   useEffect(() => {
     if (draggingId === null) return;
 
+    // ドラッグ対象の元 X を保持(クランプ計算用)
+    const draggedNode = nodes.find((n) => n.id === draggingId);
+    const originalX = draggedNode ? draggedNode.position.x : 0;
+
     const move = (e: MouseEvent) => {
       const start = dragStartRef.current;
       const svg = svgRef.current;
@@ -140,9 +147,17 @@ function MapCanvas({
       const scale = vbWidth / Math.max(1, rect.width);
       const dxSvg = dxPx * scale;
 
+      // 計算した「ノード新 X」をフロア境界でクランプし、それに合致する offset に変換
+      const rawNewX = originalX + start.offsetAtStart + dxSvg;
+      const clampedNewX = Math.max(
+        DRAG_BOUND_MARGIN,
+        Math.min(vbWidth - NODE_WIDTH - DRAG_BOUND_MARGIN, rawNewX),
+      );
+      const clampedOffset = clampedNewX - originalX;
+
       setLiveOffsets((prev) => ({
         ...prev,
-        [String(draggingId)]: start.offsetAtStart + dxSvg,
+        [String(draggingId)]: clampedOffset,
       }));
     };
 
@@ -206,14 +221,21 @@ function MapCanvas({
   const viewBox = `0 0 ${totalWidth} ${totalHeight}`;
 
   // ノードの y を depth から再計算(AI / サンプル の元 y 値は無視)。
-  // x は元値 + ドラッグオフセット(v0.1.2)を加算。
-  const positionedNodes = nodes.map((n) => ({
-    ...n,
-    position: {
-      x: n.position.x + (liveOffsets[String(n.id)] ?? 0),
-      y: nodeYForDepth(n.depth ?? 0),
-    },
-  }));
+  // x は元値 + ドラッグオフセット(v0.1.2)を加算 + フロア境界でクランプ(v0.1.3)。
+  // クランプは描画時にも適用することで、過去に保存された範囲外オフセットも自動補正。
+  const minDragX = DRAG_BOUND_MARGIN;
+  const maxDragX = totalWidth - NODE_WIDTH - DRAG_BOUND_MARGIN;
+  const positionedNodes = nodes.map((n) => {
+    const rawX = n.position.x + (liveOffsets[String(n.id)] ?? 0);
+    const clampedX = Math.max(minDragX, Math.min(maxDragX, rawX));
+    return {
+      ...n,
+      position: {
+        x: clampedX,
+        y: nodeYForDepth(n.depth ?? 0),
+      },
+    };
+  });
 
   // v0.1.2:エッジ起点・終点の分散用メタを事前計算。
   //   - 各ノードの outgoing edges を target.x で昇順ソート → index
