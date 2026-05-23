@@ -409,17 +409,35 @@ export async function analyzeFolderToScreenMap(
   const screens = unwrapResult(parsed);
 
   if (!isScreenMapResult(screens)) {
-    // デバッグ用:Claude が実際に返したテキスト(envelope.result)を優先的に表示。
-    // 旧版は envelope 全体を 500 文字でぶった切っていたため、本体テキストに到達せず、
-    // 何が原因(JSON 不正 / 必須フィールド欠落 / 余計な前置き等)か特定できなかった。
+    // partner フィードバック 2026-05-16 提案:Claude Code CLI が出力仕様を将来また
+    // 変えたときのデバッグを楽にするため、`structured_output` と `result` を両方
+    // それぞれ最大 1000 文字までダンプする(片方しか見えないと診断不能になる)。
     console.error("[AppMap] Full Claude response envelope:", parsed);
-    let detail = JSON.stringify(parsed).slice(0, 500);
+
+    const sections: string[] = [];
     if (typeof parsed === "object" && parsed !== null) {
       const obj = parsed as Record<string, unknown>;
+
+      const so = obj.structured_output;
+      if (so !== undefined) {
+        const text = typeof so === "string" ? so : JSON.stringify(so);
+        sections.push(`structured_output (先頭 1000 文字):\n${text.slice(0, 1000)}`);
+      }
+
       if (typeof obj.result === "string") {
-        detail = `result (先頭 2000 文字):\n${obj.result.slice(0, 2000)}`;
+        sections.push(`result (先頭 1000 文字):\n${obj.result.slice(0, 1000)}`);
+      } else if (obj.result !== undefined) {
+        sections.push(
+          `result (型: ${typeof obj.result}):\n${JSON.stringify(obj.result).slice(0, 1000)}`,
+        );
       }
     }
+
+    const detail =
+      sections.length > 0
+        ? sections.join("\n\n---\n\n")
+        : JSON.stringify(parsed).slice(0, 1000);
+
     throw new Error(`応答に nodes / edges が見当たらない:\n${detail}`);
   }
 
@@ -654,7 +672,18 @@ function unwrapResult(parsed: unknown): unknown {
   const obj = parsed as Record<string, unknown>;
   if (isScreenMapResult(obj)) return obj;
 
-  for (const key of ["result", "output", "data", "response", "message"]) {
+  // v0.1.0 配布後 partner フィードバック 2026-05-16 修正 3:
+  // Claude Code CLI v2.1+ で `--json-schema` 指定時の出力形式が変わり、本体 JSON が
+  // `structured_output` フィールドにオブジェクトのまま入るようになった(`result` には
+  // 人間向けサマリ自然文)。`structured_output` を最優先で見るよう先頭に追加。
+  for (const key of [
+    "structured_output",
+    "result",
+    "output",
+    "data",
+    "response",
+    "message",
+  ]) {
     if (!(key in obj)) continue;
     const value = obj[key];
 
