@@ -45,6 +45,23 @@ type NodeTileProps = {
   language: Language;
 };
 
+/**
+ * SVG 上での文字列の **概算描画幅**(px)。
+ *   - CJK(全角)= 1 文字 ≈ 1em
+ *   - ASCII / 半角 = 1 文字 ≈ 0.55em(プロポーショナルフォントの平均)
+ *
+ *  fontSize を引数に取り、文字種ごとに em 比率を変えて加算。
+ *  textLength の発動判定とバッジ幅計算の両方で使う(同じ尺度で揃える)。
+ */
+function approxTextWidth(text: string, fontSize: number): number {
+  const cjkRe = /[　-鿿＀-￯]/;
+  let w = 0;
+  for (const ch of text) {
+    w += cjkRe.test(ch) ? fontSize : fontSize * 0.55;
+  }
+  return w;
+}
+
 function NodeTile({
   node,
   selected,
@@ -55,32 +72,47 @@ function NodeTile({
   language,
 }: NodeTileProps) {
   const T = t(language);
-  // EN の「▶ Start here」は JA の「▶ まずここ」より文字数が多いので、
-  // バッジ幅・テキスト位置を動的に決める。
+  // バッジ幅は実描画幅(CJK / Latin 別)+ 左右 padding(計 18px)で算出。
+  // 旧 `length * 5.6` は Latin 前提だった → CJK(▶ まずここ など)で過小だった。
   const badgeText = T.nodeTile.entryPointBadge;
-  const badgeWidth = badgeText.length * 5.6 + 18; // ざっくり横幅 (5.6px/char + padding)
+  const badgeWidth = approxTextWidth(badgeText, 9) + 18;
   const x = node.position.x;
   const y = node.position.y;
   const cx = x + NODE_WIDTH / 2;
 
   // クイックウィン 2: noCodeMode かつ userIntent あり → userIntent を主表示。
   // それ以外は技術的 label を表示。
-  // Codex review Med #5 対応:長すぎる文字列でタイル(140px)からはみ出すのを防ぐ。
   //
-  // v0.1.6 修正:CJK か Latin かでしきい値を切替。
-  //   - CJK は 1 文字 ≈ 1em(13px)で 12 字 ≈ 156px → タイル(140)からはみ出すので 12 字で truncate
-  //   - Latin は 1 文字 ≈ 0.5em(6-7px)で 22 字 ≈ 140px → 22 字まで OK
+  // ラベル幅の扱い(v0.1.6 後修正、両言語 + 混在文字列対応):
+  //   1. 文字数ではなく **実描画幅** で判断する(approxTextWidth)
+  //   2. truncate: 概算幅がタイル余地(LABEL_BUDGET)の 1.5 倍を超えたら末尾 …
+  //   3. textLength 圧縮: 概算幅 > LABEL_BUDGET のときだけ発動
+  //      → 「1 画面を深く見る」のような混在 CJK でも、実幅がタイル内なら圧縮しない
+  //      → 英語でも CJK でも、自然描画で収まるなら textLength は付けない
+  const FONT_SIZE = 13;
+  const LABEL_BUDGET = NODE_WIDTH - 24; // 116px = タイル幅 - 左右 padding
   const rawLabel =
     noCodeMode && node.userIntent ? node.userIntent : node.label;
-  const hasCJK = /[　-鿿＀-￯]/.test(rawLabel);
-  const MAX_LABEL_CHARS = hasCJK ? 12 : 22;
-  const mainLabel =
-    rawLabel.length > MAX_LABEL_CHARS
-      ? rawLabel.slice(0, MAX_LABEL_CHARS - 1) + "…"
-      : rawLabel;
-  // textLength で「タイル幅に強制圧縮」するのは、自然描画でタイルからはみ出すときだけ。
-  // 英文は自然描画でほぼ収まるので圧縮不要(圧縮すると逆に文字間が広がって不自然になる)。
-  const needsCompression = hasCJK && mainLabel.length > 8;
+  const rawWidth = approxTextWidth(rawLabel, FONT_SIZE);
+  // truncate: 自然描画で LABEL_BUDGET の 1.5 倍を超えるなら末尾を「…」で省略。
+  // 圧縮で何とかなる範囲(< 1.5x)はそのまま見せる(可読性 > 完全フィット)。
+  const TRUNC_LIMIT = LABEL_BUDGET * 1.5;
+  let mainLabel = rawLabel;
+  if (rawWidth > TRUNC_LIMIT) {
+    let acc = 0;
+    let cut = rawLabel.length;
+    for (let i = 0; i < rawLabel.length; i++) {
+      acc += approxTextWidth(rawLabel[i], FONT_SIZE);
+      if (acc > TRUNC_LIMIT - FONT_SIZE) {
+        cut = i;
+        break;
+      }
+    }
+    mainLabel = rawLabel.slice(0, cut) + "…";
+  }
+  // 圧縮 textLength は、自然幅が予算超過のときだけ。
+  const mainWidth = approxTextWidth(mainLabel, FONT_SIZE);
+  const needsCompression = mainWidth > LABEL_BUDGET;
 
   // Drop-shadow を常時、選択時はそれに Teal glow を重ねる(filter 2 個)。
   // 階層(depth)はキャンバスの背景プレーンが担当するので、NodeTile 側では
