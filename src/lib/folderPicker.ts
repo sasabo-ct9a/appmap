@@ -1,5 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { readDir } from "@tauri-apps/plugin-fs";
+import { t, type Language } from "./i18n";
 
 /**
  * フォルダピッカー + ファイル一覧の再帰列挙(Phase 3 Step 3-2)。
@@ -38,12 +39,16 @@ export type FolderPickResult = {
 /**
  * フォルダ選択ダイアログを開き、選んだフォルダ配下のファイル数を再帰カウントする。
  * ユーザーがキャンセルした場合は null を返す。
+ *
+ * v0.1.6: ダイアログタイトルを UI 言語に合わせて切替(EN モードで日本語が出ないように)。
  */
-export async function pickFolderAndListFiles(): Promise<FolderPickResult | null> {
+export async function pickFolderAndListFiles(
+  language: Language = "ja",
+): Promise<FolderPickResult | null> {
   const folder = await open({
     directory: true,
     multiple: false,
-    title: "コードフォルダを選択",
+    title: t(language).ui.folderPickerTitle,
   });
   if (folder === null) return null;
 

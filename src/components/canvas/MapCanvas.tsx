@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 import NodeTile, { NODE_HEIGHT, NODE_WIDTH } from "./NodeTile";
 import Edge from "./Edge";
+import { t, type Language } from "../../lib/i18n";
 
 /**
  * SVG マップ全体(CLAUDE.md §10.5.1、DARK モード、機能拡張:単一 SVG モード)。
@@ -38,6 +39,8 @@ type MapCanvasProps = {
    * 親側で localStorage に保存する責務を持つ。
    */
   onDragOffsetsChange?: (offsets: Record<string, number>) => void;
+  /** v0.1.6: UI 言語(プレーンラベル・aria-label の JA / EN 切替に使用)。 */
+  language: Language;
 };
 
 const PLANE_HEIGHT = 150; // 1 フロアの SVG 内高さ(縦に広めに)
@@ -67,20 +70,6 @@ function planeStrokeColor(depth: number): string {
   return `rgba(229, 231, 235, ${Math.max(0.08, 0.22 - depth * 0.05)})`;
 }
 
-/**
- * 階層プレーンの日本語ラベル(統一版)。
- *
- * 旧:noCodeMode で「主フロー」「主な画面」など切替えていたが、ターゲットユーザー
- * 全員「コードを読みたくない」(§2)前提なので、構造ラベルは常に同じクリーンな
- * 語彙で統一。「フロー」のような技術用語を避け、「メイン/サブ/詳細/深層」に。
- */
-function planeLabel(depth: number): string {
-  if (depth === 0) return "メイン";
-  if (depth === 1) return "サブ";
-  if (depth === 2) return "詳細";
-  return "深層";
-}
-
 function MapCanvas({
   nodes,
   edges,
@@ -89,7 +78,17 @@ function MapCanvas({
   noCodeMode = false,
   dragOffsetsX = {},
   onDragOffsetsChange,
+  language,
 }: MapCanvasProps) {
+  const T = t(language);
+  /**
+   * 階層プレーンのラベル(v0.1.6 以降 i18n 化)。
+   *
+   * 旧:noCodeMode で「主フロー」「主な画面」など切替えていたが、ターゲットユーザー
+   * 全員「コードを読みたくない」(§2)前提なので、構造ラベルは常に同じクリーンな
+   * 語彙で統一。「フロー」のような技術用語を避け、「メイン/サブ/詳細/深層」に。
+   */
+  const planeLabel = (depth: number): string => T.canvas.planeLabel(depth);
   // ───────────────────────────────────────────────────
   // v0.1.2 ドラッグ機能(A 案):同 depth プレーン内で X 軸のみ手動調整
   // ───────────────────────────────────────────────────
@@ -282,7 +281,7 @@ function MapCanvas({
       viewBox={viewBox}
       className="w-full h-auto select-none"
       role="img"
-      aria-label="アプリ構造マップ"
+      aria-label={T.canvas.mapAriaLabel}
     >
       <defs>
         {/* 背景ドットパターン */}
@@ -326,7 +325,7 @@ function MapCanvas({
         const label = planeLabel(d);
         const planeRectWidth = totalWidth - 16;
         return (
-          <g key={`plane-${d}`} aria-label={`${label} 層`}>
+          <g key={`plane-${d}`} aria-label={T.canvas.planeAriaLabel(label)}>
             {/* 床本体 */}
             <rect
               x={8}
@@ -375,7 +374,7 @@ function MapCanvas({
 
       {/* エッジ層:階層を無視して全エッジを直線で繋ぐ。
           cross-depth は edgeMetaById でインデックスを Edge に渡し、起点・終点を分散 */}
-      <g aria-label="リンク線">
+      <g aria-label={T.canvas.edgesAriaLabel}>
         {edges.map((edge) => {
           const meta = edgeMetaById.get(edge.id);
           return (
@@ -394,7 +393,7 @@ function MapCanvas({
 
       {/* ノード層(前面)— noCodeMode を流して userIntent を主表示できるように。
           v0.1.2: onMouseDown でドラッグ開始、onClick は dragMovedRef でフィルタ。 */}
-      <g aria-label="画面一覧">
+      <g aria-label={T.canvas.nodesAriaLabel}>
         {positionedNodes.map((node) => (
           <NodeTile
             key={node.id}
@@ -403,6 +402,7 @@ function MapCanvas({
             onClick={handleNodeClick}
             noCodeMode={noCodeMode}
             onMouseDown={handleNodeMouseDown}
+            language={language}
           />
         ))}
       </g>

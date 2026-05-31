@@ -1,5 +1,6 @@
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 import { annotateText } from "../ui/Tooltip";
+import { t, type Language } from "../../lib/i18n";
 
 /**
  * ノード詳細パネル(CLAUDE.md §10.5.4、DARK モード)。
@@ -30,6 +31,8 @@ type InspectorPanelProps = {
   allEdges: ScreenEdge[];
   onClose: () => void;
   noCodeMode: boolean;
+  /** v0.1.6: UI 言語(セクション見出し・safety バッジの JA/EN 切替に使用)。 */
+  language: Language;
 };
 
 function InspectorPanel({
@@ -38,7 +41,9 @@ function InspectorPanel({
   allEdges,
   onClose,
   noCodeMode,
+  language,
 }: InspectorPanelProps) {
+  const T = t(language);
   if (node === null) return null;
 
   const body = noCodeMode ? node.detail.bodyNoCode : node.detail.body;
@@ -48,11 +53,11 @@ function InspectorPanel({
   // 「DESCRIPTION」のような英語 / 「つながり」のような子供っぽい語は避け、
   // クリーンな Notion / Bubble ネイティブ語彙で統一。
   // noCodeMode の効果は **本文 body の翻訳** のみ。
-  const descriptionLabel = "説明";
-  const relatedLabel = "リンク先";
-  const filesLabel = "対応ファイル";
-  const dataLabel = "使うデータ";
-  const hintLabel = "変更目安";
+  const descriptionLabel = T.inspector.descriptionLabel;
+  const relatedLabel = T.inspector.relatedLabel;
+  const filesLabel = T.inspector.filesLabel;
+  const dataLabel = T.inspector.dataLabel;
+  const hintLabel = T.inspector.hintLabel;
   const files = node.detail.files ?? [];
   const dataUsed = node.detail.dataUsed ?? [];
   const changeHint = node.detail.changeHint;
@@ -62,20 +67,20 @@ function InspectorPanel({
     if (!changeHint) return null;
     if (changeHint.safety === "easy") {
       return {
-        label: "変更しやすい",
+        label: T.inspector.safetyEasy,
         textColor: "text-electric-teal",
         bgColor: "bg-electric-teal/15",
       };
     }
     if (changeHint.safety === "risky") {
       return {
-        label: "影響大",
+        label: T.inspector.safetyRisky,
         textColor: "text-alert-red",
         bgColor: "bg-alert-red/15",
       };
     }
     return {
-      label: "影響を確認",
+      label: T.inspector.safetyNeutral,
       textColor: "text-muted-amber",
       bgColor: "bg-muted-amber/15",
     };
@@ -90,7 +95,7 @@ function InspectorPanel({
   return (
     <aside
       className="w-[360px] bg-slate flex flex-col"
-      aria-label="画面の詳細パネル"
+      aria-label={T.inspector.panelAriaLabel}
     >
       {/* パネルヘッダー */}
       <header className="border-b border-charcoal px-6 py-4 flex items-start justify-between gap-3">
@@ -106,7 +111,7 @@ function InspectorPanel({
         <button
           type="button"
           onClick={onClose}
-          aria-label="閉じる"
+          aria-label={T.inspector.closeAriaLabel}
           className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-[8px] text-soft-grid hover:bg-charcoal transition-colors text-xl leading-none"
         >
           ×
@@ -119,7 +124,7 @@ function InspectorPanel({
         {/* クイックウィン 3: エントリーポイントヒント(この画面から読むと早い) */}
         {node.isEntryPoint && (
           <div className="bg-electric-teal/10 border border-electric-teal/40 rounded-[8px] px-3 py-2 text-xs text-electric-teal">
-            ▶ この画面から理解するとアプリ全体が掴みやすいです
+            {T.inspector.entryPointHint}
           </div>
         )}
 

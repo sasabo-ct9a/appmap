@@ -6,6 +6,7 @@ import {
 } from "../../lib/claudeCli";
 import Button from "./Button";
 import Spinner from "./Spinner";
+import { t, type Language } from "../../lib/i18n";
 
 /**
  * アプリ内ガイド付きセットアップウィザード(機能拡張 Option A)。
@@ -25,6 +26,9 @@ import Spinner from "./Spinner";
  *
  * 全部済んだら null を返してウィザードは消える。状態は親(App.tsx)が
  * onRefresh で再チェックして反映する。
+ *
+ * v0.1.6: 全文言を i18n 化(language prop)。Mac の権限エラーガイダンスや
+ * PATH 反映ラグの説明、エラー分類の親切メッセージも JA / EN で切替。
  */
 type SetupWizardProps = {
   /** Node.js version 文字列。null なら未インストール。 */
@@ -37,6 +41,8 @@ type SetupWizardProps = {
   onRefresh: () => Promise<void>;
   /** Login 完了を親に通知(storage への永続化用)。 */
   onLoginCompleted: () => void;
+  /** v0.1.6: UI 言語。 */
+  language: Language;
 };
 
 function SetupWizard({
@@ -45,7 +51,10 @@ function SetupWizard({
   loginCompletedAt,
   onRefresh,
   onLoginCompleted,
+  language,
 }: SetupWizardProps) {
+  const T = t(language);
+  const W = T.setupWizard;
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
@@ -104,8 +113,7 @@ function SetupWizard({
   };
 
   // Codex review Low #2:npm install のエラーを分類して、ユーザーに短い
-  // 日本語メッセージ + 行動指示 を出す。stderr/stdout の生表示だけだと、
-  // 非エンジニアには判定不能。
+  // メッセージ + 行動指示 を出す。stderr/stdout の生表示だけだと非エンジニアには判定不能。
   type ErrorCategory =
     | { kind: "eacces"; hint: string }
     | { kind: "network"; hint: string }
@@ -117,39 +125,21 @@ function SetupWizard({
   const classifyInstallError = (msg: string): ErrorCategory => {
     const lower = msg.toLowerCase();
     if (/eacces|permission denied/.test(lower)) {
-      return {
-        kind: "eacces",
-        hint: "Mac の権限で書き込めません。下のコマンドをターミナルで実行してください。",
-      };
+      return { kind: "eacces", hint: W.errorEacces };
     }
     if (/enotfound|getaddrinfo|enetunreach|econnreset|etimedout|network/.test(lower)) {
-      return {
-        kind: "network",
-        hint: "ネットワークに繋がっていません。Wi-Fi / 有線 / VPN を確認して、もう一度試してください。",
-      };
+      return { kind: "network", hint: W.errorNetwork };
     }
     if (/proxy|tunnel|407|http_proxy|https_proxy/.test(lower)) {
-      return {
-        kind: "proxy",
-        hint: "Proxy 経由のネットワークでブロックされています。会社・学校ならネット管理者に確認するか、`npm config set proxy <url>` を試してください。",
-      };
+      return { kind: "proxy", hint: W.errorProxy };
     }
     if (/unsupported engine|not satisfied|node\s*>?=|node version/.test(lower)) {
-      return {
-        kind: "engine",
-        hint: "Node.js のバージョンが合いません。nodejs.org から最新の LTS を入れ直してください。",
-      };
+      return { kind: "engine", hint: W.errorEngine };
     }
     if (/e401|e403|registry|unauthorized|forbidden/.test(lower)) {
-      return {
-        kind: "registry",
-        hint: "npm レジストリの認証で弾かれました。`npm logout` のあと再試行するか、private registry 設定を確認してください。",
-      };
+      return { kind: "registry", hint: W.errorRegistry };
     }
-    return {
-      kind: "generic",
-      hint: "想定外のエラーです。下のメッセージをコピーして作者に共有してください。",
-    };
+    return { kind: "generic", hint: W.errorGeneric };
   };
 
   const errorCategory =
@@ -159,11 +149,9 @@ function SetupWizard({
   return (
     <div className="bg-slate border border-charcoal rounded-[14px] p-5 mb-6">
       <div className="flex items-baseline justify-between gap-3 mb-4">
-        <h2 className="text-base font-semibold text-off-white">
-          AppMap を使う準備
-        </h2>
+        <h2 className="text-base font-semibold text-off-white">{W.title}</h2>
         <span className="text-xs text-soft-grid">
-          {completedCount} / 3 完了
+          {W.progress(completedCount)}
         </span>
       </div>
 
@@ -171,44 +159,50 @@ function SetupWizard({
         {/* Step 1: Node.js */}
         <Step
           number={1}
-          title="Node.js"
-          description="AppMap が裏で使うプログラムの土台です"
+          title={W.step1Title}
+          description={W.step1Description}
           done={nodeOk}
           doneDetail={nodeVersion ?? ""}
+          stepDoneLabel={W.stepDone}
+          detailsLogSummary={W.detailsLogSummary}
+          language={language}
           action={
             nodeOk ? null : (
               <Button variant="secondary" onClick={handleOpenNodejs}>
-                Node.js を入手
+                {W.step1ActionLabel}
               </Button>
             )
           }
-          hint={nodeOk ? null : "ボタンを押すと nodejs.org が開きます。LTS をインストールしたら、AppMap をいったん閉じて再起動してください。"}
+          hint={nodeOk ? null : W.step1Hint}
         />
 
         {/* Step 2: Claude Code CLI */}
         <Step
           number={2}
-          title="Claude Code CLI"
-          description="AppMap と Claude を繋ぐツール"
+          title={W.step2Title}
+          description={W.step2Description}
           done={claudeOk}
           doneDetail={claudeVersion ?? ""}
           running={installing}
+          stepDoneLabel={W.stepDone}
+          detailsLogSummary={W.detailsLogSummary}
+          language={language}
           action={
             claudeOk ? null : (
               <Button
                 onClick={handleInstall}
                 disabled={!nodeOk || installing}
               >
-                {installing ? "インストール中…" : "インストール"}
+                {installing ? W.step2InstallingLabel : W.step2InstallLabel}
               </Button>
             )
           }
           hint={
             !nodeOk
-              ? "(先に Node.js を入れてください)"
+              ? W.step2HintNeedNode
               : claudeOk
                 ? null
-                : "30 秒〜数分かかります。"
+                : W.step2HintTime
           }
           error={installError && !isEacces ? installError : null}
           errorHint={
@@ -222,21 +216,22 @@ function SetupWizard({
         {showPathLagHint && (
           <div className="ml-9 bg-charcoal rounded-[8px] p-3 text-xs space-y-2">
             <div className="text-muted-amber font-semibold">
-              ⚠ インストールは完了しましたが、AppMap からまだ Claude Code が見えません
+              {W.pathLagHeader}
             </div>
             <div className="text-soft-grid leading-relaxed">
-              npm のグローバルパス反映に時間がかかっていることがあります。
-              下記のいずれかを試してください:
+              {W.pathLagIntro}
             </div>
             <ul className="text-soft-grid leading-relaxed list-disc ml-4 space-y-1">
-              <li>AppMap をいったん閉じて再起動</li>
+              <li>{W.pathLagBullet1}</li>
               <li>
-                ターミナルで <code className="bg-slate px-1 rounded">claude --version</code>{" "}
-                が動くか確認(動かなければ別シェルを開いて再試行)
+                {W.pathLagBullet2Prefix}
+                <code className="bg-slate px-1 rounded">claude --version</code>
+                {W.pathLagBullet2Suffix}
               </li>
               <li>
-                <code className="bg-slate px-1 rounded">npm config get prefix</code>{" "}
-                の出力が PATH に含まれているか確認
+                {W.pathLagBullet3Prefix}
+                <code className="bg-slate px-1 rounded">npm config get prefix</code>
+                {W.pathLagBullet3Suffix}
               </li>
             </ul>
           </div>
@@ -246,56 +241,53 @@ function SetupWizard({
         {isEacces && (
           <div className="ml-9 bg-charcoal rounded-[8px] p-3 text-xs space-y-2">
             <div className="text-alert-red font-semibold">
-              ⚠ 権限エラー(Mac)
+              {W.eaccesHeader}
             </div>
             <div className="text-soft-grid leading-relaxed">
-              Mac の権限の都合で、自動インストールに失敗しました。
-              <br />
-              ターミナルを開いて、以下を <strong>コピペして</strong> 実行してください
-              (途中で Mac のパスワードを聞かれます):
+              {W.eaccesBody}{" "}
+              <strong>{W.eaccesPasteHint}</strong>
             </div>
             <code className="block bg-slate p-2 rounded-[4px] text-off-white font-mono select-text text-xs">
               sudo npm install -g @anthropic-ai/claude-code
             </code>
-            <div className="text-soft-grid text-xs">
-              完了したら AppMap を再起動してください。
-            </div>
+            <div className="text-soft-grid text-xs">{W.eaccesFooter}</div>
           </div>
         )}
 
         {/* Step 3: Claude ログイン */}
         <Step
           number={3}
-          title="Claude にログイン"
-          description="ブラウザで Claude Pro / Max アカウントを認証"
+          title={W.step3Title}
+          description={W.step3Description}
           done={authOk}
-          doneDetail="ログイン済み"
+          doneDetail={W.step3DoneDetail}
           running={loggingIn}
+          stepDoneLabel={W.stepDone}
+          detailsLogSummary={W.detailsLogSummary}
+          language={language}
           action={
             authOk ? null : (
               <Button
                 onClick={handleLogin}
                 disabled={!claudeOk || loggingIn}
               >
-                {loggingIn ? "ブラウザで認証中…" : "ログイン"}
+                {loggingIn ? W.step3LoggingInLabel : W.step3LoginLabel}
               </Button>
             )
           }
           hint={
             !claudeOk
-              ? "(先に Claude Code CLI を入れてください)"
+              ? W.step3HintNeedClaude
               : authOk
                 ? null
-                : "ボタンを押すとブラウザが開きます。Anthropic のログイン画面で Claude Pro / Max アカウントを認証してください。"
+                : W.step3HintReady
           }
           error={loginError}
         />
       </div>
 
       {nodeOk && claudeOk && !authOk && (
-        <div className="mt-4 text-xs text-soft-grid">
-          ここまで完了したら、「フォルダを選ぶ」が使えるようになります。
-        </div>
+        <div className="mt-4 text-xs text-soft-grid">{W.finalHint}</div>
       )}
     </div>
   );
@@ -310,6 +302,12 @@ type StepProps = {
   running?: boolean;
   action: React.ReactNode;
   hint: string | null;
+  /** v0.1.6: 「完了」相当の aria-label を i18n から流す。 */
+  stepDoneLabel: string;
+  /** v0.1.6: <details> サマリー文言を i18n から流す。 */
+  detailsLogSummary: string;
+  /** v0.1.6: Spinner の aria-label を切替えるための言語。 */
+  language: Language;
   /**
    * エラー本文(生 stderr / message)。アクセシビリティのため role="alert"。
    * Low #3 対応:role="alert" + aria-live で支援技術にも届く。
@@ -317,7 +315,7 @@ type StepProps = {
   error?: string | null;
   /**
    * Low #2 対応:エラー分類で得た人間向け短いメッセージ。生 error は折りたたみで
-   * 別途見せて、上には親切な日本語を出す。
+   * 別途見せて、上には親切なメッセージを出す。
    */
   errorHint?: string | null;
 };
@@ -331,6 +329,9 @@ function Step({
   running,
   action,
   hint,
+  stepDoneLabel,
+  detailsLogSummary,
+  language,
   error,
   errorHint,
 }: StepProps) {
@@ -343,11 +344,11 @@ function Step({
       {/* ステータスアイコン */}
       <div className="flex-shrink-0 w-6 h-6 mt-0.5 flex items-center justify-center text-sm">
         {done ? (
-          <span className="text-electric-teal" aria-label="完了">
+          <span className="text-electric-teal" aria-label={stepDoneLabel}>
             ✓
           </span>
         ) : running ? (
-          <Spinner className="w-4 h-4 text-electric-teal" />
+          <Spinner className="w-4 h-4 text-electric-teal" language={language} />
         ) : (
           <span className="text-soft-grid">{number}</span>
         )}
@@ -372,7 +373,7 @@ function Step({
             role="alert"
             aria-live="polite"
           >
-            {/* 日本語の親切メッセージ(Low #2) */}
+            {/* 親切メッセージ(Low #2) */}
             {errorHint && (
               <div className="bg-alert-red/15 rounded-[8px] p-2 text-xs text-off-white leading-relaxed">
                 {errorHint}
@@ -381,7 +382,7 @@ function Step({
             {/* 生のエラー(コピー用) */}
             <details className="bg-charcoal rounded-[8px] p-2 text-xs">
               <summary className="text-soft-grid cursor-pointer select-none">
-                詳細ログ(コピー可)
+                {detailsLogSummary}
               </summary>
               <pre className="text-alert-red font-mono whitespace-pre-wrap select-text mt-2 leading-relaxed">
                 {error}

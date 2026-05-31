@@ -1,4 +1,5 @@
 import type { ScreenNode } from "../../types/screen";
+import { t, type Language } from "../../lib/i18n";
 
 /**
  * 1 ノード分の SVG 描画(CLAUDE.md §10.5.2、DARK モード、Phase 3 polish v3)。
@@ -40,6 +41,8 @@ type NodeTileProps = {
    * 親側で document 全体の mousemove / mouseup を捕捉してドラッグ処理する設計。
    */
   onMouseDown?: (e: React.MouseEvent, nodeId: number) => void;
+  /** v0.1.6: UI 言語(エントリーポイントバッジの JA/EN 切替に使用)。 */
+  language: Language;
 };
 
 function NodeTile({
@@ -49,7 +52,13 @@ function NodeTile({
   gradientId = "node-gradient",
   noCodeMode = false,
   onMouseDown,
+  language,
 }: NodeTileProps) {
+  const T = t(language);
+  // EN の「▶ Start here」は JA の「▶ まずここ」より文字数が多いので、
+  // バッジ幅・テキスト位置を動的に決める。
+  const badgeText = T.nodeTile.entryPointBadge;
+  const badgeWidth = badgeText.length * 5.6 + 18; // ざっくり横幅 (5.6px/char + padding)
   const x = node.position.x;
   const y = node.position.y;
   const cx = x + NODE_WIDTH / 2;
@@ -57,14 +66,21 @@ function NodeTile({
   // クイックウィン 2: noCodeMode かつ userIntent あり → userIntent を主表示。
   // それ以外は技術的 label を表示。
   // Codex review Med #5 対応:長すぎる文字列でタイル(140px)からはみ出すのを防ぐ。
-  // 12 文字超は末尾を「…」で省略。短いラベルはそのまま。
-  const MAX_LABEL_CHARS = 12;
+  //
+  // v0.1.6 修正:CJK か Latin かでしきい値を切替。
+  //   - CJK は 1 文字 ≈ 1em(13px)で 12 字 ≈ 156px → タイル(140)からはみ出すので 12 字で truncate
+  //   - Latin は 1 文字 ≈ 0.5em(6-7px)で 22 字 ≈ 140px → 22 字まで OK
   const rawLabel =
     noCodeMode && node.userIntent ? node.userIntent : node.label;
+  const hasCJK = /[　-鿿＀-￯]/.test(rawLabel);
+  const MAX_LABEL_CHARS = hasCJK ? 12 : 22;
   const mainLabel =
     rawLabel.length > MAX_LABEL_CHARS
       ? rawLabel.slice(0, MAX_LABEL_CHARS - 1) + "…"
       : rawLabel;
+  // textLength で「タイル幅に強制圧縮」するのは、自然描画でタイルからはみ出すときだけ。
+  // 英文は自然描画でほぼ収まるので圧縮不要(圧縮すると逆に文字間が広がって不自然になる)。
+  const needsCompression = hasCJK && mainLabel.length > 8;
 
   // Drop-shadow を常時、選択時はそれに Teal glow を重ねる(filter 2 個)。
   // 階層(depth)はキャンバスの背景プレーンが担当するので、NodeTile 側では
@@ -142,25 +158,26 @@ function NodeTile({
         fontSize="13"
         fontWeight="500"
         lengthAdjust="spacingAndGlyphs"
-        textLength={mainLabel.length > 8 ? NODE_WIDTH - 24 : undefined}
+        textLength={needsCompression ? NODE_WIDTH - 24 : undefined}
       >
         {rawLabel !== mainLabel && <title>{rawLabel}</title>}
         {mainLabel}
       </text>
-      {/* クイックウィン 3: エントリーポイントの「▶ まずここ」マーカー(ノード上端外側) */}
+      {/* クイックウィン 3: エントリーポイントのバッジ(ノード上端外側)。
+          v0.1.6: 文字数に応じて幅と位置を動的計算(EN は JA より長い)。 */}
       {node.isEntryPoint && (
         <g pointerEvents="none">
           <rect
-            x={x + NODE_WIDTH - 64}
+            x={x + NODE_WIDTH - badgeWidth - 4}
             y={y - 14}
-            width={60}
+            width={badgeWidth}
             height={14}
             rx={7}
             className="fill-electric-teal"
             opacity="0.95"
           />
           <text
-            x={x + NODE_WIDTH - 34}
+            x={x + NODE_WIDTH - badgeWidth / 2 - 4}
             y={y - 7}
             textAnchor="middle"
             dominantBaseline="middle"
@@ -168,7 +185,7 @@ function NodeTile({
             fontSize="9"
             fontWeight="700"
           >
-            ▶ まずここ
+            {badgeText}
           </text>
         </g>
       )}

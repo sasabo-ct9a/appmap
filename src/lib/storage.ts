@@ -1,4 +1,6 @@
 import type { ScreenMapResult } from "./claudeCli";
+import type { Language } from "./i18n";
+import { asLanguage } from "./i18n";
 
 /**
  * 分析結果の localStorage 永続化(Phase 3 Step 機能拡張 A)。
@@ -36,6 +38,13 @@ export type StoredAnalysis = {
    *   - 新規 AI 分析(同じ folder の再分析)で上書き保存される際にもクリア
    */
   dragOffsetsX?: Record<string, number>;
+  /**
+   * v0.1.6 追加(必須化):このエントリを分析したときの UI 言語。
+   * EN モード時は JA エントリを履歴・タブ・現在表示から完全に除外し、
+   * 英語圏ユーザーが日本語データを目にしないようにする。
+   * 旧 v0.1.5 以前のデータは load 時に "ja" でバックフィルされる。
+   */
+  language: Language;
 };
 
 type AppMapStore = {
@@ -54,6 +63,12 @@ type AppMapStore = {
    * 履歴に存在しないパスは load 時に弾く。
    */
   openTabFolderPaths?: string[];
+  /**
+   * v0.1.6 UI 言語(英日切替トグル、ノーコード語の左)。
+   * 不正値や未保存時は asLanguage() で "ja" に fallback。
+   * AI プロンプトもこの設定に従って JA / EN を切替える。
+   */
+  language?: Language;
 };
 
 const EMPTY: AppMapStore = {
@@ -62,7 +77,10 @@ const EMPTY: AppMapStore = {
   currentFolderPath: null,
 };
 
-/** localStorage から読み出し、壊れていれば空状態を返す。 */
+/** localStorage から読み出し、壊れていれば空状態を返す。
+ *
+ *  v0.1.6 改修:旧 v0.1.5 以前のエントリ(language 欠落)を "ja" でバックフィル。
+ *  これで上位レイヤーは StoredAnalysis.language が常に存在する前提で書ける。 */
 export function loadStore(): AppMapStore {
   if (typeof window === "undefined") return EMPTY;
   try {
@@ -75,7 +93,13 @@ export function loadStore(): AppMapStore {
       (parsed as AppMapStore).version === 1 &&
       Array.isArray((parsed as AppMapStore).history)
     ) {
-      return parsed as AppMapStore;
+      const store = parsed as AppMapStore;
+      // 旧データには language が無い。"ja" 固定で埋める(v0.1.5 以前は JA プロンプトのみ)
+      const backfilledHistory = store.history.map((e) => ({
+        ...e,
+        language: asLanguage(e.language),
+      }));
+      return { ...store, history: backfilledHistory };
     }
   } catch (err) {
     console.warn("[AppMap] localStorage load failed:", err);
@@ -128,6 +152,18 @@ export function removeAnalysis(folderPath: string): void {
 export function markLoginCompleted(): void {
   const store = loadStore();
   saveStore({ ...store, loginCompletedAt: Date.now() });
+}
+
+/** v0.1.6 UI 言語を永続化。次回起動時 loadLanguage() で復元される。 */
+export function saveLanguage(language: Language): void {
+  const store = loadStore();
+  saveStore({ ...store, language });
+}
+
+/** v0.1.6 保存済み UI 言語を取り出す。未保存・不正値はすべて "ja" になる。 */
+export function loadLanguage(): Language {
+  const store = loadStore();
+  return asLanguage(store.language);
 }
 
 /**

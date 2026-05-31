@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { StoredAnalysis } from "../../lib/storage";
+import { t, type Language } from "../../lib/i18n";
 
 /**
  * 過去の分析結果を切り替える dropdown(機能拡張 A、Phase 3)。
@@ -8,12 +9,15 @@ import type { StoredAnalysis } from "../../lib/storage";
  * - 各エントリ:フォルダ末尾 2 階層 + 経過時間(相対表記)+ コスト + 削除 ×
  * - 現在表示中のものを Teal ドットで強調
  * - 履歴が空のときはボタン自体を disable
+ *
+ * v0.1.6: language を受けて表示文言と相対時刻表記を JA / EN 切替。
  */
 type HistoryDropdownProps = {
   history: StoredAnalysis[];
   currentFolderPath: string | null;
   onSelect: (entry: StoredAnalysis) => void;
   onRemove: (folderPath: string) => void;
+  language: Language;
 };
 
 function shortFolder(path: string): string {
@@ -25,13 +29,14 @@ function shortFolder(path: string): string {
   return tail.length > 40 ? "…" + tail.slice(-39) : tail;
 }
 
-function relativeTime(timestamp: number): string {
+function relativeTime(timestamp: number, language: Language): string {
+  const T = t(language);
   const diffSec = Math.floor((Date.now() - timestamp) / 1000);
-  if (diffSec < 60) return "たった今";
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分前`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 時間前`;
-  if (diffSec < 86400 * 7) return `${Math.floor(diffSec / 86400)} 日前`;
-  // 1 週間以上前は yyyy/MM/dd
+  if (diffSec < 60) return T.history.justNow;
+  if (diffSec < 3600) return T.history.minutesAgo(Math.floor(diffSec / 60));
+  if (diffSec < 86400) return T.history.hoursAgo(Math.floor(diffSec / 3600));
+  if (diffSec < 86400 * 7) return T.history.daysAgo(Math.floor(diffSec / 86400));
+  // 1 週間以上前は yyyy/MM/dd(両言語で同じフォーマット)
   const d = new Date(timestamp);
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
 }
@@ -41,9 +46,11 @@ function HistoryDropdown({
   currentFolderPath,
   onSelect,
   onRemove,
+  language,
 }: HistoryDropdownProps) {
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const T = t(language);
 
   // 外側クリックで閉じる
   useEffect(() => {
@@ -73,10 +80,10 @@ function HistoryDropdown({
             ? "border-charcoal text-soft-grid/50 cursor-not-allowed"
             : "border-soft-grid text-off-white hover:bg-charcoal cursor-pointer"
         }`}
-        aria-label="分析履歴"
+        aria-label={T.history.buttonAriaLabel}
         aria-expanded={open}
       >
-        履歴 ({history.length}) ▾
+        {T.history.button(history.length)}
       </button>
 
       {open && history.length > 0 && (
@@ -87,6 +94,7 @@ function HistoryDropdown({
           <ul className="max-h-80 overflow-y-auto py-1">
             {history.map((entry) => {
               const isCurrent = entry.folderPath === currentFolderPath;
+              const short = shortFolder(entry.folderPath);
               return (
                 <li key={entry.folderPath} role="menuitem">
                   <div
@@ -113,15 +121,15 @@ function HistoryDropdown({
                         className="text-sm text-off-white truncate font-mono"
                         title={entry.folderPath}
                       >
-                        {shortFolder(entry.folderPath)}
+                        {short}
                       </div>
                       <div className="text-xs text-soft-grid mt-0.5">
-                        {relativeTime(entry.analyzedAt)}
+                        {relativeTime(entry.analyzedAt, language)}
                         {entry.costUsd !== null && (
                           <> · ${entry.costUsd.toFixed(4)}</>
                         )}
                         {" · "}
-                        {entry.screens.nodes.length} 画面
+                        {T.history.screens(entry.screens.nodes.length)}
                       </div>
                     </div>
 
@@ -132,7 +140,7 @@ function HistoryDropdown({
                         onRemove(entry.folderPath);
                       }}
                       className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-[8px] text-soft-grid hover:bg-alert-red/20 hover:text-alert-red transition-colors text-base leading-none"
-                      aria-label={`${shortFolder(entry.folderPath)} を履歴から削除`}
+                      aria-label={T.history.removeAriaLabel(short)}
                     >
                       ×
                     </button>

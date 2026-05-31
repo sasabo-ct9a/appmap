@@ -1,4 +1,5 @@
 import type { ScreenNode, ScreenEdge } from "../types/screen";
+import type { Language } from "../lib/i18n";
 
 /**
  * Phase 2 用のハードコードサンプル(全 5 ノード + 4 エッジ)。
@@ -11,12 +12,20 @@ import type { ScreenNode, ScreenEdge } from "../types/screen";
  *   - depth 1(サブ画面)= 詳細パネル / 設定
  *   - y 座標は MapCanvas 側で depth から自動計算するので、ここで指定する y 値は
  *     互換のための残骸(意味は無い)。x と depth のみが効く。
+ *
+ * v0.1.6: JA / EN の 2 言語版を持ち、UI 言語に応じて選択する。
+ *   - getSampleScreens(language) で取得
+ *   - ノード id・座標・depth・edges は両言語で完全同一(構造は不変)
+ *   - 翻訳されるのはテキストフィールドだけ(label / userIntent / title / body / 等)
  */
-export const sampleScreens: {
+
+type SampleData = {
   nodes: ScreenNode[];
   edges: ScreenEdge[];
   appSummary: string;
-} = {
+};
+
+const sampleScreensJa: SampleData = {
   appSummary:
     "これは「AI で作ったアプリ」を 1 枚の地図に変換するデスクトップアプリです。フォルダを選ぶと AI が画面構造を読み取り、画面同士の繋がりとそれぞれの説明をマップ表示します。",
   nodes: [
@@ -144,3 +153,137 @@ export const sampleScreens: {
     { id: "3-5", from: 3, to: 5, bidirectional: true },
   ],
 };
+
+const sampleScreensEn: SampleData = {
+  appSummary:
+    "This is a desktop app that turns an AI-built application into a single map. Pick a folder and the AI reads the screen structure, then renders the screens and the links between them with short descriptions.",
+  nodes: [
+    {
+      id: 1,
+      label: "Pick folder",
+      userIntent: "Pick an app",
+      isEntryPoint: true,
+      position: { x: 50, y: 50 },
+      depth: 0,
+      detail: {
+        title: "Pick-folder screen",
+        body: "Entry point. Pick a local folder and hand it to AppMap. Uses the Tauri file API to open the directory.",
+        bodyNoCode:
+          "The starting screen, where you pick a folder for AppMap to read. It's similar to uploading a file in Bubble or Notion, except you hand over a whole folder, not a single file.",
+        files: [
+          "src/lib/folderPicker.ts",
+          "src/components/ui/Button.tsx",
+        ],
+        dataUsed: ["Folder path", "File list inside"],
+        changeHint: {
+          safety: "easy",
+          note: "Button text and styling are easy to change. Be a bit careful when touching the file-picker dialog itself.",
+        },
+      },
+    },
+    {
+      id: 2,
+      label: "Analyzing",
+      userIntent: "Wait for the AI",
+      position: { x: 330, y: 50 },
+      depth: 0,
+      detail: {
+        title: "Analysis (loading)",
+        body: "Sends the chosen folder to the Claude API and waits for the map JSON to come back. Shows progress and an estimated time remaining.",
+        bodyNoCode:
+          "After you hand a folder to the AI, this screen waits for the analysis to come back. While it runs you see a spinner and the elapsed time. It's the same role as the waiting screen while a workflow runs in Bubble.",
+        files: [
+          "src/lib/claudeCli.ts",
+          "src-tauri/src/lib.rs",
+          "src/components/ui/Spinner.tsx",
+        ],
+        dataUsed: ["Analysis progress", "Elapsed time", "Cost"],
+        changeHint: {
+          safety: "neutral",
+          note: "The visuals are easy to tweak, but touching the AI communication logic affects every screen.",
+        },
+      },
+    },
+    {
+      id: 3,
+      label: "Map overview",
+      userIntent: "See the whole picture",
+      position: { x: 610, y: 50 },
+      depth: 0,
+      detail: {
+        title: "Map overview (center)",
+        body: "The core of AppMap. See the whole structure as screen nodes and relation lines. Click a node to open the detail panel.",
+        bodyNoCode:
+          "The main screen where you see the whole app's structure on one page. Click any screen and a detail panel opens on the right. The feeling is close to surveying an app at a glance in Bubble or Notion.",
+        files: [
+          "src/components/canvas/MapCanvas.tsx",
+          "src/components/canvas/NodeTile.tsx",
+          "src/components/canvas/Edge.tsx",
+          "src/App.tsx",
+        ],
+        dataUsed: ["Screen list", "Links between screens", "App summary"],
+        changeHint: {
+          safety: "risky",
+          note: "This is the heart of the app. Layout changes here ripple into almost every other screen.",
+        },
+      },
+    },
+    {
+      id: 4,
+      label: "Detail panel",
+      userIntent: "Look at one screen in depth",
+      position: { x: 190, y: 230 },
+      depth: 1,
+      detail: {
+        title: "Screen detail panel",
+        body: "Opens on the right when you click a node. Shows title, description, and related nodes. Close it to go back to the overview.",
+        bodyNoCode:
+          "Shows the details of the screen you picked on the main map, on the right side. You see a description, the files involved, and the screens it links to. It plays the same role as the detail pane that opens on the right when you select an item in Bubble or Notion.",
+        files: [
+          "src/components/inspector/InspectorPanel.tsx",
+          "src/components/ui/Tooltip.tsx",
+          "src/lib/glossary.ts",
+        ],
+        dataUsed: ["Detail for the picked screen", "Related screens", "Matching files"],
+        changeHint: {
+          safety: "easy",
+          note: "Wording and item order inside the panel are safe to change.",
+        },
+      },
+    },
+    {
+      id: 5,
+      label: "Settings",
+      userIntent: "Tweak the app",
+      position: { x: 470, y: 230 },
+      depth: 1,
+      detail: {
+        title: "Settings screen",
+        body: "Plain-words toggle, API key, display theme, and so on. A standalone screen you enter and leave from the map.",
+        bodyNoCode:
+          "A screen for adjusting how the whole app behaves. You can toggle plain-words mode, switch the display theme, browse past analyses, and so on. It's the same kind of place as the settings page in Bubble or Notion.",
+        files: [
+          "src/components/layout/Header.tsx",
+          "src/lib/storage.ts",
+          "src/components/ui/HistoryDropdown.tsx",
+        ],
+        dataUsed: ["Plain-words mode on/off", "Analysis history"],
+        changeHint: {
+          safety: "neutral",
+          note: "Adding or removing settings means you also have to touch the screens that use them.",
+        },
+      },
+    },
+  ],
+  edges: [
+    { id: "1-2", from: 1, to: 2 },
+    { id: "2-3", from: 2, to: 3 },
+    { id: "3-4", from: 3, to: 4, bidirectional: true },
+    { id: "3-5", from: 3, to: 5, bidirectional: true },
+  ],
+};
+
+/** v0.1.6: UI 言語に応じてサンプルマップを返す。 */
+export function getSampleScreens(language: Language): SampleData {
+  return language === "en" ? sampleScreensEn : sampleScreensJa;
+}

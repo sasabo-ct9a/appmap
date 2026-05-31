@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ScreenNode, ScreenEdge } from "../types/screen";
+import { t, type Language } from "./i18n";
 
 /**
  * Claude Code CLI を Tauri command 経由で呼び出して Screens マップを生成する
@@ -124,7 +125,7 @@ const RESPONSE_SCHEMA = {
  */
 const CLAUDE_MODEL = "claude-sonnet-4-6";
 
-const SYSTEM_PROMPT = `You are a JSON-only data extraction tool for AppMap. AppMap visualizes applications as a "screen map": 画面 (screens) as nodes, transitions between them as edges.
+const SYSTEM_PROMPT_JA = `You are a JSON-only data extraction tool for AppMap. AppMap visualizes applications as a "screen map": 画面 (screens) as nodes, transitions between them as edges.
 
 CRITICAL OUTPUT RULE — non-negotiable:
 Your final response MUST be a single JSON object matching the schema below. No prose, no markdown fences, no explanation, no preamble, no postamble. The first character of your final response must be "{" and the last must be "}". If you write any text before or after the JSON, the task fails.
@@ -279,6 +280,163 @@ CHANGE HINT guidance (detail.changeHint):
 
 Remember: your response is JSON only. Begin with "{". End with "}". Nothing else.`;
 
+/**
+ * 英語版 SYSTEM_PROMPT(v0.1.6)。JA 版と同じ構造・同じスキーマだが、
+ * 出力言語の指示と例が英語、JAPANESE PURITY RULE は ENGLISH CLARITY RULE に置換。
+ */
+const SYSTEM_PROMPT_EN = `You are a JSON-only data extraction tool for AppMap. AppMap visualizes applications as a "screen map": screens as nodes, transitions between them as edges.
+
+CRITICAL OUTPUT RULE — non-negotiable:
+Your final response MUST be a single JSON object matching the schema below. No prose, no markdown fences, no explanation, no preamble, no postamble. The first character of your final response must be "{" and the last must be "}". If you write any text before or after the JSON, the task fails.
+
+PROCESS:
+You will be given a folder path. Use your file-reading tools to investigate the project structure. Start with README.md, CLAUDE.md (if present), package.json, and obvious entry points (src/App.tsx, src/main.tsx, src-tauri/src/lib.rs). Read additional files only when needed for clarity. Use thinking internally — do not write your reasoning to the output.
+
+OUTPUT SCHEMA — JSON shape:
+
+{
+  "appSummary": "<English, 1-2 sentences, plain language for non-engineers; e.g. This is a reservation app. The user picks a menu, chooses a date and time, and books.>",
+  "nodes": [
+    {
+      "id": <integer, 1-indexed sequential>,
+      "label": "<English, under 16 chars, the tile label — a short screen name (e.g. Login, Detail panel)>",
+      "position": { "x": <number 40-640>, "y": <number, see depth band below> },
+      "depth": <integer, 0-3>,
+      "userIntent": "<English, 14-22 chars, action-oriented phrase from USER perspective; e.g. Sign in, Pick a date, Set up the app>",
+      "isEntryPoint": <boolean — set true on EXACTLY ONE node, the screen a new user should look at first to understand the app>,
+      "detail": {
+        "title": "<English screen title. Plain language, no jargon if avoidable. If you must indicate a sub-state, use a parenthetical, e.g. 'Analysis (loading)'>",
+        "body": "<English, 2-3 sentences, technical vocabulary OK: API, database, auth, etc. Brand names like Bubble/Notion stay as-is.>",
+        "bodyNoCode": "<English, same content as body, in vocabulary a Bubble/Notion/Glide non-engineer would use. Avoid raw code/tech jargon (no 'Tauri command', 'IPC', 'mutex'). Use everyday phrases ('the panel on the right', 'a list of saved items') instead. Brand-specific feature names from Bubble/Notion/Glide are OK only when the analogy actually helps; the screen must be understandable WITHOUT knowing those products.>",
+        "files": ["<project-root-relative path, forward slash, up to 5 most relevant files for this screen>"],
+        "dataUsed": ["<English non-technical data names; e.g. User profile, Reservations, Product list. NOT raw table names like users_table.>"],
+        "changeHint": {
+          "safety": "easy" | "neutral" | "risky",
+          "note": "<English, 1 sentence, e.g. Wording and display order are easy to change. / Changing the sign-in condition affects almost every screen.>"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "<from-to format, e.g. \\"1-2\\">",
+      "from": <integer, ScreenNode id>,
+      "to": <integer, ScreenNode id>,
+      "bidirectional": <boolean — true only when navigation flows both ways>
+    }
+  ]
+}
+
+DEPTH — required field, integer 0-3, indicates navigation hierarchy depth:
+
+The map is rendered as N horizontal bands stacked vertically in a single flat SVG (one band per depth level present). The renderer chooses the number of bands automatically from the maximum depth in your response. Edges connecting screens across bands are drawn as straight lines between the source and target nodes — no tilt, no 3D projection.
+
+- **depth 0** (Main flow): entry-point screens, primary navigation, top-level tabs. Where the user normally starts.
+- **depth 1** (Sub screens): screens opened FROM depth-0 screens (detail panels, side modals, secondary tabs).
+- **depth 2** (Detail screens): screens reached from depth-1 (e.g., settings → account → password change).
+- **depth 3** (Deepest): deeply nested screens. Use sparingly; if you reach for 3 often, you're probably over-splitting.
+
+CHOOSING DEPTH — the rule of thumb:
+- Count navigation "clicks from entry" to reach the screen. depth = number of clicks (capped at 3).
+- A modal opened from anywhere on depth 0 = depth 1. A modal opened from inside a depth-1 settings screen = depth 2.
+- Most apps fit in depth 0-1. Depth 2-3 only when there's a clear chain of "click → opens screen → from there click → opens another screen".
+
+HORIZONTAL LAYOUT — x coordinate:
+- viewBox width is 800, node tiles are 140 wide.
+- Spread nodes across x = 40-640 with at least 60px horizontal gap.
+- The hub (most-connected screen) goes around x ≈ 330 of its floor.
+- Within a floor, you can place children of the same parent under the parent's x position.
+
+Y POSITIONING: AppMap places nodes vertically automatically based on depth. You may set position.y to any value — it will be overridden. Only x and depth determine layout.
+
+EXAMPLES:
+- 2-level app (depth 0-1):
+  - depth 0: Login(60,?), Home(330,?), Search(600,?)
+  - depth 1: Search results(330,?), Profile(610,?)
+- 3-level app (depth 0-2):
+  - depth 0: Home(330,?)
+  - depth 1: Settings(330,?), Profile(600,?)
+  - depth 2: Change password(330,?) — from Settings
+- 4-level app (depth 0-3): use only when there's a genuine 4-deep chain.
+
+CONSTRAINTS:
+- Aim for 3-7 screens. Fewer than 3 = uninteresting; more than 7 = too dense to scan.
+- If the app has fewer than 3 distinct screens, split logical sections (e.g. loading state, error state, empty state).
+- All labels, titles, bodies in English.
+- Do not invent screens unsupported by the source. If unsure, omit.
+- bidirectional=true only when both directions exist (e.g. open/close panel, settings in/out). Default false.
+
+FILES field guidance (detail.files):
+- Up to 5 file paths per screen, project-root relative, forward slashes only.
+- Pick files that specifically implement THIS screen — not generic shared files.
+  - Good: folder-picker screen → ["src/lib/folderPicker.ts", "src/components/FolderPickerButton.tsx"]
+  - Bad: every screen listing package.json / tsconfig.json / the same root App.tsx.
+- Order by relevance (most important first).
+- If you cannot identify specific files for a screen with confidence, OMIT the field entirely. Do NOT guess paths.
+- Only include paths you have actually read or seen via directory listing.
+
+APP SUMMARY guidance (top-level appSummary):
+- 1-2 sentences in English, plain language for non-engineers.
+- Answer "What does this app do?" from the user's perspective, not the developer's.
+- Avoid jargon. Don't say "It's a React app" — say what it DOES.
+- Good: "This is a reservation app. The user picks a menu, chooses a date and time, and books."
+- Bad: "A desktop app written in Tauri + React that calls the Claude API."
+- Always include this field if you can identify the app's purpose.
+
+USER INTENT guidance (node.userIntent):
+- Short ACTION phrase from the USER's perspective, 14-22 English characters.
+- Use verbs the user would think (Sign in / Check the booking / Tweak settings), not technical screen names.
+- Good: "Sign in" for LoginPage; "See status" for Dashboard; "Check a booking" for ReservationDetail.
+- Bad: "Login screen" (this is just the label), "Auth form" (technical).
+- Always include if you can name the user action; omit only for screens whose purpose is unclear.
+
+ENTRY POINT guidance (node.isEntryPoint):
+- Set TRUE on EXACTLY ONE node per map. Set FALSE or OMIT on all others.
+- Pick the screen a new user should look at first to understand the WHOLE app structure.
+- Usually this is: the entry/home screen (depth 0), OR the most-connected hub (depth 0).
+- If you cannot decide, omit on all nodes — never set true on multiple.
+
+DATA USED guidance (detail.dataUsed):
+- 1-5 short English labels for the data this screen READS or WRITES.
+- Use non-technical names. Refer to Bubble Data Type / Notion Database naming conventions.
+- Good: "User profile", "Reservations", "Product list", "Chat history".
+- Bad: "users", "User", "reservations_table", "products[]" (raw schema names).
+- Omit if the screen doesn't visibly handle user data (e.g. a static splash screen).
+
+SELF-CONTAINED DESCRIPTION RULE for bodyNoCode (critical):
+- bodyNoCode must EXPLAIN the screen FIRST, in plain English, without requiring the reader to know any Bubble/Notion/Glide feature.
+- "Like X in Y" analogy patterns are BANNED as the primary explanation. Reason: if the reader doesn't know X, the analogy fails and the screen remains opaque.
+- Order of information inside bodyNoCode:
+  1. What the screen IS and what it lets the user do (plain English, self-contained)
+  2. (Optional, only if it adds value) "Bubble/Notion has a similar feature" type soft reference at the end
+- Bad: "An overview map like Bubble's Page navigator." (analogy-first, requires knowing Page navigator)
+- Good: "An overview map that shows every screen of the app at a glance. Bubble and Notion have similar overview views."
+- Good: "Lists every reservation in one place. You can filter by conditions or export to CSV."
+
+ENGLISH CLARITY RULE — applies to title, body, bodyNoCode, changeHint.note, and all string-valued fields except the 'files' array:
+- Write natural English. Avoid forced literal-translation phrasings.
+- Don't sprinkle Japanese loanwords or romaji unless they are universal brand names (Bubble, Notion, Glide, AppMap, Claude, Tauri, React, Vite, npm).
+- Titles must not have parenthetical Japanese. Plain English only.
+
+CHANGE HINT guidance (detail.changeHint):
+- safety:
+  - "easy": cosmetic / display-order / text changes that won't break other screens.
+  - "neutral": local logic changes; might require checking adjacent screens.
+  - "risky": shared logic (auth, navigation root, data shape) — changing this affects many screens.
+- note: 1 sentence in English explaining the safety level in plain words.
+  - Good (easy): "Wording and display order are easy to change. Other screens are unaffected."
+  - Good (risky): "Changing the sign-in condition affects almost every screen."
+- Omit if you don't have enough confidence to judge.
+
+Remember: your response is JSON only. Begin with "{". End with "}". Nothing else.`;
+
+/**
+ * v0.1.6: 言語に応じて SYSTEM_PROMPT を選ぶ。JA / EN で本質スキーマは同じ。
+ */
+function buildSystemPrompt(language: Language): string {
+  return language === "en" ? SYSTEM_PROMPT_EN : SYSTEM_PROMPT_JA;
+}
+
 const USER_PROMPT_TEMPLATE = (folder: string) =>
   `Analyze the application at "${folder}" and output the Screens map JSON.
 
@@ -358,16 +516,22 @@ export async function runClaudeLogin(): Promise<string> {
  *
  * Rust 側の `claude_analyze` Tauri command を invoke して、stdout 文字列を受取り、
  * JSON としてパース → ScreenMapResult に整形して返す。
+ *
+ * v0.1.6: language を受けて SYSTEM_PROMPT を JA / EN 切替、エラー文言も i18n 化。
+ *   - JA: 既存挙動。出力は日本語、cleanupEnglishInJapanese で英単語を救済。
+ *   - EN: 出力は英語、cleanupEnglishInJapanese はスキップ(英文をカタカナ化しないため)。
  */
 export async function analyzeFolderToScreenMap(
   folder: string,
+  language: Language = "ja",
 ): Promise<AnalysisOutcome> {
+  const M = t(language).claude;
   let stdout: string;
   try {
     stdout = await invoke<string>("claude_analyze", {
       folder,
       userPrompt: USER_PROMPT_TEMPLATE(folder),
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: buildSystemPrompt(language),
       schema: JSON.stringify(RESPONSE_SCHEMA),
       model: CLAUDE_MODEL,
     });
@@ -378,11 +542,9 @@ export async function analyzeFolderToScreenMap(
       msg.toLowerCase().includes("login") ||
       msg.toLowerCase().includes("unauthorized")
     ) {
-      throw new Error(
-        "Claude に認証されていません。ターミナルで `claude auth login` を実行してください。",
-      );
+      throw new Error(M.notAuthenticated);
     }
-    throw new Error(`claude analyze 失敗: ${msg}`);
+    throw new Error(M.analyzeFailed(msg));
   }
 
   // stdout を JSON として解釈
@@ -391,7 +553,10 @@ export async function analyzeFolderToScreenMap(
     parsed = JSON.parse(stdout);
   } catch (err) {
     throw new Error(
-      `応答が JSON として解釈できません: ${err instanceof Error ? err.message : String(err)}\n\nstdout (先頭 500 文字): ${stdout.slice(0, 500)}`,
+      M.notJson(
+        err instanceof Error ? err.message : String(err),
+        stdout.slice(0, 500),
+      ),
     );
   }
 
@@ -421,14 +586,17 @@ export async function analyzeFolderToScreenMap(
       const so = obj.structured_output;
       if (so !== undefined) {
         const text = typeof so === "string" ? so : JSON.stringify(so);
-        sections.push(`structured_output (先頭 1000 文字):\n${text.slice(0, 1000)}`);
+        sections.push(M.structuredOutputPreview(text.slice(0, 1000)));
       }
 
       if (typeof obj.result === "string") {
-        sections.push(`result (先頭 1000 文字):\n${obj.result.slice(0, 1000)}`);
+        sections.push(M.resultPreview(obj.result.slice(0, 1000)));
       } else if (obj.result !== undefined) {
         sections.push(
-          `result (型: ${typeof obj.result}):\n${JSON.stringify(obj.result).slice(0, 1000)}`,
+          M.resultPreviewTyped(
+            typeof obj.result,
+            JSON.stringify(obj.result).slice(0, 1000),
+          ),
         );
       }
     }
@@ -438,11 +606,12 @@ export async function analyzeFolderToScreenMap(
         ? sections.join("\n\n---\n\n")
         : JSON.stringify(parsed).slice(0, 1000);
 
-    throw new Error(`応答に nodes / edges が見当たらない:\n${detail}`);
+    throw new Error(M.noNodesEdges(detail));
   }
 
   // Defensive: depth 正規化 + グラフ整合性 + isEntryPoint 単一化(共通関数)
-  const sanitizedScreens = normalizeAndSanitizeScreenMap(screens);
+  // v0.1.6: EN 出力時は cleanupEnglishInJapanese を適用しない(英文をカタカナ化しないため)。
+  const sanitizedScreens = normalizeAndSanitizeScreenMap(screens, language);
 
   return { screens: sanitizedScreens, costUsd, durationMs };
 }
@@ -534,36 +703,40 @@ export function cleanupEnglishInJapanese(text: string): string {
  *
  * Codex review 2026-05-11 (round 3) Med #3 対応:localStorage から復元した
  * 古い形式の履歴も、この関数を通せばランタイムで現行ルールに合うようになる。
+ *
+ * v0.1.6: language を受けて、EN 出力にはレスキューを適用しない(英文を壊さないため)。
+ *   呼出箇所:
+ *     - analyzeFolderToScreenMap → 現在の UI 言語を渡す
+ *     - App.tsx の localStorage 復元 → デフォルト "ja"(既存データは日本語前提)
  */
 export function normalizeAndSanitizeScreenMap(
   screens: ScreenMapResult,
+  language: Language = "ja",
 ): ScreenMapResult {
+  // EN モードでは英文を壊さないために cleanup を identity に置換
+  const clean: (s: string) => string =
+    language === "en" ? (s) => s : cleanupEnglishInJapanese;
   const normalized: ScreenMapResult = {
     nodes: screens.nodes.map((n) => ({
       ...n,
       depth: normalizeDepth(n.depth, n.position.y),
-      // 英単語クリーンアップ:旧データのブランド固有機能名・英括弧表記を日本語化
-      label: cleanupEnglishInJapanese(n.label),
-      userIntent: n.userIntent
-        ? cleanupEnglishInJapanese(n.userIntent)
-        : n.userIntent,
+      label: clean(n.label),
+      userIntent: n.userIntent ? clean(n.userIntent) : n.userIntent,
       detail: {
         ...n.detail,
-        title: cleanupEnglishInJapanese(n.detail.title),
-        body: cleanupEnglishInJapanese(n.detail.body),
-        bodyNoCode: cleanupEnglishInJapanese(n.detail.bodyNoCode),
+        title: clean(n.detail.title),
+        body: clean(n.detail.body),
+        bodyNoCode: clean(n.detail.bodyNoCode),
         changeHint: n.detail.changeHint
           ? {
               ...n.detail.changeHint,
-              note: cleanupEnglishInJapanese(n.detail.changeHint.note),
+              note: clean(n.detail.changeHint.note),
             }
           : n.detail.changeHint,
       },
     })),
     edges: screens.edges,
-    appSummary: screens.appSummary
-      ? cleanupEnglishInJapanese(screens.appSummary)
-      : screens.appSummary,
+    appSummary: screens.appSummary ? clean(screens.appSummary) : screens.appSummary,
   };
   return sanitizeScreens(normalized);
 }

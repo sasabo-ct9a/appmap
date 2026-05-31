@@ -8,7 +8,7 @@ import Spinner from "./components/ui/Spinner";
 import HistoryDropdown from "./components/ui/HistoryDropdown";
 import SetupWizard from "./components/ui/SetupWizard";
 import TabBar from "./components/ui/TabBar";
-import { sampleScreens } from "./data/sampleScreens";
+import { getSampleScreens } from "./data/sampleScreens";
 import { pickFolderAndListFiles } from "./lib/folderPicker";
 import {
   analyzeFolderToScreenMap,
@@ -25,8 +25,10 @@ import {
   markLoginCompleted,
   saveDragOffsets,
   saveOpenTabs,
+  saveLanguage,
   type StoredAnalysis,
 } from "./lib/storage";
+import { t, asLanguage, type Language } from "./lib/i18n";
 
 /**
  * Phase 3 Step 3-5(polish 込み完成版):
@@ -73,6 +75,30 @@ function App() {
   const [dragOffsetsX, setDragOffsetsX] = useState<Record<string, number>>({});
   // v0.1.4 タブ機能:今開いているタブの folderPath 一覧
   const [openTabPaths, setOpenTabPaths] = useState<string[]>([]);
+  // v0.1.6 UI 言語(英日切替)。デフォルトは "ja"、localStorage で復元。
+  const [language, setLanguageState] = useState<Language>("ja");
+  const T = t(language);
+
+  /**
+   * v0.1.6: 言語を変更しつつ localStorage に永続化。
+   *
+   * 切替後の表示整合性:
+   *   - 今表示中のマップが「別言語で分析されたもの」だった場合、そのまま見せると
+   *     EN 選択中に日本語ラベルが出てしまう(or 逆)ため、サンプルマップに戻す。
+   *   - 現在の lastAnalyzedFolder から history を引いて language を確認する。
+   */
+  const handleLanguageChange = (next: Language) => {
+    if (next === language) return;
+    setLanguageState(next);
+    saveLanguage(next);
+    // 現在表示中のマップが別言語ならサンプルに戻す(タブもアクティブ解除)
+    if (lastAnalyzedFolder !== null) {
+      const entry = history.find((h) => h.folderPath === lastAnalyzedFolder);
+      if (entry && entry.language !== next) {
+        handleResetToSample();
+      }
+    }
+  };
 
   // localStorage から最新の履歴を読み直す(削除や保存の後に呼ぶ)
   const refreshHistory = () => {
@@ -136,6 +162,9 @@ function App() {
     // 永続化された履歴 + ログイン完了タイムスタンプを読み込み、current があれば復元
     const store = loadStore();
     setHistory(store.history);
+    // v0.1.6: 言語設定を復元(不正値・未保存は asLanguage で "ja" に倒れる)
+    const restoredLang = asLanguage(store.language);
+    setLanguageState(restoredLang);
     // 過去に成功分析が 1 件でもあれば、login も済んでいるはず。Backfill して
     // SetupWizard が「2/3 完了」と訴え続けないようにする。
     if (store.history.length > 0 && store.loginCompletedAt === undefined) {
@@ -160,10 +189,12 @@ function App() {
       const entry = store.history.find(
         (e) => e.folderPath === store.currentFolderPath,
       );
-      if (entry) {
+      // v0.1.6: 復元対象の分析言語が現在の UI 言語と一致するときだけ復元する。
+      // 不一致なら復元せずサンプルマップで起動(EN ユーザーが JA 分析を見ない)。
+      if (entry && entry.language === restoredLang) {
         // 古い localStorage 形式(depth 欠落・複数 isEntryPoint 等)を、
         // 最新のルールに通してから state に流す(Codex review Med #3)。
-        setAiResult(normalizeAndSanitizeScreenMap(entry.screens));
+        setAiResult(normalizeAndSanitizeScreenMap(entry.screens, restoredLang));
         setFolderPath(entry.folderPath);
         setFileCount(entry.fileCount);
         setLastCostUsd(entry.costUsd);
@@ -174,6 +205,19 @@ function App() {
       }
     }
   }, []);
+
+  // v0.1.6: 「表示中マップ」と「UI 言語」のミスマッチを検出して自動でサンプルへ戻す。
+  //   - 言語切替時:handleLanguageChange でも reset するが、保険として
+  //   - 古い localStorage を読み直したとき
+  //   - 旧 v0.1.5 から v0.1.6 にアップグレード直後の HMR 中
+  //   いずれも EN モードに JA データが流れ込むのを防ぐ。
+  useEffect(() => {
+    if (lastAnalyzedFolder === null || aiResult === null) return;
+    const entry = history.find((h) => h.folderPath === lastAnalyzedFolder);
+    if (entry && entry.language !== language) {
+      handleResetToSample();
+    }
+  }, [language, lastAnalyzedFolder, aiResult, history]);
 
   // 分析中に経過秒数を更新(進行中だとユーザーに伝える)
   useEffect(() => {
@@ -188,11 +232,12 @@ function App() {
     return () => clearInterval(interval);
   }, [analysisStatus]);
 
-  // 表示するマップデータ: AI 結果があればそれを、なければサンプルにフォールバック
+  // 表示するマップデータ: AI 結果があればそれを、なければ「現在の UI 言語」の
+  // サンプルにフォールバック(v0.1.6: 英日サンプル切替)。
   //
   // ノードの y 座標は MapCanvas 側で depth から自動計算するため、ここで上書きしない。
   // x と depth だけが効く。
-  const screens = aiResult ?? sampleScreens;
+  const screens = aiResult ?? getSampleScreens(language);
 
   const selectedNode =
     selectedNodeId !== null
@@ -200,16 +245,24 @@ function App() {
       : null;
 
   // v0.1.4: タブとして開いている StoredAnalysis 配列(順序保持、無いものは除外)
+  // v0.1.6 追加:現在の UI 言語と一致するエントリだけにフィルタ(EN モードに JA タブを混ぜない)
   const tabEntries = useMemo(() => {
     return openTabPaths
       .map((p) => history.find((h) => h.folderPath === p))
-      .filter((e): e is StoredAnalysis => e !== undefined);
-  }, [openTabPaths, history]);
+      .filter((e): e is StoredAnalysis => e !== undefined)
+      .filter((e) => e.language === language);
+  }, [openTabPaths, history, language]);
+
+  // v0.1.6: 履歴 dropdown 用も同様に言語フィルタ。EN モード時は JA エントリを完全に隠す。
+  const visibleHistory = useMemo(
+    () => history.filter((e) => e.language === language),
+    [history, language],
+  );
 
   const handlePickFolder = async () => {
     setAnalysisError(null);
     try {
-      const result = await pickFolderAndListFiles();
+      const result = await pickFolderAndListFiles(language);
       if (result === null) return;
 
       // 直前と同じフォルダ + AI 結果あり → 再分析確認(コスト防止)
@@ -218,10 +271,10 @@ function App() {
         aiResult !== null &&
         lastCostUsd !== null
       ) {
-        const proceed = await ask(
-          `同じフォルダの再分析になります。前回 $${lastCostUsd.toFixed(4)} 消費しました。再実行しますか?`,
-          { title: "再分析の確認", kind: "warning" },
-        );
+        const proceed = await ask(T.app.reAnalyzeConfirmBody(lastCostUsd), {
+          title: T.app.reAnalyzeConfirmTitle,
+          kind: "warning",
+        });
         if (!proceed) return;
       }
 
@@ -235,7 +288,7 @@ function App() {
       console.log(
         `Analyzing folder: ${result.folder} (${result.fileCount} files)`,
       );
-      const outcome = await analyzeFolderToScreenMap(result.folder);
+      const outcome = await analyzeFolderToScreenMap(result.folder, language);
 
       console.log("AI screen map outcome:", outcome);
       setAiResult(outcome.screens);
@@ -253,6 +306,7 @@ function App() {
         costUsd: outcome.costUsd,
         durationMs: outcome.durationMs,
         analyzedAt: Date.now(),
+        language, // v0.1.6: 分析時の UI 言語を記録(後で言語別フィルタに使う)
       });
       refreshHistory();
       openTabFor(result.folder); // v0.1.4: 分析完了で自動でタブに追加
@@ -284,7 +338,8 @@ function App() {
   /** 履歴から 1 件選んで、その分析結果を画面に復元する。 */
   const handleSelectFromHistory = (entry: StoredAnalysis) => {
     // 履歴データは古いスキーマの可能性があるので、復元時に再正規化(Med #3)
-    setAiResult(normalizeAndSanitizeScreenMap(entry.screens));
+    // v0.1.6: entry.language を渡して、EN データに JA cleanup を当てない
+    setAiResult(normalizeAndSanitizeScreenMap(entry.screens, entry.language));
     setFolderPath(entry.folderPath);
     setFileCount(entry.fileCount);
     setLastCostUsd(entry.costUsd);
@@ -344,37 +399,43 @@ function App() {
         markLoginCompleted();
         setLoginCompletedAt(Date.now());
       }}
+      language={language}
     />
   );
 
   // ステータステキスト
   const statusText = (() => {
-    if (claudeAvail.state === "checking") return "Claude CLI を確認中…";
+    if (claudeAvail.state === "checking") return T.app.statusChecking;
     if (claudeAvail.state === "missing") {
-      return "セットアップを完了してください(上の案内を参照)";
+      return T.app.statusSetupIncomplete;
     }
     if (loginCompletedAt === null) {
-      return "Claude にログインしてください(上の案内を参照)";
+      return T.app.statusLoginIncomplete;
     }
     if (folderPath === null) {
-      return `Claude CLI 検出 (${claudeAvail.version}) — サンプルマップ表示中、フォルダを選んで実分析`;
+      return T.app.statusClaudeReady(claudeAvail.version);
     }
     switch (analysisStatus) {
       case "loading":
-        return `分析中: ${folderPath} (${fileCount} ファイル) — 経過 ${elapsedSec} 秒`;
+        return T.app.statusAnalyzing(folderPath, fileCount, elapsedSec);
       case "done":
         if (aiResult) {
           const costPart =
-            lastCostUsd !== null ? ` / コスト $${lastCostUsd.toFixed(4)}` : "";
+            lastCostUsd !== null ? T.app.costPart(lastCostUsd) : "";
           // 構造系の数値は常に「画面 / リンク」で統一(Notion ネイティブ語)。
           // ノード/エッジ のグラフ用語、つながり の子供語、いずれも回避。
-          return `AI 生成マップ表示中: ${aiResult.nodes.length} 画面 / ${aiResult.edges.length} リンク${costPart}(${folderPath})`;
+          return T.app.statusAiMap(
+            aiResult.nodes.length,
+            aiResult.edges.length,
+            costPart,
+            folderPath,
+          );
         }
-        return "完了";
+        return T.app.statusDone;
       case "error":
         return null; // エラーは別 UI で表示(選択可能なテキスト)
       default:
-        return `選択中: ${folderPath} (${fileCount} ファイル)`;
+        return T.app.statusSelected(folderPath, fileCount);
     }
   })();
 
@@ -392,6 +453,8 @@ function App() {
       <Header
         noCodeMode={noCodeMode}
         onNoCodeModeChange={setNoCodeMode}
+        language={language}
+        onLanguageChange={handleLanguageChange}
       />
       <div className="flex-1 flex overflow-hidden">
         <main className="flex-1 overflow-auto px-6 py-12">
@@ -404,31 +467,36 @@ function App() {
               activeFolderPath={lastAnalyzedFolder}
               onSelectTab={handleSelectTab}
               onCloseTab={closeTab}
+              language={language}
             />
 
             {/* ツールバー */}
             <div className="flex items-center gap-3 mb-3 flex-wrap">
               <Button onClick={handlePickFolder} disabled={buttonDisabled}>
                 {analysisStatus === "loading"
-                  ? "分析中…"
-                  : "フォルダを選ぶ"}
+                  ? T.app.analyzing
+                  : T.app.pickFolder}
               </Button>
 
               <HistoryDropdown
-                history={history}
+                history={visibleHistory}
                 currentFolderPath={lastAnalyzedFolder}
                 onSelect={handleSelectFromHistory}
                 onRemove={handleRemoveFromHistory}
+                language={language}
               />
 
               {aiResult !== null && analysisStatus !== "loading" ? (
                 <Button variant="secondary" onClick={handleResetToSample}>
-                  サンプルに戻す
+                  {T.app.resetToSample}
                 </Button>
               ) : null}
 
               {analysisStatus === "loading" ? (
-                <Spinner className="w-4 h-4 text-electric-teal" />
+                <Spinner
+                  className="w-4 h-4 text-electric-teal"
+                  language={language}
+                />
               ) : null}
 
               {statusText !== null ? (
@@ -439,7 +507,8 @@ function App() {
             {/* エラー本文(select-text で選択コピー可) */}
             {analysisStatus === "error" && analysisError ? (
               <pre className="bg-slate border border-charcoal rounded-[14px] p-4 mb-6 text-xs text-off-white whitespace-pre-wrap select-text font-mono leading-relaxed overflow-x-auto">
-                <span className="text-soft-grid">エラー:</span> {analysisError}
+                <span className="text-soft-grid">{T.app.errorPrefix}</span>{" "}
+                {analysisError}
               </pre>
             ) : null}
 
@@ -454,7 +523,7 @@ function App() {
             {screens.appSummary && (
               <div className="bg-slate border border-charcoal rounded-[14px] px-4 py-3 mb-4 text-sm text-off-white leading-relaxed">
                 <span className="text-xs text-electric-teal font-semibold mr-2 uppercase tracking-wide">
-                  サマリー
+                  {T.app.summaryBadge}
                 </span>
                 {screens.appSummary}
               </div>
@@ -482,6 +551,7 @@ function App() {
                 noCodeMode={noCodeMode}
                 dragOffsetsX={dragOffsetsX}
                 onDragOffsetsChange={handleDragOffsetsChange}
+                language={language}
               />
             </div>
           </div>
@@ -492,6 +562,7 @@ function App() {
           allEdges={screens.edges}
           onClose={() => setSelectedNodeId(null)}
           noCodeMode={noCodeMode}
+          language={language}
         />
       </div>
     </div>
