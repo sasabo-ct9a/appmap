@@ -45,6 +45,11 @@ jobs:
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
+        # v0.1.6 release で Windows の Post Rust cache が transient エラーで死亡し、
+        # ビルド成果物は正常 upload 済みなのに job 全体が ❌ に着地した。
+        # キャッシュは「次回ビルドの高速化」目的なので、保存/復元の失敗は
+        # リリース成果物に影響なし → 失敗を吸収して job を緑に保つ。
+        continue-on-error: true
         with:
           workspaces: src-tauri -> target
 
