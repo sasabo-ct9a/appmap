@@ -80,6 +80,7 @@ jobs:
 
             セットアップは `GETTING_STARTED.md` を参照してください。
             初回起動時、未署名アプリのため OS の警告が出ますが、安全な配布元なので案内に従って許可してください。
-          releaseDraft: true
+          # v0.1.7:タグ push 後、自動で release を公開状態にする(draft を撤回)
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
