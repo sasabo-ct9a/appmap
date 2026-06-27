@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Build artifacts
+*.tsbuildinfo
+
+# Claude Code workspace state(自動生成、コミット不要)
+.claude/

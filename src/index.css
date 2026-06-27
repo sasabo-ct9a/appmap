@@ -1,11 +1,11 @@
 @import "tailwindcss";
 
 /*
- * Color tokens — provisional for the @theme vs arbitrary-values comparison.
- * If we end up choosing case B (pure arbitrary), this whole @theme block goes away.
- * Source of truth for color values: CLAUDE.md §10.2.
+ * v0.1.7 大刷新:LIGHT モード基調に切替(白サーフェイス + パステル機能色)。
+ * 旧 DARK トークン(charcoal / slate / off-white)は Inspector や Modal など部分的に残置。
  */
 @theme {
+  /* DARK 由来(残置):charcoal は dark surface、off-white は dark 上の文字 */
   --color-charcoal: #111827;
   --color-slate: #1f2937;
   --color-soft-grid: #e5e7eb;
@@ -14,4 +14,146 @@
   --color-muted-amber: #d4a373;
   --color-alert-red: #ef4444;
   --color-cool-blue: #60a5fa;
+
+  /* LIGHT モード新トークン */
+  --color-paper: #ffffff;                /* メインカード bg */
+  --color-canvas: #f8fafc;               /* ページ bg(spec 指定の #F8FAFC)*/
+  --color-canvas-soft: #fafbfc;          /* マップ領域 bg */
+  --color-ink-strong: #0f172a;           /* タイトル文字 */
+  --color-ink: #334155;                  /* 本文文字 */
+  --color-ink-soft: #64748b;             /* 補助文字 */
+  --color-border-soft: #e2e8f0;          /* 仕切り */
+  --color-border: #cbd5e1;               /* 標準ボーダー */
+
+  /* Deep navy サイドバー(spec 指定 #07111D / #0A1726 / #0F2236) */
+  --color-nav-bg: #0a1726;
+  --color-nav-bg-deeper: #07111d;
+  --color-nav-bg-card: #0f2236;
+  --color-nav-text: #cbd5e1;
+  --color-nav-text-strong: #ffffff;
+  --color-nav-text-soft: #64748b;
+  --color-nav-accent: #19d3c5;
+
+  /* 機能色(パステル + 濃) */
+  --color-feature-teal: #14b8a6;
+  --color-feature-teal-soft: #ccfbf1;
+  --color-feature-amber: #f59e0b;
+  --color-feature-amber-soft: #fef3c7;
+  --color-feature-purple: #8b5cf6;
+  --color-feature-purple-soft: #ede9fe;
+  --color-feature-blue: #3b82f6;
+  --color-feature-blue-soft: #dbeafe;
+
+  /* 影響度メーター */
+  --color-impact-low: #14b8a6;
+  --color-impact-mid: #f59e0b;
+  --color-impact-high: #ef4444;
+}
+
+/* LIGHT モード base */
+html, body {
+  background: var(--color-canvas);
+  color: var(--color-ink-strong);
+}
+
+/*
+ * v0.1.7 仕様書 PDF 出力:window.print() で OS の印刷ダイアログを開き、
+ * 「PDF として保存」を選んでもらう。
+ *
+ * 戦略:
+ *   1. body * の visibility を hidden にして全 UI を不可視にする
+ *   2. .spec-doc-printable とその子孫だけ visibility: visible で復活
+ *   3. .spec-doc-printable を absolute 配置で印刷ページ先頭に持ってくる
+ *
+ * `display: none` ではなく `visibility: hidden` を使う理由:
+ *   要素のレイアウト計算は走らせて、子だけ表示復活させる方が selector が単純で済む。
+ *   モーダル DOM のネスト構造に依存しない確実な方法。
+ */
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+  body * {
+    visibility: hidden;
+  }
+  .spec-doc-printable,
+  .spec-doc-printable * {
+    visibility: visible;
+  }
+  .spec-doc-printable {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+  .spec-doc-printable pre {
+    background: #ffffff !important;
+    color: #111827 !important;
+    white-space: pre-wrap !important;
+    font-family:
+      "Inter", "Noto Sans JP", system-ui, -apple-system, sans-serif !important;
+    font-size: 11pt !important;
+    line-height: 1.55 !important;
+  }
+  /* マインドマップを 1 ページ目にきれいに収め、本文は次ページから */
+  .spec-doc-map-block {
+    margin: 0 0 8mm 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    border: none !important;
+    box-shadow: none !important;
+    break-after: page;
+    page-break-after: always;
+  }
+  .spec-doc-map svg {
+    width: 100% !important;
+    height: auto !important;
+    max-height: 240mm !important;
+  }
+  .spec-doc-text-block {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+  /* ウォーターマーク:各ページ右下に AppMap ブランドを浮かせる */
+  .spec-doc-watermark,
+  .spec-doc-watermark * {
+    visibility: visible !important;
+  }
+  .spec-doc-watermark {
+    position: fixed !important;
+    bottom: 6mm !important;
+    right: 10mm !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 5px !important;
+    font-family: "Inter", "Noto Sans JP", sans-serif !important;
+    font-size: 9pt !important;
+    color: #94a3b8 !important;
+    letter-spacing: 0.4px !important;
+    font-weight: 600 !important;
+    z-index: 9999 !important;
+  }
+  .spec-doc-watermark svg {
+    width: 12pt !important;
+    height: 12pt !important;
+    color: #14b8a6 !important;
+  }
+  @page {
+    margin: 18mm 16mm;
+  }
+}
+/* screen 上では watermark を隠す */
+.spec-doc-watermark {
+  display: none;
 }

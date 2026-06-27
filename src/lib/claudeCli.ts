@@ -26,54 +26,83 @@ import { t, type Language } from "./i18n";
  */
 
 /**
- * Claude が返す JSON の schema(ScreenNode / ScreenEdge と一致)。
- * `--json-schema` フラグで CLI に渡し、構造化出力を強制。
+ * v0.1.7:Bilingual テキストの schema フラグメント。
+ * `{ ja: string, en: string }` 形のオブジェクト。両方とも必須。
+ */
+const BILINGUAL_STRING = {
+  type: "object",
+  properties: {
+    ja: { type: "string" },
+    en: { type: "string" },
+  },
+  required: ["ja", "en"],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Claude / ローカル LLM が返す JSON の schema。
+ *
+ * v0.1.7 多言語化:**全テキストフィールドを Bilingual** に変更。
+ * 1 回の AI 分析で {ja, en} 両方を取り、UI 切替で再分析せず即座に表示変更する。
  */
 const RESPONSE_SCHEMA = {
   type: "object",
   properties: {
-    // 機能拡張クイックウィン 1: アプリ全体の 1-2 文要約。
-    // ノーコードユーザーが「これは何のアプリか」を最初に掴むため。任意フィールド。
-    appSummary: { type: "string" },
+    // 機能拡張クイックウィン 1: アプリ全体の 1-2 文要約(両言語)。
+    appSummary: BILINGUAL_STRING,
     nodes: {
       type: "array",
       items: {
         type: "object",
         properties: {
           id: { type: "integer" },
-          label: { type: "string" },
+          label: BILINGUAL_STRING,
           position: {
             type: "object",
             properties: {
               x: { type: "number" },
               y: { type: "number" },
             },
-            required: ["x", "y"],
+            // v0.1.7 hotfix:y は AppMap 側で depth から自動計算するため AI 側は不要。
+            // Qwen 等が prompt 指示通り y を省略しても schema 違反にしないよう
+            // required から外す。
+            required: ["x"],
             additionalProperties: false,
           },
           // 階層プレーンの所属。0 = 主フロー、1 = サブ画面、2 = さらに開く画面、3 = 最深。
-          // 最大 4 階層まで(MAX_DEPTH = 3)。超過は normalizeDepth() で 3 に snap される。
           depth: { type: "integer", minimum: 0, maximum: 3 },
-          // 機能拡張クイックウィン 2: ユーザー行動ラベル(短いフレーズ、10-14 字目安)。
-          userIntent: { type: "string" },
+          // v0.1.7: 詳細レベル(ヘッダーの 3 段切替と連動)。
+          //   0 = 必須(常に表示)/ 1 = 標準モードで表示 / 2 = 詳細モードのみ
+          //   1 度の分析で全レベル分のノードを出すことで、再分析なしの切替を実現。
+          detailLevel: { type: "integer", minimum: 0, maximum: 2 },
+          // 機能拡張クイックウィン 2: ユーザー行動ラベル(両言語)。
+          userIntent: BILINGUAL_STRING,
           // 機能拡張クイックウィン 3: 1 ノードだけ true にする(エントリーポイント)。
           isEntryPoint: { type: "boolean" },
+          // v0.1.7 マインドマップ:この画面に紐づく短いアクション(葉チップ)、3-7 個目安。
+          //   例: 「会話を始める」「履歴を見る」「音声入力」
+          //   各要素 bilingual({ja, en})。出力なしでも UI は壊れない(空配列扱い)。
+          subActions: {
+            type: "array",
+            items: BILINGUAL_STRING,
+            maxItems: 7,
+          },
           detail: {
             type: "object",
             properties: {
-              title: { type: "string" },
-              body: { type: "string" },
-              bodyNoCode: { type: "string" },
-              // 機能拡張 C: 関わるファイル一覧。
+              title: BILINGUAL_STRING,
+              body: BILINGUAL_STRING,
+              bodyNoCode: BILINGUAL_STRING,
+              // 機能拡張 C: 関わるファイル一覧(言語非依存、パスはそのまま)。
               files: {
                 type: "array",
                 items: { type: "string" },
                 maxItems: 5,
               },
-              // 機能拡張クイックウィン 4: この画面で使っているデータの非技術名。
+              // 機能拡張クイックウィン 4: この画面で使っているデータの非技術名(各要素 bilingual)。
               dataUsed: {
                 type: "array",
-                items: { type: "string" },
+                items: BILINGUAL_STRING,
                 maxItems: 5,
               },
               // 機能拡張クイックウィン 5: 変更しやすさ / 影響範囲ヒント。
@@ -81,7 +110,7 @@ const RESPONSE_SCHEMA = {
                 type: "object",
                 properties: {
                   safety: { type: "string", enum: ["easy", "neutral", "risky"] },
-                  note: { type: "string" },
+                  note: BILINGUAL_STRING,
                 },
                 required: ["safety", "note"],
                 additionalProperties: false,
@@ -91,7 +120,7 @@ const RESPONSE_SCHEMA = {
             additionalProperties: false,
           },
         },
-        required: ["id", "label", "position", "depth", "detail"],
+        required: ["id", "label", "position", "depth", "detailLevel", "detail"],
         additionalProperties: false,
       },
     },
@@ -431,16 +460,165 @@ CHANGE HINT guidance (detail.changeHint):
 Remember: your response is JSON only. Begin with "{". End with "}". Nothing else.`;
 
 /**
- * v0.1.6: 言語に応じて SYSTEM_PROMPT を選ぶ。JA / EN で本質スキーマは同じ。
+ * v0.1.7 多言語化:**1 つの bilingual SYSTEM_PROMPT** を使う。UI 言語に関係なく
+ * AI は両方の言語版を 1 度に生成する → 切替時の再分析不要。
+ *
+ * 旧 SYSTEM_PROMPT_JA / SYSTEM_PROMPT_EN は残置(直接参照箇所が無いが、
+ * 将来の対比検証 / fallback のために保管)。
  */
-function buildSystemPrompt(language: Language): string {
-  return language === "en" ? SYSTEM_PROMPT_EN : SYSTEM_PROMPT_JA;
+const SYSTEM_PROMPT_BILINGUAL = `You are a JSON-only data extraction tool for AppMap. AppMap visualizes applications as a "screen map": screens as nodes, transitions between them as edges.
+
+CRITICAL OUTPUT RULE — non-negotiable:
+Your final response MUST be a single JSON object matching the schema below. No prose, no markdown fences, no explanation. The first character of your final response must be "{" and the last must be "}".
+
+BILINGUAL OUTPUT — REQUIRED:
+Every text field in the schema is an object \`{ "ja": "...", "en": "..." }\`. You MUST fill BOTH "ja" and "en" for every such field, describing the same concept in each language's natural style (see [JA STYLE] and [EN STYLE] below).
+
+DETAIL LEVEL — REQUIRED FOR EVERY NODE:
+Every single node MUST include a "detailLevel" field with value 0, 1, or 2 (integer). This drives the Simple/Standard/Detailed toggle. See DETAIL LEVEL section below for tagging rules. Do NOT omit detailLevel on any node. The story must read clearly at every level:
+- At "Simple" (detailLevel 0 only), the visible nodes alone must convey the app's core purpose end-to-end. Include entry + core processing + final output. Skip data-source-only nodes here.
+- At "Standard" (detailLevel <= 1), add supporting screens that round out the picture.
+- At "Detailed" (all), include everything.
+
+PROCESS:
+You will be given a folder path. Use your file-reading tools to investigate the project structure. Start with README.md, CLAUDE.md (if present), package.json, and obvious entry points (src/App.tsx, src/main.tsx, src-tauri/src/lib.rs). Read additional files only when needed for clarity.
+
+OUTPUT SCHEMA — JSON shape:
+
+{
+  "appSummary": { "ja": "<JA 1-2 sentences>", "en": "<EN 1-2 sentences>" },
+  "nodes": [
+    {
+      "id": <integer, 1-indexed sequential>,
+      "label": { "ja": "<JA under 12 chars, tile label>", "en": "<EN under 16 chars, tile label>" },
+      "position": { "x": <number 40-640>, "y": <number, ignored — see Y POSITIONING> },
+      "depth": <integer, 0-3>,
+      "userIntent": { "ja": "<JA 10-14 chars, action phrase>", "en": "<EN 14-22 chars, action phrase>" },
+      "isEntryPoint": <boolean — set true on EXACTLY ONE node>,
+      "subActions": [
+        { "ja": "<JA 6-12 chars, short verb-phrase action>", "en": "<EN 8-18 chars, short verb-phrase action>" }
+      ],
+      "detail": {
+        "title": { "ja": "<JA screen title>", "en": "<EN screen title>" },
+        "body": { "ja": "<JA 2-3 sentences, tech vocab OK>", "en": "<EN 2-3 sentences, tech vocab OK>" },
+        "bodyNoCode": { "ja": "<JA non-engineer style, Bubble/Notion 語彙>", "en": "<EN non-engineer style, plain English>" },
+        "files": ["<project-root-relative path, forward slash>"],
+        "dataUsed": [{ "ja": "<JA non-tech data name>", "en": "<EN non-tech data name>" }],
+        "changeHint": {
+          "safety": "easy" | "neutral" | "risky",
+          "note": { "ja": "<JA 1 sentence>", "en": "<EN 1 sentence>" }
+        }
+      }
+    }
+  ],
+  "edges": [
+    { "id": "<from-to e.g. \\"1-2\\">", "from": <int>, "to": <int>, "bidirectional": <boolean> }
+  ]
 }
 
-const USER_PROMPT_TEMPLATE = (folder: string) =>
+DEPTH — required, integer 0-3:
+- **depth 0**: entry-point screens, primary navigation, top-level tabs.
+- **depth 1**: screens opened FROM depth-0 (detail panels, side modals, secondary tabs).
+- **depth 2**: screens reached from depth-1 (e.g., settings → account → password change).
+- **depth 3**: deeply nested screens. Use sparingly.
+
+HORIZONTAL LAYOUT (x):
+- viewBox width is 800, tiles are 140 wide.
+- Spread nodes across x = 40-640 with at least 60px horizontal gap.
+- Hub goes around x ≈ 330.
+
+Y POSITIONING: AppMap places nodes vertically automatically based on depth. position.y is ignored — only x and depth matter.
+
+CONSTRAINTS:
+- **Aim for 8-15 screens TOTAL**, distributed across 3 detail levels (see DETAIL LEVEL below).
+- Don't invent screens unsupported by the source.
+- bidirectional=true only when both directions exist.
+
+DETAIL LEVEL — REQUIRED for every node, integer 0-2:
+- The renderer has a 3-position toggle (Simple / Standard / Detailed) that filters by this field.
+- Tag every node so the same analysis can be shown at any detail level without re-running:
+
+- **detailLevel 0** (Simple): MUST include all entry points and main-flow screens. Aim for 3-5 nodes here. Examples: home, login, primary tool screen, main map. The isEntryPoint node MUST be detailLevel 0.
+- **detailLevel 1** (Standard): Sub-screens that complement level 0 — settings, detail panels, common secondary flows. Aim for 3-5 nodes here.
+- **detailLevel 2** (Detailed): Modals, error states, loading states, edge-case views, configuration sub-pages, advanced features. Aim for 2-6 nodes here.
+
+If a screen is critical to understanding the app, put it at level 0. If it's "nice to know about" put at level 1. If it's "only matters when you go deep" put at level 2.
+
+The user-facing toggle:
+- Simple shows level 0 nodes only (3-5 screens)
+- Standard shows levels 0-1 (6-10 screens)
+- Detailed shows all levels (8-15 screens)
+
+Edges that connect to a hidden node are auto-hidden by the renderer — you do NOT need to filter edges; just emit all edges between all your nodes.
+
+FILES guidance (detail.files):
+- Up to 5 file paths per screen, project-root relative, forward slashes.
+- Pick files that specifically implement THIS screen. Order by relevance.
+- If unsure, OMIT the field entirely. Do NOT guess.
+
+isEntryPoint guidance:
+- TRUE on EXACTLY ONE node per map. FALSE/OMIT on all others.
+
+dataUsed guidance:
+- 1-5 short non-technical data labels.
+- JA: "ユーザー情報", "予約情報". EN: "User profile", "Reservations".
+- NOT raw schema names like "users_table".
+
+subActions guidance (mind-map leaves, v0.1.7):
+- 3-7 short USER-PERSPECTIVE action chips per node. The map renders each as a small pill orbiting the parent screen — like leaves on a branch.
+- Each chip is a verb-phrase the user would actually DO inside this screen.
+- JA: 6-12 chars. EN: 8-18 chars. Strict limit — chips do not wrap.
+- Good (JA): "会話を始める", "履歴を見る", "音声入力", "表情を選ぶ", "映画を探す".
+- Good (EN): "Start a chat", "View history", "Voice input", "Pick a face", "Find a movie".
+- Bad: "Database access" (technical), "AppMap navigation system" (too long), "Click" (too vague).
+- These should feel like a MENU of things the user can do on this screen — not screen-to-screen transitions (those are edges).
+- Aim for 3-7 chips per node. Omit the field on screens with truly nothing to do (e.g. a 1-shot splash) — empty is fine.
+- Distinct from edges: edges are between SCREENS; subActions are actions WITHIN a single screen.
+
+bodyNoCode SELF-CONTAINED RULE:
+- Explain the screen FIRST in plain everyday language, without requiring readers to know any Bubble/Notion/Glide feature.
+- "Like X in Y" analogies are BANNED as primary explanation.
+- Optional: end with a soft Bubble/Notion reference if it adds value.
+
+[JA STYLE] — applies to all "ja" text fields:
+- Pure Japanese. The only English/loan words allowed are brand names (Bubble, Notion, Glide, AppMap, Claude, Tauri, React, Vite, npm), file paths, and version strings.
+- Mid-sentence English like "Workflow", "Database", "Page", "Settings", "Inspector Panel" → use Japanese: ワークフロー, データベース, ページ, 設定, 詳細パネル.
+- Titles must NOT have parenthetical English. Bad: "詳細パネル(Inspector Panel)". Good: "詳細パネル".
+- bodyNoCode uses Bubble/Notion-friendly vocabulary; body can use technical terms.
+
+[EN STYLE] — applies to all "en" text fields:
+- Natural plain English. Avoid forced literal translations from Japanese.
+- No Japanese loanwords or romaji except universal brand names.
+- bodyNoCode uses everyday plain English; body can use technical terms.
+
+CHANGE HINT guidance:
+- "easy": cosmetic / display-order / text changes; won't break other screens.
+- "neutral": local logic changes; might require checking adjacent screens.
+- "risky": shared logic (auth, navigation root, data shape); affects many screens.
+
+Remember: your response is JSON only. Begin with "{". End with "}". Every text field has BOTH "ja" and "en". Nothing else.`;
+
+/**
+ * v0.1.6: 言語に応じて SYSTEM_PROMPT を選ぶ。JA / EN で本質スキーマは同じ。
+ * v0.1.7: export 化(llamaClient.ts からも再利用)。
+ * v0.1.7 多言語化:常に bilingual prompt を返す(UI 言語によらず両言語生成)。
+ *
+ * 旧 SYSTEM_PROMPT_JA / SYSTEM_PROMPT_EN は将来の比較検証 / fallback 用に残置。
+ * void 参照で「未使用警告」を抑制する。
+ */
+void SYSTEM_PROMPT_JA;
+void SYSTEM_PROMPT_EN;
+export function buildSystemPrompt(_language: Language): string {
+  return SYSTEM_PROMPT_BILINGUAL;
+}
+
+export const USER_PROMPT_TEMPLATE = (folder: string) =>
   `Analyze the application at "${folder}" and output the Screens map JSON.
 
 Output JSON only (begin with {, end with }, no prose, no markdown).`;
+
+/** v0.1.7: ローカル LLM から再利用するため export 化。 */
+export { RESPONSE_SCHEMA };
 
 export type ScreenMapResult = {
   nodes: ScreenNode[];
@@ -448,8 +626,9 @@ export type ScreenMapResult = {
   /**
    * 機能拡張クイックウィン 1: アプリ全体の 1-2 文要約(非エンジニア向け)。
    * AI が判断できなければ undefined。
+   * v0.1.7 多言語:Bilingual({ja, en})または旧 string。
    */
-  appSummary?: string;
+  appSummary?: import("../types/screen").LocalizedText;
 };
 
 /**
@@ -713,30 +892,47 @@ export function normalizeAndSanitizeScreenMap(
   screens: ScreenMapResult,
   language: Language = "ja",
 ): ScreenMapResult {
-  // EN モードでは英文を壊さないために cleanup を identity に置換
-  const clean: (s: string) => string =
-    language === "en" ? (s) => s : cleanupEnglishInJapanese;
+  // v0.1.7 多言語化:LocalizedText(string | Bilingual)を扱える cleaner。
+  //   - string(旧データ):language が ja なら cleanup、en ならそのまま
+  //   - Bilingual(新データ):.ja は常に cleanup、.en は常にそのまま(英文を壊さない)
+  const cleanString =
+    language === "en" ? (s: string) => s : cleanupEnglishInJapanese;
+  const cleanLocalized = <T extends import("../types/screen").LocalizedText | undefined>(
+    t: T,
+  ): T => {
+    if (t === undefined) return t;
+    if (typeof t === "string") return cleanString(t) as unknown as T;
+    // Bilingual
+    return { ja: cleanupEnglishInJapanese(t.ja), en: t.en } as unknown as T;
+  };
+
   const normalized: ScreenMapResult = {
     nodes: screens.nodes.map((n) => ({
       ...n,
       depth: normalizeDepth(n.depth, n.position.y),
-      label: clean(n.label),
-      userIntent: n.userIntent ? clean(n.userIntent) : n.userIntent,
+      label: cleanLocalized(n.label),
+      userIntent: cleanLocalized(n.userIntent),
+      subActions: n.subActions
+        ? n.subActions.map((s) => cleanLocalized(s))
+        : n.subActions,
       detail: {
         ...n.detail,
-        title: clean(n.detail.title),
-        body: clean(n.detail.body),
-        bodyNoCode: clean(n.detail.bodyNoCode),
+        title: cleanLocalized(n.detail.title),
+        body: cleanLocalized(n.detail.body),
+        bodyNoCode: cleanLocalized(n.detail.bodyNoCode),
+        dataUsed: n.detail.dataUsed
+          ? n.detail.dataUsed.map((d) => cleanLocalized(d))
+          : n.detail.dataUsed,
         changeHint: n.detail.changeHint
           ? {
               ...n.detail.changeHint,
-              note: clean(n.detail.changeHint.note),
+              note: cleanLocalized(n.detail.changeHint.note),
             }
           : n.detail.changeHint,
       },
     })),
     edges: screens.edges,
-    appSummary: screens.appSummary ? clean(screens.appSummary) : screens.appSummary,
+    appSummary: cleanLocalized(screens.appSummary),
   };
   return sanitizeScreens(normalized);
 }
@@ -770,12 +966,12 @@ function normalizeDepth(rawDepth: unknown, y: number): number {
  * 部分的に壊れた応答でも「動くマップが見える」グレースフルデグラデーションになる。
  */
 function sanitizeScreens(screens: ScreenMapResult): ScreenMapResult {
-  // 1) 非有限座標を drop
+  // 1) 非有限 x 座標を drop(v0.1.7 hotfix:y は AppMap が depth から自動計算するので無視)
   const finitePositionNodes = screens.nodes.filter((n) => {
-    const ok = Number.isFinite(n.position.x) && Number.isFinite(n.position.y);
+    const ok = Number.isFinite(n.position.x);
     if (!ok) {
       console.warn(
-        `[AppMap] Dropping node id=${n.id} (${n.label}): non-finite position`,
+        `[AppMap] Dropping node id=${n.id} (${n.label}): non-finite x`,
         n.position,
       );
     }
@@ -880,8 +1076,10 @@ function unwrapResult(parsed: unknown): unknown {
  *   1. 文字列全体を JSON.parse
  *   2. ```json ... ``` で囲まれたコードブロックから抽出
  *   3. 最初の `{` から対応する `}` までの中身を抽出(バランス取り)
+ *
+ * v0.1.7: ローカル LLM の出力にも prose / コードフェンス混入があるため export 化。
  */
-function extractJsonFromString(s: string): unknown {
+export function extractJsonFromString(s: string): unknown {
   // 1. 全体パース
   try {
     return JSON.parse(s);
@@ -927,23 +1125,38 @@ function extractJsonFromString(s: string): unknown {
  * これがないと、不正な応答(例: position が missing、id が文字列)が NodeTile まで
  * 流れてきて `node.position.x` で undefined エラー → 画面が真っ白で原因不明、になる。
  */
+/**
+ * v0.1.7 多言語化:LocalizedText は string または {ja: string, en: string} を許可。
+ *  - 旧 v0.1.6 までの AI 出力 / localStorage 復元データは string
+ *  - v0.1.7+ の AI 出力は Bilingual オブジェクト
+ *  どちらでも valid 判定する。
+ */
+function isLocalizedText(v: unknown): boolean {
+  if (typeof v === "string") return true;
+  if (typeof v !== "object" || v === null) return false;
+  const obj = v as Record<string, unknown>;
+  return typeof obj.ja === "string" && typeof obj.en === "string";
+}
+
 function isScreenNode(v: unknown): v is ScreenNode {
   if (typeof v !== "object" || v === null) return false;
   const n = v as Record<string, unknown>;
 
   if (typeof n.id !== "number") return false;
-  if (typeof n.label !== "string") return false;
+  if (!isLocalizedText(n.label)) return false;
 
   if (typeof n.position !== "object" || n.position === null) return false;
   const pos = n.position as Record<string, unknown>;
-  if (typeof pos.x !== "number" || typeof pos.y !== "number") return false;
+  // v0.1.7 hotfix:y は省略可(AppMap が depth から自動計算するため)。
+  if (typeof pos.x !== "number") return false;
+  if ("y" in pos && typeof pos.y !== "number") return false;
 
   if (typeof n.detail !== "object" || n.detail === null) return false;
   const detail = n.detail as Record<string, unknown>;
   if (
-    typeof detail.title !== "string" ||
-    typeof detail.body !== "string" ||
-    typeof detail.bodyNoCode !== "string"
+    !isLocalizedText(detail.title) ||
+    !isLocalizedText(detail.body) ||
+    !isLocalizedText(detail.bodyNoCode)
   ) {
     return false;
   }
@@ -952,12 +1165,12 @@ function isScreenNode(v: unknown): v is ScreenNode {
     if (!Array.isArray(detail.files)) return false;
     if (!detail.files.every((f) => typeof f === "string")) return false;
   }
-  // dataUsed は省略可、あれば string[](クイックウィン 4)
+  // dataUsed は省略可、あれば LocalizedText[](クイックウィン 4、v0.1.7 から各要素 bilingual)
   if ("dataUsed" in detail) {
     if (!Array.isArray(detail.dataUsed)) return false;
-    if (!detail.dataUsed.every((d) => typeof d === "string")) return false;
+    if (!detail.dataUsed.every((d) => isLocalizedText(d))) return false;
   }
-  // changeHint は省略可、あれば { safety, note } 形(クイックウィン 5)
+  // changeHint は省略可、あれば { safety, note: LocalizedText } 形(クイックウィン 5)
   if ("changeHint" in detail) {
     const hint = detail.changeHint;
     if (typeof hint !== "object" || hint === null) return false;
@@ -969,14 +1182,21 @@ function isScreenNode(v: unknown): v is ScreenNode {
     ) {
       return false;
     }
-    if (typeof h.note !== "string") return false;
+    if (!isLocalizedText(h.note)) return false;
   }
 
   // depth は省略可。あれば number でなければならない(NaN は通すが致命ではない)。
   if ("depth" in n && typeof n.depth !== "number") return false;
-  // userIntent / isEntryPoint は省略可、ある場合は型確認(クイックウィン 2/3)
-  if ("userIntent" in n && typeof n.userIntent !== "string") return false;
+  // userIntent は LocalizedText、isEntryPoint は boolean(クイックウィン 2/3)
+  if ("userIntent" in n && !isLocalizedText(n.userIntent)) return false;
   if ("isEntryPoint" in n && typeof n.isEntryPoint !== "boolean") return false;
+  // v0.1.7 マインドマップ:subActions は省略可、あれば LocalizedText[]
+  if ("subActions" in n) {
+    if (!Array.isArray(n.subActions)) return false;
+    if (!n.subActions.every((s) => isLocalizedText(s))) return false;
+  }
+  // v0.1.7 detailLevel:省略可、あれば number 0-2
+  if ("detailLevel" in n && typeof n.detailLevel !== "number") return false;
 
   return true;
 }
@@ -992,13 +1212,30 @@ function isScreenEdge(v: unknown): v is ScreenEdge {
   return true;
 }
 
-function isScreenMapResult(v: unknown): v is ScreenMapResult {
+/**
+ * v0.1.7 hotfix:Qwen 等のローカル LLM が edges を出し忘れるケースを救済。
+ * edges が undefined or null なら空配列扱いにして isScreenMapResult を通す。
+ * 呼出側は parsed.edges 参照前にこの関数を通す前提なので、ここで mutate しても OK。
+ */
+function injectMissingEdges(v: unknown): void {
+  if (typeof v === "object" && v !== null) {
+    const obj = v as Record<string, unknown>;
+    if (!("edges" in obj) || obj.edges === null || obj.edges === undefined) {
+      obj.edges = [];
+    }
+  }
+}
+
+/** v0.1.7: llamaClient から再利用するため export 化。 */
+export function isScreenMapResult(v: unknown): v is ScreenMapResult {
+  // v0.1.7 hotfix:出し忘れの edges を空配列で補完(LLM の出力品質ばらつき対策)
+  injectMissingEdges(v);
   if (typeof v !== "object" || v === null) return false;
   const obj = v as Record<string, unknown>;
   if (!Array.isArray(obj.nodes) || !Array.isArray(obj.edges)) return false;
   if (!obj.nodes.every(isScreenNode)) return false;
   if (!obj.edges.every(isScreenEdge)) return false;
-  // appSummary は省略可、あれば string(クイックウィン 1)
-  if ("appSummary" in obj && typeof obj.appSummary !== "string") return false;
+  // v0.1.7 hotfix:appSummary は省略可、あれば LocalizedText(string | {ja, en})
+  if ("appSummary" in obj && !isLocalizedText(obj.appSummary)) return false;
   return true;
 }

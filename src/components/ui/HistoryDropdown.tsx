@@ -77,8 +77,8 @@ function HistoryDropdown({
         disabled={disabled}
         className={`rounded-[14px] px-4 py-2 text-sm transition-colors border ${
           disabled
-            ? "border-charcoal text-soft-grid/50 cursor-not-allowed"
-            : "border-soft-grid text-off-white hover:bg-charcoal cursor-pointer"
+            ? "border-border-soft text-ink-soft/50 cursor-not-allowed bg-paper"
+            : "border-border-soft text-ink hover:bg-canvas cursor-pointer bg-paper"
         }`}
         aria-label={T.history.buttonAriaLabel}
         aria-expanded={open}
@@ -88,7 +88,7 @@ function HistoryDropdown({
 
       {open && history.length > 0 && (
         <div
-          className="absolute top-full left-0 mt-1 w-[360px] bg-slate border border-charcoal rounded-[14px] shadow-md z-20"
+          className="absolute top-full left-0 mt-1 w-[360px] bg-paper border border-border-soft rounded-[14px] shadow-lg z-20"
           role="menu"
         >
           <ul className="max-h-80 overflow-y-auto py-1">
@@ -100,8 +100,8 @@ function HistoryDropdown({
                   <div
                     className={`px-3 py-2 flex items-center gap-3 cursor-pointer transition-colors ${
                       isCurrent
-                        ? "bg-charcoal/60"
-                        : "hover:bg-charcoal/40"
+                        ? "bg-feature-teal-soft"
+                        : "hover:bg-canvas"
                     }`}
                     onClick={() => {
                       onSelect(entry);
@@ -111,19 +111,19 @@ function HistoryDropdown({
                     {/* 現在表示中マーク */}
                     <span
                       className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                        isCurrent ? "bg-electric-teal" : "bg-transparent"
+                        isCurrent ? "bg-feature-teal" : "bg-transparent"
                       }`}
                       aria-hidden="true"
                     />
 
                     <div className="min-w-0 flex-1">
                       <div
-                        className="text-sm text-off-white truncate font-mono"
+                        className="text-sm text-ink-strong truncate font-mono"
                         title={entry.folderPath}
                       >
                         {short}
                       </div>
-                      <div className="text-xs text-soft-grid mt-0.5">
+                      <div className="text-xs text-ink-soft mt-0.5">
                         {relativeTime(entry.analyzedAt, language)}
                         {entry.costUsd !== null && (
                           <> · ${entry.costUsd.toFixed(4)}</>
@@ -139,7 +139,7 @@ function HistoryDropdown({
                         e.stopPropagation();
                         onRemove(entry.folderPath);
                       }}
-                      className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-[8px] text-soft-grid hover:bg-alert-red/20 hover:text-alert-red transition-colors text-base leading-none"
+                      className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-[8px] text-ink-soft hover:bg-impact-high/20 hover:text-impact-high transition-colors text-base leading-none"
                       aria-label={T.history.removeAriaLabel(short)}
                     >
                       ×

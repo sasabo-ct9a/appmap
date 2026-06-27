@@ -3,6 +3,35 @@ import type { Language } from "./i18n";
 import { asLanguage } from "./i18n";
 
 /**
+ * v0.1.7 機能拡張:AI エンジン選択。
+ *   - "claude" = Anthropic の Claude Code CLI(クラウド経由、Pro/Max 必要)
+ *   - "local"  = AppMap 同梱の llama.cpp + ローカル GGUF モデル(オフライン、無料)
+ * 既存ユーザーへの影響を避けるため、未設定時は "claude"。
+ */
+export type Engine = "claude" | "local";
+
+/** 不正値・未保存を "claude" に倒す安全ユーティリティ(asLanguage と同じ役割)。 */
+export function asEngine(v: unknown): Engine {
+  return v === "local" ? "local" : "claude";
+}
+
+/**
+ * v0.1.7 機能拡張:詳細レベル選択(ヘッダーの 2 段 segmented pill 連動)。
+ *   - "simple"   = 最低限の主要ノードだけ(初学者向け、約 40% の重要ノード)
+ *   - "detailed" = 全表示(デフォルト)
+ * 1 回の AI 分析データから React 側でフィルタする。切替えに再分析は不要。
+ *
+ * v0.1.7 当初は 3 段(simple/standard/detailed)だったが、small 分析でも 3 段が機能しない
+ * + UI 判断にも noise だった経緯で 2 段に簡略化。
+ */
+export type DetailLevel = "simple" | "detailed";
+
+/** 不正値・未保存を "detailed"(全表示)に倒す。 */
+export function asDetailLevel(v: unknown): DetailLevel {
+  return v === "simple" ? "simple" : "detailed";
+}
+
+/**
  * 分析結果の localStorage 永続化(Phase 3 Step 機能拡張 A)。
  *
  * 目的:
@@ -69,6 +98,16 @@ type AppMapStore = {
    * AI プロンプトもこの設定に従って JA / EN を切替える。
    */
   language?: Language;
+  /**
+   * v0.1.7 AI エンジン選択(Claude / Local)。
+   * 未保存時は asEngine() で "claude" に fallback(既存ユーザー無影響)。
+   */
+  engine?: Engine;
+  /**
+   * v0.1.7 詳細レベル選択(ヘッダーの 3 段 pill 連動)。
+   * 未保存時は asDetailLevel() で "standard" に fallback。
+   */
+  detailLevel?: DetailLevel;
 };
 
 const EMPTY: AppMapStore = {
@@ -164,6 +203,30 @@ export function saveLanguage(language: Language): void {
 export function loadLanguage(): Language {
   const store = loadStore();
   return asLanguage(store.language);
+}
+
+/** v0.1.7 AI エンジン選択を永続化。 */
+export function saveEngine(engine: Engine): void {
+  const store = loadStore();
+  saveStore({ ...store, engine });
+}
+
+/** v0.1.7 保存済み AI エンジンを取り出す。未保存・不正値は "claude" になる(既存ユーザー保護)。 */
+export function loadEngine(): Engine {
+  const store = loadStore();
+  return asEngine(store.engine);
+}
+
+/** v0.1.7 詳細レベルを永続化。 */
+export function saveDetailLevel(detailLevel: DetailLevel): void {
+  const store = loadStore();
+  saveStore({ ...store, detailLevel });
+}
+
+/** v0.1.7 保存済み詳細レベル。未保存・不正値は "standard"。 */
+export function loadDetailLevel(): DetailLevel {
+  const store = loadStore();
+  return asDetailLevel(store.detailLevel);
 }
 
 /**

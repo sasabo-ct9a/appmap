@@ -19,10 +19,12 @@ type ButtonProps = {
   children: ReactNode;
 };
 
+// v0.1.7 大刷新:LIGHT モードに合わせて色更新。Primary は teal、Secondary は白背景 + ink テキスト。
 const VARIANT_CLASSES: Record<NonNullable<ButtonProps["variant"]>, string> = {
-  primary: "bg-electric-teal hover:bg-electric-teal/90 text-white",
+  primary:
+    "bg-feature-teal hover:bg-feature-teal/90 text-white shadow-sm",
   secondary:
-    "border border-soft-grid text-off-white hover:bg-slate bg-transparent",
+    "border border-border-soft text-ink hover:bg-canvas bg-paper",
 };
 
 function Button({

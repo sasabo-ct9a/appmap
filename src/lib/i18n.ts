@@ -24,6 +24,9 @@ export type Translations = {
     noCodeLabel: string;
     noCodeAriaLabel: string;
     languageAriaLabel: string;
+    detailLevelAriaLabel: string;
+    detailLevelSimple: string;
+    detailLevelDetailed: string;
   };
   app: {
     pickFolder: string;
@@ -130,6 +133,67 @@ export type Translations = {
     resultPreview: (text: string) => string;
     resultPreviewTyped: (typeName: string, text: string) => string;
   };
+  specDoc: {
+    // UI(ボタン・モーダル)
+    buttonLabel: string;
+    modalTitle: string;
+    audienceLabel: string;
+    audienceEngineer: string;
+    audienceNoCode: string;
+    audienceEndUser: string;
+    copyButton: string;
+    copied: string;
+    printButton: string;
+    closeButton: string;
+    previewHeading: string;
+    // 仕様書本体のセクション見出し・固定語彙
+    docTitle: string;
+    emptyAppSummary: string;
+    sectionOverview: string;
+    sectionScreenList: string;
+    sectionScreenDetail: string;
+    sectionTransitions: string;
+    tableNum: string;
+    tableName: string;
+    tableRole: string;
+    fieldRole: string;
+    fieldEntryPoint: string;
+    fieldDescription: string;
+    fieldDataUsed: string;
+    fieldFiles: string;
+    fieldRelatedScreens: string;
+    fieldChangeHint: string;
+  };
+  localLLM: {
+    // エンジン切替 UI(設定モーダル)
+    settingsButtonAria: string;
+    settingsTitle: string;
+    engineLabel: string;
+    engineClaude: string;
+    engineLocal: string;
+    engineClaudeNote: string;
+    engineLocalNote: string;
+    // セットアップウィザード
+    wizardTitle: string;
+    wizardProgress: (done: number) => string;
+    stepDone: string;
+    step1Title: string;
+    step1Description: string;
+    step1ManualHint: string;
+    step1NotFound: string;
+    step1ShowPath: string;
+    step1Recheck: string;
+    step2Title: string;
+    step2Description: string;
+    step2DownloadLabel: string;
+    step2DownloadingLabel: string;
+    step2Progress: (downloadedMB: number, totalMB: number) => string;
+    step2NeedBinary: string;
+    finalHint: string;
+    statusUsingLocal: (modelName: string) => string;
+    errorBinaryMissing: string;
+    errorDownloadFailed: (msg: string) => string;
+  };
 };
 
 const JA: Translations = {
@@ -141,6 +205,9 @@ const JA: Translations = {
     noCodeLabel: "ノーコード語",
     noCodeAriaLabel: "ノーコード語切替",
     languageAriaLabel: "言語切替",
+    detailLevelAriaLabel: "詳細レベル切替",
+    detailLevelSimple: "簡素",
+    detailLevelDetailed: "詳細",
   },
   app: {
     pickFolder: "フォルダを選ぶ",
@@ -154,9 +221,9 @@ const JA: Translations = {
     statusClaudeReady: (version) =>
       `Claude CLI 検出 (${version}) — サンプルマップ表示中、フォルダを選んで実分析`,
     statusAnalyzing: (folder, fileCount, elapsed) =>
-      `分析中: ${folder} (${fileCount} ファイル) — 経過 ${elapsed} 秒`,
+      `分析中: ${folder} (${fileCount} ファイル) — 経過 ${formatElapsed(elapsed, "ja")}`,
     statusAiMap: (screens, links, costPart, folder) =>
-      `AI 生成マップ表示中: ${screens} 画面 / ${links} リンク${costPart}(${folder})`,
+      `AI 生成マップ表示中: ${screens} 要素 / ${links} リンク${costPart}(${folder})`,
     statusDone: "完了",
     statusSelected: (folder, fileCount) =>
       `選択中: ${folder} (${fileCount} ファイル)`,
@@ -176,7 +243,7 @@ const JA: Translations = {
     minutesAgo: (n) => `${n} 分前`,
     hoursAgo: (n) => `${n} 時間前`,
     daysAgo: (n) => `${n} 日前`,
-    screens: (n) => `${n} 画面`,
+    screens: (n) => `${n} 要素`,
     removeAriaLabel: (label) => `${label} を履歴から削除`,
   },
   canvas: {
@@ -274,6 +341,67 @@ const JA: Translations = {
     resultPreviewTyped: (typeName, text) =>
       `result (型: ${typeName}):\n${text}`,
   },
+  specDoc: {
+    buttonLabel: "仕様書を作成",
+    modalTitle: "アプリ仕様書",
+    audienceLabel: "想定読者",
+    audienceEngineer: "エンジニア",
+    audienceNoCode: "ノーコード経験者",
+    audienceEndUser: "エンドユーザー",
+    copyButton: "Markdown をコピー",
+    copied: "コピーしました",
+    printButton: "PDF で保存",
+    closeButton: "閉じる",
+    previewHeading: "プレビュー",
+    docTitle: "アプリ仕様書",
+    emptyAppSummary: "(AI が判断できませんでした)",
+    sectionOverview: "概要",
+    sectionScreenList: "画面一覧",
+    sectionScreenDetail: "画面詳細",
+    sectionTransitions: "画面遷移",
+    tableNum: "#",
+    tableName: "画面名",
+    tableRole: "役割",
+    fieldRole: "役割",
+    fieldEntryPoint: "起点画面",
+    fieldDescription: "説明",
+    fieldDataUsed: "使うデータ",
+    fieldFiles: "関連ファイル",
+    fieldRelatedScreens: "関連画面",
+    fieldChangeHint: "変更目安",
+  },
+  localLLM: {
+    settingsButtonAria: "設定",
+    settingsTitle: "設定",
+    engineLabel: "AI エンジン",
+    engineClaude: "Claude(クラウド)",
+    engineLocal: "ローカル LLM(オフライン)",
+    engineClaudeNote: "高品質。Claude Pro/Max 契約が必要、1 回 ~$0.6。",
+    engineLocalNote: "オフライン・無料。初回 4.5 GB DL が必要、品質はやや劣る。",
+    wizardTitle: "ローカル LLM の準備",
+    wizardProgress: (done) => `${done} / 2 完了`,
+    stepDone: "完了",
+    step1Title: "llama-server バイナリ",
+    step1Description: "ローカル LLM を動かす本体",
+    step1ManualHint:
+      "現状(Phase 1)は手動配置が必要です。llama.cpp の release から llama-server.exe を落として、下のパスに置いてください。",
+    step1NotFound: "llama-server が見つかりません",
+    step1ShowPath: "配置先パスを開く",
+    step1Recheck: "再確認",
+    step2Title: "AI モデル(Qwen 2.5-Coder 14B、約 8.4 GB)",
+    step2Description: "コード分析用の AI モデル",
+    step2DownloadLabel: "ダウンロード開始",
+    step2DownloadingLabel: "ダウンロード中…",
+    step2Progress: (downloadedMB, totalMB) =>
+      `${downloadedMB} MB / ${totalMB > 0 ? totalMB + " MB" : "? MB"}`,
+    step2NeedBinary: "(先に llama-server を配置してください)",
+    finalHint:
+      "両方完了したら「フォルダを選ぶ」が使えるようになります。",
+    statusUsingLocal: (modelName) => `ローカル LLM 使用中(${modelName})`,
+    errorBinaryMissing:
+      "llama-server バイナリが見つかりません。手動配置パスに置いてください。",
+    errorDownloadFailed: (msg) => `ダウンロードに失敗しました: ${msg}`,
+  },
 };
 
 const EN: Translations = {
@@ -285,6 +413,9 @@ const EN: Translations = {
     noCodeLabel: "Plain words",
     noCodeAriaLabel: "Toggle plain-words mode",
     languageAriaLabel: "Toggle language",
+    detailLevelAriaLabel: "Toggle detail level",
+    detailLevelSimple: "Simple",
+    detailLevelDetailed: "Detailed",
   },
   app: {
     pickFolder: "Pick folder",
@@ -300,7 +431,7 @@ const EN: Translations = {
     statusClaudeReady: (version) =>
       `Claude CLI detected (${version}) — showing sample map. Pick a folder for a real analysis.`,
     statusAnalyzing: (folder, fileCount, elapsed) =>
-      `Analyzing: ${folder} (${fileCount} files) — ${elapsed}s elapsed`,
+      `Analyzing: ${folder} (${fileCount} files) — ${formatElapsed(elapsed, "en")} elapsed`,
     statusAiMap: (screens, links, costPart, folder) =>
       `AI map: ${screens} screens / ${links} links${costPart} (${folder})`,
     statusDone: "Done",
@@ -424,6 +555,69 @@ const EN: Translations = {
     resultPreviewTyped: (typeName, text) =>
       `result (type: ${typeName}):\n${text}`,
   },
+  specDoc: {
+    buttonLabel: "Generate spec",
+    modalTitle: "App specification",
+    audienceLabel: "Audience",
+    audienceEngineer: "Engineer",
+    audienceNoCode: "Non-coder",
+    audienceEndUser: "End user",
+    copyButton: "Copy Markdown",
+    copied: "Copied",
+    printButton: "Save as PDF",
+    closeButton: "Close",
+    previewHeading: "Preview",
+    docTitle: "App Specification",
+    emptyAppSummary: "(Not determined by AI)",
+    sectionOverview: "Overview",
+    sectionScreenList: "Screen list",
+    sectionScreenDetail: "Screen details",
+    sectionTransitions: "Screen transitions",
+    tableNum: "#",
+    tableName: "Screen",
+    tableRole: "Role",
+    fieldRole: "Role",
+    fieldEntryPoint: "Entry point",
+    fieldDescription: "Description",
+    fieldDataUsed: "Data used",
+    fieldFiles: "Related files",
+    fieldRelatedScreens: "Related screens",
+    fieldChangeHint: "Change hint",
+  },
+  localLLM: {
+    settingsButtonAria: "Settings",
+    settingsTitle: "Settings",
+    engineLabel: "AI engine",
+    engineClaude: "Claude (cloud)",
+    engineLocal: "Local LLM (offline)",
+    engineClaudeNote:
+      "Highest quality. Requires Claude Pro/Max, ~$0.6 per analysis.",
+    engineLocalNote:
+      "Offline and free. Needs a one-time 4.5 GB download. Quality is lower.",
+    wizardTitle: "Set up local LLM",
+    wizardProgress: (done) => `${done} / 2 done`,
+    stepDone: "done",
+    step1Title: "llama-server binary",
+    step1Description: "The runtime that drives the local LLM",
+    step1ManualHint:
+      "Phase 1: please place the binary manually. Download llama-server from llama.cpp releases and place it at the path below.",
+    step1NotFound: "llama-server not found",
+    step1ShowPath: "Open destination folder",
+    step1Recheck: "Recheck",
+    step2Title: "AI model (Qwen 2.5-Coder 14B, ~8.4 GB)",
+    step2Description: "The model used for code analysis",
+    step2DownloadLabel: "Start download",
+    step2DownloadingLabel: "Downloading…",
+    step2Progress: (downloadedMB, totalMB) =>
+      `${downloadedMB} MB / ${totalMB > 0 ? totalMB + " MB" : "? MB"}`,
+    step2NeedBinary: "(Place the llama-server binary first)",
+    finalHint:
+      'Once both steps are done, "Pick folder" becomes available.',
+    statusUsingLocal: (modelName) => `Using local LLM (${modelName})`,
+    errorBinaryMissing:
+      "llama-server binary not found. Please place it at the manual install path.",
+    errorDownloadFailed: (msg) => `Download failed: ${msg}`,
+  },
 };
 
 const TRANSLATIONS: Record<Language, Translations> = { ja: JA, en: EN };
@@ -436,4 +630,36 @@ export function t(language: Language): Translations {
 /** 不正な値が入っても "ja" に fallback する安全ユーティリティ。 */
 export function asLanguage(v: unknown): Language {
   return v === "en" ? "en" : "ja";
+}
+
+/**
+ * v0.1.7 経過時間を読みやすくフォーマット。
+ *   - < 60 秒: 「45 秒」/ "45s"
+ *   - >= 60 秒: 「1 分 20 秒」/ "1m 20s"
+ * 分析中ステータスで 60 秒超えると秒数だけだと分かりにくい問題への対応。
+ */
+function formatElapsed(seconds: number, language: Language): string {
+  if (seconds < 60) {
+    return language === "ja" ? `${seconds} 秒` : `${seconds}s`;
+  }
+  const min = Math.floor(seconds / 60);
+  const sec = seconds % 60;
+  return language === "ja" ? `${min} 分 ${sec} 秒` : `${min}m ${sec}s`;
+}
+
+/**
+ * v0.1.7 多言語対応:LocalizedText(string | {ja, en})から現在の UI 言語の
+ * 文字列を取り出す。
+ *   - string(旧 v0.1.6 以前のデータ):そのまま返す(言語問わず同じ文字)
+ *   - {ja, en}(v0.1.7+ の AI 出力):lang のキーを返す。欠落時は反対側 → 空文字
+ *
+ * 言語切替時はこの関数が render 時に呼ばれるので、再分析なしで JA/EN 即切替が成立する。
+ */
+export function pickLocalized(
+  text: string | { ja: string; en: string } | undefined,
+  language: Language,
+): string {
+  if (text === undefined || text === null) return "";
+  if (typeof text === "string") return text;
+  return text[language] || text[language === "ja" ? "en" : "ja"] || "";
 }

@@ -65,18 +65,23 @@ function Edge({
   const toDepth = toNode.depth ?? 0;
   const isDepthCrossing = fromDepth !== toDepth;
 
+  // v0.1.7 デザイン刷新:
+  //   - stroke を 2 → 1.5px、cross-depth は 1.5 → 1.2px に細身化
+  //   - グラデーション edge-gradient を使い、出発側薄→終点側濃で進行方向を視覚化
+  //   - bidirectional 用の点線パターンも軽量化(6/5 → 5/4)
   const commonStrokeProps = {
-    className: "stroke-electric-teal",
-    strokeOpacity: isDepthCrossing ? 0.65 : 0.9,
-    strokeWidth: isDepthCrossing ? 1.5 : 2,
+    stroke: "url(#edge-gradient)",
+    strokeOpacity: isDepthCrossing ? 0.5 : 0.85,
+    strokeWidth: isDepthCrossing ? 1.2 : 1.5,
+    strokeLinecap: "round" as const,
     strokeDasharray: isDepthCrossing
       ? "3 5"
       : edge.bidirectional
-        ? "6 5"
+        ? "5 4"
         : undefined,
     markerEnd: `url(#${arrowMarkerId})`,
     markerStart: edge.bidirectional ? `url(#${arrowMarkerId})` : undefined,
-    style: { filter: "drop-shadow(0 0 4px rgba(20, 184, 166, 0.6))" },
+    style: { filter: "drop-shadow(0 0 5px rgba(20, 184, 166, 0.35))" },
   };
 
   // ──────────────────────────────────────────────────
