@@ -157,3 +157,25 @@ html, body {
 .spec-doc-watermark {
   display: none;
 }
+
+/*
+ * v0.1.7 プレビュー用:仕様書モーダル内のマップを「見切れず、かつ大きく」表示する。
+ *   - SVG を width:100% + height:auto にして、必ず親幅を使い切る(viewBox 比で
+ *     縦は自動決定)。以前は height:100% にしていたせいで、横長 viewBox が
+ *     高さ側で先にフィットし、左右が letterbox で余っていた。
+ *   - 万一巨大 viewBox で縦にはみ出すときのために max-height: 78vh を保険で残す。
+ *   - min-height は 520px。極端に縦の短い(横長)マップでもある程度の存在感を保つ。
+ */
+.spec-doc-map-wrap {
+  min-height: 520px;
+}
+.spec-doc-map-wrap .spec-doc-map {
+  width: 100%;
+  display: block;
+}
+.spec-doc-map-wrap .spec-doc-map svg {
+  width: 100%;
+  height: auto;
+  max-height: 78vh;
+  display: block;
+}

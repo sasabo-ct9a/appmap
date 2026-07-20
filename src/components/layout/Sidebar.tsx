@@ -1,6 +1,7 @@
-import { useState } from "react";
 import LogoMark from "../ui/LogoMark";
 import type { StoredAnalysis } from "../../lib/storage";
+import { LightbulbIcon } from "../ui/Icons";
+import { t, type Language } from "../../lib/i18n";
 
 /**
  * v0.1.7 大刷新 v2:Deep navy サイドバー(spec 準拠)。
@@ -8,8 +9,8 @@ import type { StoredAnalysis } from "../../lib/storage";
  */
 type NavKey =
   | "intro"
-  | "structure"
   | "impact"
+  | "checklist"
   | "project-overview"
   | "project-data"
   | "project-settings";
@@ -22,6 +23,7 @@ type SidebarProps = {
   activeFolderPath: string | null;
   onSelectTab: (folderPath: string) => void;
   onCloseTab: (folderPath: string) => void;
+  language: Language;
 };
 
 function shortFolder(path: string): string {
@@ -44,34 +46,34 @@ function Sidebar({
   activeFolderPath,
   onSelectTab,
   onCloseTab,
+  language,
 }: SidebarProps) {
-  const [projectOpen, setProjectOpen] = useState(true);
-
+  const T = t(language).sidebar;
   const navItems: NavItem[] = [
     {
       key: "intro",
-      title: "はじめに",
-      subtitle: "このアプリでできること",
+      title: T.navHomeTitle,
+      subtitle: T.navHomeSubtitle,
       icon: <HomeIcon />,
     },
     {
-      key: "structure",
-      title: "構造を見る",
-      subtitle: "画面のつながりを見る",
-      icon: <NetworkIcon />,
+      key: "impact",
+      title: T.navImpactTitle,
+      subtitle: T.navImpactSubtitle,
+      icon: <PulseIcon />,
     },
     {
-      key: "impact",
-      title: "変更の影響を確認",
-      subtitle: "どこを変えると影響する?",
-      icon: <PulseIcon />,
+      key: "checklist",
+      title: T.navChecklistTitle,
+      subtitle: T.navChecklistSubtitle,
+      icon: <ShieldIcon />,
     },
   ];
 
   const projectItems: { key: NavKey; label: string }[] = [
-    { key: "project-overview", label: "概要" },
-    { key: "project-data", label: "データ" },
-    { key: "project-settings", label: "設定" },
+    { key: "project-overview", label: T.projectOverview },
+    { key: "project-data", label: T.projectData },
+    { key: "project-settings", label: T.projectSettings },
   ];
 
   return (
@@ -152,69 +154,57 @@ function Sidebar({
             );
           })}
 
-          {/* プロジェクト情報セクション(折り畳み) */}
+          {/* プロジェクト情報セクション(常時展開、折り畳み撤去) */}
           <li className="pt-4">
-            <button
-              type="button"
-              onClick={() => setProjectOpen(!projectOpen)}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-[8px] hover:bg-white/5 transition-colors cursor-pointer"
-            >
+            <div className="w-full flex items-center gap-2 px-3 py-2">
               <FolderIcon />
               <span
                 className="text-sm font-semibold flex-1 text-left"
                 style={{ color: "var(--color-nav-text)" }}
               >
-                プロジェクト情報
+                {T.sectionProjectInfo}
               </span>
-              <ChevronDown
-                style={{
-                  transform: projectOpen ? "rotate(0)" : "rotate(-90deg)",
-                  transition: "transform 0.15s",
-                }}
-              />
-            </button>
-            {projectOpen && (
-              <ul className="ml-9 mt-1 space-y-0.5">
-                {projectItems.map((p) => {
-                  const active = activeNav === p.key;
-                  return (
-                    <li key={p.key}>
-                      <button
-                        type="button"
-                        onClick={() => onNavChange(p.key)}
-                        className="w-full text-left rounded px-2 py-1.5 text-sm transition-colors cursor-pointer flex items-center gap-2"
+            </div>
+            <ul className="ml-9 mt-1 space-y-0.5">
+              {projectItems.map((p) => {
+                const active = activeNav === p.key;
+                return (
+                  <li key={p.key}>
+                    <button
+                      type="button"
+                      onClick={() => onNavChange(p.key)}
+                      className="w-full text-left rounded px-2 py-1.5 text-sm transition-colors cursor-pointer flex items-center gap-2"
+                      style={{
+                        color: active
+                          ? "var(--color-nav-accent)"
+                          : "var(--color-nav-text-soft)",
+                        fontWeight: active ? 600 : 400,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!active)
+                          e.currentTarget.style.color =
+                            "var(--color-nav-text)";
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!active)
+                          e.currentTarget.style.color =
+                            "var(--color-nav-text-soft)";
+                      }}
+                    >
+                      <span
+                        className="w-1 h-1 rounded-full"
                         style={{
-                          color: active
+                          background: active
                             ? "var(--color-nav-accent)"
                             : "var(--color-nav-text-soft)",
-                          fontWeight: active ? 600 : 400,
                         }}
-                        onMouseEnter={(e) => {
-                          if (!active)
-                            e.currentTarget.style.color =
-                              "var(--color-nav-text)";
-                        }}
-                        onMouseLeave={(e) => {
-                          if (!active)
-                            e.currentTarget.style.color =
-                              "var(--color-nav-text-soft)";
-                        }}
-                      >
-                        <span
-                          className="w-1 h-1 rounded-full"
-                          style={{
-                            background: active
-                              ? "var(--color-nav-accent)"
-                              : "var(--color-nav-text-soft)",
-                          }}
-                        />
-                        {p.label}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
+                      />
+                      {p.label}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           </li>
 
           {/* 開いているプロジェクト(旧 TabBar をサイドバーに移管)*/}
@@ -224,7 +214,7 @@ function Sidebar({
                 className="px-3 pb-1.5 text-[10px] font-bold tracking-wider uppercase"
                 style={{ color: "var(--color-nav-text-soft)" }}
               >
-                開いているプロジェクト
+                {T.sectionOpenProjects}
               </div>
               <ul className="space-y-0.5">
                 {tabs.map((tab) => {
@@ -281,7 +271,7 @@ function Sidebar({
                             e.stopPropagation();
                             onCloseTab(tab.folderPath);
                           }}
-                          aria-label={`${short} を閉じる`}
+                          aria-label={T.closeTabAria(short)}
                           className={`w-4 h-4 flex items-center justify-center rounded text-[13px] leading-none transition-all flex-shrink-0 ${
                             active
                               ? "opacity-70"
@@ -318,26 +308,24 @@ function Sidebar({
         style={{ background: "var(--color-nav-bg-card)" }}
       >
         <div className="flex items-start gap-2">
-          <span
-            className="text-base flex-shrink-0"
-            style={{ color: "var(--color-nav-accent)" }}
-          >
-            💡
-          </span>
+          <LightbulbIcon
+            className="w-4 h-4 flex-shrink-0 mt-0.5"
+            color="var(--color-nav-accent)"
+          />
           <div className="min-w-0">
             <div
               className="text-xs font-semibold"
               style={{ color: "var(--color-nav-text-strong)" }}
             >
-              3 分で理解するコツ
+              {T.tipTitle}
             </div>
             <div
               className="text-[11px] mt-1 leading-relaxed"
               style={{ color: "var(--color-nav-text)" }}
             >
-              まずは「できること」から
+              {T.tipLine1}
               <br />
-              全体像をつかみましょう
+              {T.tipLine2}
             </div>
           </div>
         </div>
@@ -356,21 +344,20 @@ function HomeIcon() {
   );
 }
 
-function NetworkIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="5" r="2.5" />
-      <circle cx="5" cy="18" r="2.5" />
-      <circle cx="19" cy="18" r="2.5" />
-      <path d="M12 7.5 L7 15.5 M12 7.5 L17 15.5" />
-    </svg>
-  );
-}
 
 function PulseIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M3 12 H7 L10 5 L14 19 L17 12 H21" />
+    </svg>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3 L20 6 V13 A9 9 0 0 1 12 21 A9 9 0 0 1 4 13 V6 Z" />
+      <path d="M9 12 L11 14 L15 10" />
     </svg>
   );
 }
@@ -401,21 +388,6 @@ function FolderIconSmall({ color }: { color: string }) {
       style={{ color }}
     >
       <path d="M3 7 H9 L11 5 H21 V19 H3 Z" />
-    </svg>
-  );
-}
-
-function ChevronDown({ style }: { style?: React.CSSProperties }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      className="w-3.5 h-3.5"
-      style={{ color: "var(--color-nav-text-soft)", ...style }}
-    >
-      <path d="M6 9 L12 15 L18 9" />
     </svg>
   );
 }

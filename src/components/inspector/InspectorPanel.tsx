@@ -1,5 +1,21 @@
+import { useEffect, useRef, useState } from "react";
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 import { t, pickLocalized, type Language } from "../../lib/i18n";
+import { PlayTriangleIcon, LightbulbIcon } from "../ui/Icons";
+import { computeStableColorIndex, paletteAt } from "../../lib/nodeColors";
+import {
+  getNote,
+  setNote,
+  type NodeTag,
+} from "../../lib/nodeNotes";
+import {
+  askNode,
+  clearQAHistory,
+  loadQAHistory,
+  saveQAHistory,
+  type QAMessage,
+} from "../../lib/nodeQA";
+import type { Engine } from "../../lib/storage";
 
 /**
  * v0.1.7 リファイン:LIGHT モード Inspector パネル(360px、右側固定)。
@@ -23,21 +39,15 @@ type InspectorPanelProps = {
   language: Language;
   /** つながっている要素クリックで別ノードに飛ぶ */
   onSelectNode?: (id: number) => void;
+  /** v0.1.8:メモ・タグの localStorage キーに使う。null = サンプル用 */
+  folderPath: string | null;
+  /** v0.1.8:このノードのメモが変更された時に親に通知(バッジ表示更新のため)*/
+  onNoteChange?: () => void;
+  /** v0.1.8:AI Q&A の呼び分け(claude / local)*/
+  engine: Engine;
 };
 
-const FEATURE_PALETTE = [
-  { fill: "#14B8A6", soft: "#CCFBF1", border: "#5EEAD4", text: "#0D9488" },
-  { fill: "#F59E0B", soft: "#FEF3C7", border: "#FCD34D", text: "#B45309" },
-  { fill: "#8B5CF6", soft: "#EDE9FE", border: "#C4B5FD", text: "#6D28D9" },
-  { fill: "#3B82F6", soft: "#DBEAFE", border: "#93C5FD", text: "#1D4ED8" },
-  { fill: "#EC4899", soft: "#FCE7F3", border: "#F9A8D4", text: "#BE185D" },
-  { fill: "#10B981", soft: "#D1FAE5", border: "#6EE7B7", text: "#047857" },
-  { fill: "#06B6D4", soft: "#CFFAFE", border: "#67E8F9", text: "#0E7490" },
-  { fill: "#F97316", soft: "#FFEDD5", border: "#FDBA74", text: "#C2410C" },
-];
-function paletteFor(id: number) {
-  return FEATURE_PALETTE[(id - 1) % FEATURE_PALETTE.length];
-}
+// v0.1.7 色統一:nodeColors の stable index + paletteAt を使用
 
 type Direction = "out" | "in" | "both";
 function classifyEdges(
@@ -70,10 +80,81 @@ function InspectorPanel({
   noCodeMode,
   language,
   onSelectNode,
+  folderPath,
+  onNoteChange,
+  engine,
 }: InspectorPanelProps) {
   const T = t(language);
+  // v0.1.8:メモ・タグ。ノード切替時に該当データを再読込
+  const [tag, setTag] = useState<NodeTag | null>(null);
+  const [memo, setMemo] = useState<string>("");
+  // v0.1.8:Q&A 状態
+  const [qaHistory, setQaHistory] = useState<QAMessage[]>([]);
+  const [qaInput, setQaInput] = useState<string>("");
+  const [qaLoading, setQaLoading] = useState<boolean>(false);
+  const [qaError, setQaError] = useState<string | null>(null);
+  const qaScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (node === null) return;
+    const n = getNote(folderPath, node.id);
+    setTag(n.tag);
+    setMemo(n.memo);
+    // Q&A 履歴も同時に切替
+    setQaHistory(loadQAHistory(folderPath, node.id));
+    setQaInput("");
+    setQaError(null);
+  }, [node?.id, folderPath, node]);
+
+  // 応答が来た後、履歴の末尾までスクロール
+  useEffect(() => {
+    if (qaScrollRef.current) {
+      qaScrollRef.current.scrollTop = qaScrollRef.current.scrollHeight;
+    }
+  }, [qaHistory.length, qaLoading]);
+
   if (node === null) return null;
 
+  const handleAskAI = async (question: string) => {
+    if (!question.trim() || qaLoading || node === null) return;
+    const userMsg: QAMessage = {
+      role: "user",
+      content: question.trim(),
+      timestamp: Date.now(),
+    };
+    const nextHistory = [...qaHistory, userMsg];
+    setQaHistory(nextHistory);
+    saveQAHistory(folderPath, node.id, nextHistory);
+    setQaInput("");
+    setQaLoading(true);
+    setQaError(null);
+    try {
+      const answer = await askNode({
+        node,
+        question,
+        engine,
+        language,
+      });
+      const aiMsg: QAMessage = {
+        role: "assistant",
+        content: answer,
+        timestamp: Date.now(),
+      };
+      const finalHistory = [...nextHistory, aiMsg];
+      setQaHistory(finalHistory);
+      saveQAHistory(folderPath, node.id, finalHistory);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQaError(msg || T.qa.errorGeneric);
+    } finally {
+      setQaLoading(false);
+    }
+  };
+
+  // v0.1.7 色統一
+  const stableColorIndex = computeStableColorIndex(allNodes, allEdges, language);
+  const paletteFor = (id: number) =>
+    paletteAt(stableColorIndex.get(id) ?? 0);
   const palette = paletteFor(node.id);
   const title = pickLocalized(node.detail.title, language);
   const userIntent = node.userIntent
@@ -179,7 +260,7 @@ function InspectorPanel({
               className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
               style={{ background: palette.fill, color: "#fff" }}
             >
-              <span aria-hidden="true">▶</span>
+              <PlayTriangleIcon className="w-2 h-2" />
               {tx("はじまりの画面", "Starting point")}
             </span>
           )}
@@ -310,17 +391,30 @@ function InspectorPanel({
               }}
             >
               <div className="flex items-start gap-2">
-                <span className="text-base mt-0.5" aria-hidden="true">
-                  💡
-                </span>
+                <LightbulbIcon
+                  className="w-4 h-4 flex-shrink-0 mt-0.5"
+                  color={palette.text}
+                />
                 <p className="text-xs text-ink leading-relaxed">
                   {pickLocalized(changeHint.note, language)}
                 </p>
               </div>
             </div>
-            <p className="text-[11px] text-ink-soft mb-2 leading-relaxed">
+            <p className="text-[11px] text-ink-soft mb-3 leading-relaxed">
               {impact.desc}
             </p>
+            {/* バーの意味を明示:何を測っているかが一目で分かるように */}
+            <div className="flex items-baseline justify-between mb-1.5">
+              <span className="text-[11px] font-semibold text-ink-strong">
+                {tx("この変更の影響の大きさ", "Impact of this change")}
+              </span>
+              <span
+                className="text-[11px] font-bold tabular-nums"
+                style={{ color: impact.color }}
+              >
+                {impact.shortLabel}
+              </span>
+            </div>
             <div className="relative h-2 rounded-full bg-canvas border border-border-soft">
               <div
                 className="absolute inset-0 rounded-full"
@@ -365,6 +459,294 @@ function InspectorPanel({
             </ul>
           </Section>
         )}
+
+        {/* v0.1.8:メモとタグ(自分専用の付箋、ローカル保存)*/}
+        <Section title={T.notes.sectionTitle}>
+          <div className="mb-2">
+            <div className="text-[10px] font-semibold text-ink-soft uppercase tracking-wide mb-1.5">
+              {T.notes.tagsLabel}
+            </div>
+            {(() => {
+              const options: {
+                key: NodeTag;
+                label: string;
+                color: string;
+                hint: string;
+              }[] = [
+                {
+                  key: "important",
+                  label: T.notes.tagImportant,
+                  color: "#ef4444",
+                  hint: T.notes.tagHintImportant,
+                },
+                {
+                  key: "later",
+                  label: T.notes.tagLater,
+                  color: "#f59e0b",
+                  hint: T.notes.tagHintLater,
+                },
+                {
+                  key: "question",
+                  label: T.notes.tagQuestion,
+                  color: "#6366f1",
+                  hint: T.notes.tagHintQuestion,
+                },
+                {
+                  key: "reviewed",
+                  label: T.notes.tagReviewed,
+                  color: "#14b8a6",
+                  hint: T.notes.tagHintReviewed,
+                },
+              ];
+              const activeHint = options.find((o) => o.key === tag)?.hint ?? "";
+              return (
+                <>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {options.map((opt) => {
+                      const active = tag === opt.key;
+                      return (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          title={opt.hint}
+                          onClick={() => {
+                            const next = active ? null : opt.key;
+                            setTag(next);
+                            setNote(folderPath, node.id, {
+                              tag: next,
+                              memo,
+                            });
+                            onNoteChange?.();
+                          }}
+                          className="text-[11px] font-semibold px-2 py-1 rounded-full border transition-colors cursor-pointer"
+                          style={{
+                            background: active ? opt.color : "transparent",
+                            borderColor: opt.color,
+                            color: active ? "white" : opt.color,
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                    {tag !== null && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTag(null);
+                          setNote(folderPath, node.id, {
+                            tag: null,
+                            memo,
+                          });
+                          onNoteChange?.();
+                        }}
+                        className="text-[10px] text-ink-soft underline hover:text-ink transition-colors cursor-pointer px-1"
+                      >
+                        {T.notes.tagClear}
+                      </button>
+                    )}
+                  </div>
+                  {/* 選択中タグの説明。未選択時は 4 種類の凡例を表示 */}
+                  {tag !== null ? (
+                    <div
+                      className="rounded-[8px] px-2.5 py-1.5 text-[11px] leading-relaxed"
+                      style={{
+                        background: `${
+                          options.find((o) => o.key === tag)?.color
+                        }14`,
+                        color:
+                          options.find((o) => o.key === tag)?.color ??
+                          "#334155",
+                      }}
+                    >
+                      {activeHint}
+                    </div>
+                  ) : (
+                    <ul className="space-y-1 text-[10.5px] text-ink-soft leading-snug">
+                      {options.map((opt) => (
+                        <li
+                          key={opt.key}
+                          className="flex items-start gap-1.5"
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1"
+                            style={{ background: opt.color }}
+                          />
+                          <span>
+                            <span
+                              className="font-semibold mr-1"
+                              style={{ color: opt.color }}
+                            >
+                              {opt.label}:
+                            </span>
+                            {opt.hint}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+          <div>
+            <div className="text-[10px] font-semibold text-ink-soft uppercase tracking-wide mb-1.5">
+              {T.notes.memoLabel}
+            </div>
+            <textarea
+              value={memo}
+              onChange={(e) => {
+                const v = e.target.value;
+                setMemo(v);
+                setNote(folderPath, node.id, { tag, memo: v });
+                onNoteChange?.();
+              }}
+              placeholder={T.notes.memoPlaceholder}
+              spellCheck={false}
+              rows={3}
+              className="w-full text-xs text-ink-strong bg-canvas border border-border-soft rounded-[8px] px-2.5 py-2 resize-y outline-none focus:border-feature-teal focus:ring-2 focus:ring-feature-teal/30 transition-colors leading-relaxed"
+              style={{ minHeight: 60, maxHeight: 180 }}
+            />
+            <p className="text-[10px] text-ink-soft mt-1 leading-snug">
+              {T.notes.hint}
+            </p>
+          </div>
+        </Section>
+
+        {/* v0.1.8:AI に聞く(ノード単位の Q&A、履歴はフォルダ×ノードで localStorage 保存)*/}
+        <Section title={T.qa.sectionTitle}>
+          <p className="text-[11px] text-ink-soft mb-2 leading-relaxed">
+            {T.qa.hint}
+          </p>
+
+          {/* 履歴(質問が 1 件以上、またはローディング/エラーがある時だけ枠を出す。
+              空の時に枠を出すと「入力欄?」と誤解されるので敢えて出さない)*/}
+          {(qaHistory.length > 0 || qaLoading || qaError) && (
+            <div
+              ref={qaScrollRef}
+              className="rounded-[10px] bg-canvas border border-border-soft p-2.5 space-y-2 mb-2 overflow-y-auto"
+              style={{ maxHeight: 260 }}
+            >
+              {qaHistory.map((m, i) => (
+                <div key={i} className="flex items-start gap-2">
+                  <span
+                    className="flex-shrink-0 text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
+                    style={{
+                      background:
+                        m.role === "user"
+                          ? "var(--color-feature-blue-soft)"
+                          : "var(--color-feature-teal-soft)",
+                      color:
+                        m.role === "user"
+                          ? "var(--color-feature-blue)"
+                          : "var(--color-feature-teal)",
+                    }}
+                  >
+                    {m.role === "user" ? T.qa.youLabel : T.qa.aiLabel}
+                  </span>
+                  <p className="text-[12px] text-ink-strong leading-relaxed flex-1 whitespace-pre-wrap break-words">
+                    {m.content}
+                  </p>
+                </div>
+              ))}
+              {qaLoading && (
+                <div className="flex items-center gap-2 py-1">
+                  <span
+                    className="w-3 h-3 rounded-full border-2 border-feature-teal border-t-transparent animate-spin"
+                    aria-hidden="true"
+                  />
+                  <span className="text-[11px] text-ink-soft italic">
+                    {T.qa.sending}
+                  </span>
+                </div>
+              )}
+              {qaError && (
+                <div
+                  className="text-[11px] rounded-[8px] px-2 py-1.5"
+                  style={{
+                    background: "var(--color-impact-high-soft, #fee2e2)",
+                    color: "var(--color-impact-high, #b91c1c)",
+                  }}
+                >
+                  {qaError}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* サジェスチョン(履歴が空の時だけ)*/}
+          {qaHistory.length === 0 && !qaLoading && (
+            <div className="mb-2">
+              <div className="text-[10px] font-semibold text-ink-soft uppercase tracking-wide mb-1">
+                {T.qa.suggestionsLabel}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  T.qa.suggestionWhat,
+                  T.qa.suggestionRisk,
+                  T.qa.suggestionRename,
+                ].map((s, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => handleAskAI(s)}
+                    disabled={qaLoading}
+                    className="text-[11px] px-2 py-1 rounded-full border border-border-soft bg-paper text-ink-strong hover:bg-canvas cursor-pointer transition-colors disabled:opacity-50"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 入力 + 送信 */}
+          <div className="flex gap-1.5">
+            <textarea
+              value={qaInput}
+              onChange={(e) => setQaInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (
+                  e.key === "Enter" &&
+                  (e.metaKey || e.ctrlKey) &&
+                  !qaLoading
+                ) {
+                  e.preventDefault();
+                  handleAskAI(qaInput);
+                }
+              }}
+              placeholder={T.qa.placeholder}
+              disabled={qaLoading}
+              spellCheck={false}
+              rows={2}
+              className="flex-1 text-xs text-ink-strong bg-canvas border border-border-soft rounded-[8px] px-2.5 py-1.5 resize-none outline-none focus:border-feature-teal focus:ring-2 focus:ring-feature-teal/30 transition-colors leading-relaxed disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={() => handleAskAI(qaInput)}
+              disabled={qaLoading || !qaInput.trim()}
+              className="flex-shrink-0 text-xs font-semibold px-3 rounded-[8px] bg-feature-teal text-white hover:bg-feature-teal/90 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {T.qa.sendButton}
+            </button>
+          </div>
+
+          {qaHistory.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(T.qa.clearConfirm)) {
+                  clearQAHistory(folderPath, node.id);
+                  setQaHistory([]);
+                  setQaError(null);
+                }
+              }}
+              className="text-[10px] text-ink-soft underline hover:text-ink transition-colors cursor-pointer mt-2"
+            >
+              {T.qa.clearButton}
+            </button>
+          )}
+        </Section>
 
         {/* 関連ファイル(エンジニア向け、折り畳み)*/}
         {files.length > 0 && (

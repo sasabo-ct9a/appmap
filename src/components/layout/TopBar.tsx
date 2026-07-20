@@ -6,15 +6,21 @@
  * 中央〜右:かんたん/詳細 モード切替(セグメントピル形)
  * 右:エクスポート + アバター
  */
+import { useEffect, useRef, useState } from "react";
+import { t, type Language } from "../../lib/i18n";
+
 type TopBarProps = {
   appName: string;
   appSubtitle: string;
   mode: "easy" | "detail";
   onModeChange: (next: "easy" | "detail") => void;
   onExport: () => void;
+  /** v0.1.8:共有 HTML エクスポート(受け手が AppMap 不要で閲覧可能な単一 HTML)*/
+  onExportShareHTML: () => void;
   /** v0.1.7 大刷新:Y アバター撤廃、Claude / ローカル LLM 切替に置き換え */
   engine: "claude" | "local";
   onEngineChange: (next: "claude" | "local") => void;
+  language: Language;
 };
 
 function TopBar({
@@ -23,9 +29,27 @@ function TopBar({
   mode,
   onModeChange,
   onExport,
+  onExportShareHTML,
   engine,
   onEngineChange,
+  language,
 }: TopBarProps) {
+  const T = t(language).topBar;
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!exportOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (
+        exportRef.current &&
+        !exportRef.current.contains(e.target as Node)
+      ) {
+        setExportOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDoc);
+    return () => window.removeEventListener("mousedown", onDoc);
+  }, [exportOpen]);
   return (
     <header className="h-[72px] bg-paper border-b border-border-soft px-8 flex items-center gap-6 flex-shrink-0">
       {/* プロジェクト名 + 副題 */}
@@ -45,38 +69,72 @@ function TopBar({
           onClick={() => onModeChange("easy")}
           icon={<EmojiSmile />}
           accent="teal"
-          title="かんたんモード"
-          subtitle="ノーコード向け"
+          title={T.easyTitle}
+          subtitle={T.easySubtitle}
         />
         <ModePill
           active={mode === "detail"}
           onClick={() => onModeChange("detail")}
           icon={<CodeAngle />}
           accent="purple"
-          title="詳細モード"
-          subtitle="技術者向け"
+          title={T.detailTitle}
+          subtitle={T.detailSubtitle}
         />
       </div>
 
-      {/* エクスポート */}
-      <button
-        type="button"
-        onClick={onExport}
-        className="flex items-center gap-1.5 px-4 py-2 rounded-[10px] border border-border-soft text-sm text-ink hover:bg-canvas transition-colors cursor-pointer"
-      >
-        <UploadIcon />
-        エクスポート
-      </button>
+      {/* エクスポート(ドロップダウン)*/}
+      <div className="relative" ref={exportRef}>
+        <button
+          type="button"
+          onClick={() => setExportOpen((v) => !v)}
+          aria-haspopup="menu"
+          aria-expanded={exportOpen}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-[10px] border border-border-soft text-sm text-ink hover:bg-canvas transition-colors cursor-pointer"
+        >
+          <UploadIcon />
+          {T.exportButton}
+          <ChevronDownIcon />
+        </button>
+        {exportOpen && (
+          <div
+            role="menu"
+            className="absolute right-0 top-full mt-1.5 min-w-[240px] bg-paper border border-border-soft rounded-[12px] shadow-lg z-30 overflow-hidden"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setExportOpen(false);
+                onExport();
+              }}
+              className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-ink hover:bg-canvas transition-colors cursor-pointer"
+            >
+              <FileTextIcon />
+              <span>{T.exportMenuSpecDoc}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setExportOpen(false);
+                onExportShareHTML();
+              }}
+              className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-ink hover:bg-canvas transition-colors cursor-pointer border-t border-border-soft"
+            >
+              <ShareIcon />
+              <span>{T.exportMenuShareHTML}</span>
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* v0.1.7 大刷新:AI エンジン切替(Claude / ローカル LLM)*/}
       <button
         type="button"
         onClick={() => onEngineChange(engine === "claude" ? "local" : "claude")}
-        aria-label="AI エンジン切替"
+        aria-label={T.engineToggleAria}
         title={
-          engine === "claude"
-            ? "Claude を使用中 — クリックでローカル LLM に切替"
-            : "ローカル LLM を使用中 — クリックで Claude に切替"
+          engine === "claude" ? T.engineTooltipClaude : T.engineTooltipLocal
         }
         className="flex items-center gap-2 px-3 py-2 rounded-[10px] border transition-colors cursor-pointer"
         style={{
@@ -108,10 +166,10 @@ function TopBar({
                 engine === "claude" ? "#1d4ed8" : "#0d9488",
             }}
           >
-            {engine === "claude" ? "Claude" : "ローカル LLM"}
+            {engine === "claude" ? T.engineLabelClaude : T.engineLabelLocal}
           </div>
           <div className="text-[10px] text-ink-soft">
-            {engine === "claude" ? "クラウド利用中" : "ローカル動作"}
+            {engine === "claude" ? T.engineNoteClaude : T.engineNoteLocal}
           </div>
         </span>
       </button>
@@ -222,6 +280,60 @@ function CodeAngle() {
       <path d="M8 7 L3 12 L8 17" />
       <path d="M16 7 L21 12 L16 17" />
       <path d="M14 5 L10 19" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="w-3.5 h-3.5"
+    >
+      <path d="M6 9 L12 15 L18 9" />
+    </svg>
+  );
+}
+
+function FileTextIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="w-4 h-4 text-feature-teal"
+    >
+      <path d="M14 3 H6 A2 2 0 0 0 4 5 V19 A2 2 0 0 0 6 21 H18 A2 2 0 0 0 20 19 V9 Z" />
+      <path d="M14 3 V9 H20" />
+      <path d="M8 13 H16 M8 17 H13" />
+    </svg>
+  );
+}
+
+function ShareIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="w-4 h-4 text-feature-purple"
+    >
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="M8.6 10.6 L15.4 6.4" />
+      <path d="M8.6 13.4 L15.4 17.6" />
     </svg>
   );
 }

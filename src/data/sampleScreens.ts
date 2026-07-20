@@ -59,6 +59,13 @@ const sampleScreensBilingual: SampleData = {
           bi("フォルダのパス", "Folder path"),
           bi("中のファイル一覧", "File list inside"),
         ],
+        dataTech: [
+          { name: "folderPath", fields: ["absolute", "shortLabel"] },
+          {
+            name: "fileList",
+            fields: ["path", "size", "modifiedAt"],
+          },
+        ],
         changeHint: {
           safety: "easy",
           note: bi(
@@ -100,6 +107,11 @@ const sampleScreensBilingual: SampleData = {
           bi("分析の進捗", "Analysis progress"),
           bi("経過時間", "Elapsed time"),
           bi("コスト", "Cost"),
+        ],
+        dataTech: [
+          { name: "analysisProgress", fields: ["stage", "percent"] },
+          "elapsedMs",
+          { name: "costUsd", fields: ["input", "output", "total"] },
         ],
         changeHint: {
           safety: "neutral",
@@ -145,6 +157,14 @@ const sampleScreensBilingual: SampleData = {
           bi("画面同士の繋がり", "Links between screens"),
           bi("アプリ概要", "App summary"),
         ],
+        dataTech: [
+          {
+            name: "ScreenNode",
+            fields: ["id", "label", "userIntent", "subActions", "detail"],
+          },
+          { name: "ScreenEdge", fields: ["id", "from", "to", "bidirectional"] },
+          { name: "appSummary", fields: ["ja", "en"] },
+        ],
         changeHint: {
           safety: "risky",
           note: bi(
@@ -188,6 +208,11 @@ const sampleScreensBilingual: SampleData = {
           bi("つながる画面の一覧", "Related screens"),
           bi("対応ファイル", "Matching files"),
         ],
+        dataTech: [
+          "selectedNodeId",
+          { name: "relatedNodes", fields: ["id", "label", "direction"] },
+          "files",
+        ],
         changeHint: {
           safety: "easy",
           note: bi(
@@ -228,6 +253,20 @@ const sampleScreensBilingual: SampleData = {
         dataUsed: [
           bi("ノーコード語モードの ON / OFF", "Plain-words mode on/off"),
           bi("分析の履歴", "Analysis history"),
+        ],
+        dataTech: [
+          "noCodeMode",
+          {
+            name: "StoredAnalysis",
+            fields: [
+              "folderPath",
+              "analyzedAt",
+              "costUsd",
+              "language",
+              "engine",
+              "screens",
+            ],
+          },
         ],
         changeHint: {
           safety: "neutral",

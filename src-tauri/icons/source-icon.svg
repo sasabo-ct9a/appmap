@@ -1,0 +1,15 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- 外枠プレート -->
+  <rect width="1024" height="1024" rx="224" fill="#111827"/>
+  <!-- 羅針盤の円(外周)-->
+  <circle cx="512" cy="512" r="400" fill="none" stroke="#14B8A6" stroke-width="38" opacity="0.5"/>
+  <!-- 傾いた 2 色針(35deg 回転)-->
+  <g transform="rotate(35 512 512)">
+    <!-- 北:濃 teal(進行方向)-->
+    <path d="M512 160 L597 640 L512 555 L427 640 Z" fill="#14B8A6"/>
+    <!-- 南:薄 teal(残像)-->
+    <path d="M512 864 L597 384 L512 469 L427 384 Z" fill="#5EEAD4" opacity="0.85"/>
+  </g>
+  <!-- 中央ピボット -->
+  <circle cx="512" cy="512" r="38" fill="#F9FAFB"/>
+</svg>

@@ -1,5 +1,6 @@
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 import { pickLocalized, type Language } from "../../lib/i18n";
+import { computeStableColorIndex, paletteAt } from "../../lib/nodeColors";
 
 /**
  * v0.1.7 大刷新:マップ下のサマリー帯。
@@ -12,18 +13,11 @@ type BottomSectionProps = {
   edges: ScreenEdge[];
   appSummary: ScreenNode["label"] | undefined;
   language: Language;
+  /** 詳細モード:フローチップの表記を label(短い画面名)に切替 */
+  showDataDetails?: boolean;
 };
 
-const FEATURE_PALETTE: { soft: string; fill: string }[] = [
-  { soft: "#CCFBF1", fill: "#14B8A6" },
-  { soft: "#FEF3C7", fill: "#F59E0B" },
-  { soft: "#EDE9FE", fill: "#8B5CF6" },
-  { soft: "#DBEAFE", fill: "#3B82F6" },
-  { soft: "#FCE7F3", fill: "#EC4899" },
-];
-function paletteFor(id: number) {
-  return FEATURE_PALETTE[(id - 1) % FEATURE_PALETTE.length];
-}
+// v0.1.7 色統一:nodeColors の stable index + paletteAt を使用
 
 /**
  * 入口から始まり、edges を辿って 4-5 個のチップを抽出する単純な主要フロー抽出。
@@ -57,8 +51,12 @@ function BottomSection({
   edges,
   appSummary,
   language,
+  showDataDetails = false,
 }: BottomSectionProps) {
   const flow = deriveMainFlow(nodes, edges);
+  const stableColorIndex = computeStableColorIndex(nodes, edges, language);
+  const paletteFor = (id: number) =>
+    paletteAt(stableColorIndex.get(id) ?? 0);
   const summaryText = appSummary
     ? typeof appSummary === "string"
       ? appSummary
@@ -91,14 +89,27 @@ function BottomSection({
         <div className="flex items-center gap-1.5 flex-wrap">
           {flow.map((n, i) => {
             const p = paletteFor(n.id);
-            const label = pickLocalized(n.label, language);
+            // かんたん=userIntent、詳細=label(短い画面名)
+            const labelSource = showDataDetails
+              ? n.label
+              : n.userIntent ?? n.label;
+            const label = pickLocalized(labelSource, language);
             return (
               <span key={n.id} className="flex items-center gap-1.5">
                 <span
                   className="text-xs font-semibold px-2.5 py-1.5 rounded-[8px]"
-                  style={{ background: p.soft, color: p.fill }}
+                  style={{
+                    background: p.soft,
+                    color: p.fill,
+                    ...(showDataDetails
+                      ? {
+                          fontFamily:
+                            "'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace",
+                        }
+                      : {}),
+                  }}
                 >
-                  {label.length > 8 ? label.slice(0, 7) + "…" : label}
+                  {label.length > 10 ? label.slice(0, 9) + "…" : label}
                 </span>
                 {i < flow.length - 1 && (
                   <span className="text-ink-soft">→</span>

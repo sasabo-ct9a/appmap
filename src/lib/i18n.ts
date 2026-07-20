@@ -164,6 +164,99 @@ export type Translations = {
     fieldRelatedScreens: string;
     fieldChangeHint: string;
   };
+  sidebar: {
+    navHomeTitle: string;
+    navHomeSubtitle: string;
+    navImpactTitle: string;
+    navImpactSubtitle: string;
+    navChecklistTitle: string;
+    navChecklistSubtitle: string;
+    sectionProjectInfo: string;
+    projectOverview: string;
+    projectData: string;
+    projectSettings: string;
+    sectionOpenProjects: string;
+    closeTabAria: (label: string) => string;
+    tipTitle: string;
+    tipLine1: string;
+    tipLine2: string;
+  };
+  topBar: {
+    easyTitle: string;
+    easySubtitle: string;
+    detailTitle: string;
+    detailSubtitle: string;
+    exportButton: string;
+    exportMenuSpecDoc: string;
+    exportMenuShareHTML: string;
+    exportShareHTMLDialogTitle: string;
+    exportShareHTMLSuccess: string;
+    exportShareHTMLFailure: string;
+    engineToggleAria: string;
+    engineTooltipClaude: string;
+    engineTooltipLocal: string;
+    engineLabelClaude: string;
+    engineLabelLocal: string;
+    engineNoteClaude: string;
+    engineNoteLocal: string;
+  };
+  intro: {
+    heading: string;
+    subheading: string;
+    countsScreens: string;
+    countsLinks: string;
+  };
+  featureCard: {
+    badgeMain: string;
+    badgeSupport: string;
+  };
+  notes: {
+    sectionTitle: string;
+    tagsLabel: string;
+    tagLater: string;
+    tagImportant: string;
+    tagQuestion: string;
+    tagReviewed: string;
+    tagClear: string;
+    tagHintImportant: string;
+    tagHintLater: string;
+    tagHintQuestion: string;
+    tagHintReviewed: string;
+    memoLabel: string;
+    memoPlaceholder: string;
+    hint: string;
+  };
+  qa: {
+    sectionTitle: string;
+    hint: string;
+    placeholder: string;
+    sendButton: string;
+    sending: string;
+    clearButton: string;
+    clearConfirm: string;
+    emptyState: string;
+    errorGeneric: string;
+    suggestionsLabel: string;
+    suggestionWhat: string;
+    suggestionRisk: string;
+    suggestionRename: string;
+    youLabel: string;
+    aiLabel: string;
+  };
+  diff: {
+    toggleLabel: string;
+    toggleAvailable: string;
+    noChanges: string;
+    addedNodesLabel: (n: number) => string;
+    removedNodesLabel: (n: number) => string;
+    addedEdgesLabel: (n: number) => string;
+    removedEdgesLabel: (n: number) => string;
+    addedBadge: string;
+    removedBadge: string;
+    removedSectionTitle: string;
+    edgeArrow: string;
+    bidiArrow: string;
+  };
   localLLM: {
     // エンジン切替 UI(設定モーダル)
     settingsButtonAria: string;
@@ -259,12 +352,12 @@ const JA: Translations = {
     },
   },
   nodeTile: {
-    entryPointBadge: "▶ まずここ",
+    entryPointBadge: "まずここ",
   },
   inspector: {
     panelAriaLabel: "画面の詳細パネル",
     closeAriaLabel: "閉じる",
-    entryPointHint: "▶ この画面から理解するとアプリ全体が掴みやすいです",
+    entryPointHint: "この画面から理解するとアプリ全体が掴みやすいです",
     descriptionLabel: "説明",
     relatedLabel: "リンク先",
     filesLabel: "対応ファイル",
@@ -370,6 +463,100 @@ const JA: Translations = {
     fieldRelatedScreens: "関連画面",
     fieldChangeHint: "変更目安",
   },
+  sidebar: {
+    navHomeTitle: "ホーム",
+    navHomeSubtitle: "このアプリでできること",
+    navImpactTitle: "変更の影響を確認",
+    navImpactSubtitle: "どこを変えると影響する?",
+    navChecklistTitle: "リリース前チェック",
+    navChecklistSubtitle: "本番に出せる状態か診断",
+    sectionProjectInfo: "プロジェクト情報",
+    projectOverview: "概要",
+    projectData: "データ",
+    projectSettings: "設定",
+    sectionOpenProjects: "開いているプロジェクト",
+    closeTabAria: (label) => `${label} を閉じる`,
+    tipTitle: "3 分で理解するコツ",
+    tipLine1: "まずは「できること」から",
+    tipLine2: "全体像をつかみましょう",
+  },
+  topBar: {
+    easyTitle: "かんたんモード",
+    easySubtitle: "ノーコード向け",
+    detailTitle: "詳細モード",
+    detailSubtitle: "技術者向け",
+    exportButton: "エクスポート",
+    exportMenuSpecDoc: "仕様書として出力",
+    exportMenuShareHTML: "共有 HTML として出力",
+    exportShareHTMLDialogTitle: "共有 HTML の保存先を選ぶ",
+    exportShareHTMLSuccess: "共有 HTML を保存しました",
+    exportShareHTMLFailure: "共有 HTML の保存に失敗しました",
+    engineToggleAria: "AI エンジン切替",
+    engineTooltipClaude: "Claude を使用中 — クリックでローカル LLM に切替",
+    engineTooltipLocal: "ローカル LLM を使用中 — クリックで Claude に切替",
+    engineLabelClaude: "Claude",
+    engineLabelLocal: "ローカル LLM",
+    engineNoteClaude: "クラウド利用中",
+    engineNoteLocal: "ローカル動作",
+  },
+  intro: {
+    heading: "このアプリでできること",
+    subheading:
+      "分析したアプリの構造を可視化できます。各要素をクリックすると詳細が右に開きます。",
+    countsScreens: "要素",
+    countsLinks: "つながり",
+  },
+  featureCard: {
+    badgeMain: "主要機能",
+    badgeSupport: "サポート機能",
+  },
+  notes: {
+    sectionTitle: "メモとタグ",
+    tagsLabel: "タグ(自分専用の目印)",
+    tagLater: "あとで確認",
+    tagImportant: "重要",
+    tagQuestion: "疑問",
+    tagReviewed: "確認済み",
+    tagClear: "解除",
+    tagHintImportant: "本番に出す前に必ず見直したい要素に付ける",
+    tagHintLater: "今は流したが、時間があるときに戻ってきたい要素",
+    tagHintQuestion: "何をしているか分からない・要確認の要素",
+    tagHintReviewed: "内容を理解して問題なしと確認できた要素",
+    memoLabel: "メモ",
+    memoPlaceholder: "気になったこと・理解したこと・次に確認することを書き残せます",
+    hint: "この画面についてのメモ。あなたのローカルにだけ保存されます。",
+  },
+  qa: {
+    sectionTitle: "AI に聞く",
+    hint: "この画面について自由に聞けます。用語を知らなくて OK。",
+    placeholder: "例:これって何のために必要? もし消したらどうなる?",
+    sendButton: "送信",
+    sending: "AI が考えています…",
+    clearButton: "履歴を消す",
+    clearConfirm: "この画面の質問履歴を消してもいい?",
+    emptyState: "まだ質問はありません。下の入力欄から気軽に聞いてみましょう。",
+    errorGeneric: "AI から回答を取得できませんでした。少し待って再試行してください。",
+    suggestionsLabel: "よくある質問",
+    suggestionWhat: "この画面は何のためにあるの?",
+    suggestionRisk: "ここを変えるとどこに影響する?",
+    suggestionRename: "この画面をノーコードで例えるなら?",
+    youLabel: "あなた",
+    aiLabel: "AI",
+  },
+  diff: {
+    toggleLabel: "前回との差分",
+    toggleAvailable: "前回の分析と比較して表示",
+    noChanges: "前回と変わっていません",
+    addedNodesLabel: (n) => `追加された画面 ${n}`,
+    removedNodesLabel: (n) => `消えた画面 ${n}`,
+    addedEdgesLabel: (n) => `追加されたつながり ${n}`,
+    removedEdgesLabel: (n) => `消えたつながり ${n}`,
+    addedBadge: "追加",
+    removedBadge: "削除",
+    removedSectionTitle: "今回消えた画面(前回分析にはあった)",
+    edgeArrow: "→",
+    bidiArrow: "↔",
+  },
   localLLM: {
     settingsButtonAria: "設定",
     settingsTitle: "設定",
@@ -469,13 +656,13 @@ const EN: Translations = {
     },
   },
   nodeTile: {
-    entryPointBadge: "▶ Start here",
+    entryPointBadge: "Start here",
   },
   inspector: {
     panelAriaLabel: "Screen detail panel",
     closeAriaLabel: "Close",
     entryPointHint:
-      "▶ Start here to grasp the whole app's structure",
+      "Start here to grasp the whole app's structure",
     descriptionLabel: "Description",
     relatedLabel: "Related",
     filesLabel: "Files",
@@ -583,6 +770,101 @@ const EN: Translations = {
     fieldFiles: "Related files",
     fieldRelatedScreens: "Related screens",
     fieldChangeHint: "Change hint",
+  },
+  sidebar: {
+    navHomeTitle: "Home",
+    navHomeSubtitle: "What this app can do",
+    navImpactTitle: "Impact preview",
+    navImpactSubtitle: "See what a change affects",
+    navChecklistTitle: "Pre-release check",
+    navChecklistSubtitle: "Ready to ship?",
+    sectionProjectInfo: "Project info",
+    projectOverview: "Overview",
+    projectData: "Data",
+    projectSettings: "Settings",
+    sectionOpenProjects: "Open projects",
+    closeTabAria: (label) => `Close ${label}`,
+    tipTitle: "Understand in 3 minutes",
+    tipLine1: "Start with what it does,",
+    tipLine2: "then grasp the whole picture.",
+  },
+  topBar: {
+    easyTitle: "Easy mode",
+    easySubtitle: "For no-code users",
+    detailTitle: "Detail mode",
+    detailSubtitle: "For engineers",
+    exportButton: "Export",
+    exportMenuSpecDoc: "Export as spec doc",
+    exportMenuShareHTML: "Export as shareable HTML",
+    exportShareHTMLDialogTitle: "Save shareable HTML",
+    exportShareHTMLSuccess: "Shareable HTML saved",
+    exportShareHTMLFailure: "Failed to save shareable HTML",
+    engineToggleAria: "Switch AI engine",
+    engineTooltipClaude: "Using Claude — click to switch to local LLM",
+    engineTooltipLocal: "Using local LLM — click to switch to Claude",
+    engineLabelClaude: "Claude",
+    engineLabelLocal: "Local LLM",
+    engineNoteClaude: "Cloud in use",
+    engineNoteLocal: "Local mode",
+  },
+  intro: {
+    heading: "What this app can do",
+    subheading:
+      "See the analyzed app's structure at a glance. Click any piece for details on the right.",
+    countsScreens: "pieces",
+    countsLinks: "links",
+  },
+  featureCard: {
+    badgeMain: "Main feature",
+    badgeSupport: "Support feature",
+  },
+  notes: {
+    sectionTitle: "Notes & tags",
+    tagsLabel: "Tag (your own marker)",
+    tagLater: "Check later",
+    tagImportant: "Important",
+    tagQuestion: "Question",
+    tagReviewed: "Reviewed",
+    tagClear: "Clear",
+    tagHintImportant: "For screens you must double-check before shipping",
+    tagHintLater: "Skimmed for now — come back when you have time",
+    tagHintQuestion: "Not sure what this does — needs a closer look",
+    tagHintReviewed: "You've read it through and confirmed it's fine",
+    memoLabel: "Memo",
+    memoPlaceholder:
+      "Jot down what caught your eye, what you now understand, or what to revisit.",
+    hint: "Notes for this screen. Saved locally on your machine only.",
+  },
+  qa: {
+    sectionTitle: "Ask AI",
+    hint: "Ask anything about this screen — no jargon needed.",
+    placeholder: "e.g. Why is this needed? What breaks if I remove it?",
+    sendButton: "Send",
+    sending: "AI is thinking…",
+    clearButton: "Clear history",
+    clearConfirm: "Clear the Q&A history for this screen?",
+    emptyState: "No questions yet. Ask anything from the box below.",
+    errorGeneric: "Couldn't get an answer from the AI. Please wait and try again.",
+    suggestionsLabel: "Common questions",
+    suggestionWhat: "What is this screen for?",
+    suggestionRisk: "What breaks if I change this?",
+    suggestionRename: "How would you describe this in no-code terms?",
+    youLabel: "You",
+    aiLabel: "AI",
+  },
+  diff: {
+    toggleLabel: "Diff since last",
+    toggleAvailable: "Compare against the previous analysis",
+    noChanges: "No changes since last analysis",
+    addedNodesLabel: (n) => `Added screens: ${n}`,
+    removedNodesLabel: (n) => `Removed screens: ${n}`,
+    addedEdgesLabel: (n) => `Added links: ${n}`,
+    removedEdgesLabel: (n) => `Removed links: ${n}`,
+    addedBadge: "New",
+    removedBadge: "Gone",
+    removedSectionTitle: "Removed screens (were in the previous analysis)",
+    edgeArrow: "→",
+    bidiArrow: "↔",
   },
   localLLM: {
     settingsButtonAria: "Settings",

@@ -1,6 +1,13 @@
 import { useState } from "react";
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 import { pickLocalized, type Language } from "../../lib/i18n";
+import {
+  SparkleIcon,
+  DotIcon,
+  LightbulbIcon,
+  CursorPointerIcon,
+} from "../ui/Icons";
+import ImpactMap from "./ImpactMap";
 
 /**
  * v0.1.7「変更の影響を確認」ページ本体。
@@ -30,7 +37,6 @@ type SafetyMeta = {
   color: string;
   bg: string;
   border: string;
-  emoji: string;
 };
 
 const SAFETY_META: Record<Safety, SafetyMeta> = {
@@ -43,7 +49,6 @@ const SAFETY_META: Record<Safety, SafetyMeta> = {
     color: "#0d9488",
     bg: "#CCFBF1",
     border: "#5EEAD4",
-    emoji: "🟢",
   },
   neutral: {
     label: { ja: "少し注意", en: "A bit careful" },
@@ -54,7 +59,6 @@ const SAFETY_META: Record<Safety, SafetyMeta> = {
     color: "#B45309",
     bg: "#FEF3C7",
     border: "#FCD34D",
-    emoji: "🟡",
   },
   risky: {
     label: { ja: "慎重に", en: "Be careful" },
@@ -65,7 +69,6 @@ const SAFETY_META: Record<Safety, SafetyMeta> = {
     color: "#BE185D",
     bg: "#FCE7F3",
     border: "#F9A8D4",
-    emoji: "🔴",
   },
   unknown: {
     label: { ja: "未判定", en: "Not assessed" },
@@ -73,7 +76,6 @@ const SAFETY_META: Record<Safety, SafetyMeta> = {
     color: "#64748b",
     bg: "#f1f5f9",
     border: "#cbd5e1",
-    emoji: "⚪",
   },
 };
 
@@ -134,12 +136,10 @@ function ImpactView({
   };
   for (const n of nodes) groups[getSafety(n)].push(n);
 
-  // Section B: 選択中画面のつながり
+  // Section B: 選択中画面(つながりは ImpactMap が算出するのでここでは不要)
   const focusedNode =
     focusedId !== null ? nodes.find((n) => n.id === focusedId) ?? null : null;
-  const connected = focusedNode
-    ? getConnectedNodes(focusedNode, edges, nodes)
-    : [];
+  void getConnectedNodes;
 
   // Section C: テーブル用ソート(risky → easy → unknown)
   const SAFETY_ORDER: Record<Safety, number> = {
@@ -164,7 +164,7 @@ function ImpactView({
       <div>
         <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2">
           {tx("変更の影響を確認", "Check change impact")}
-          <span className="text-feature-teal">✨</span>
+          <SparkleIcon className="w-5 h-5 text-feature-teal" />
         </h1>
         <p className="text-sm text-ink-soft mt-1">
           {tx(
@@ -197,9 +197,7 @@ function ImpactView({
               }}
             >
               <div className="flex items-center gap-2">
-                <span className="text-2xl" aria-hidden="true">
-                  {meta.emoji}
-                </span>
+                <DotIcon className="w-4 h-4 flex-shrink-0" color={meta.color} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-1.5">
                     <span
@@ -230,16 +228,24 @@ function ImpactView({
           );
         })}
       </div>
-      <p className="text-[11px] text-ink-soft -mt-2">
+      <p className="text-[11px] text-ink-soft -mt-2 flex items-center gap-1.5 flex-wrap">
+        <CursorPointerIcon className="w-3 h-3 flex-shrink-0" />
         {tx(
-          "👆 カードをクリックすると下のリストもそのレベルだけに絞り込めます。",
-          "👆 Click a card to filter the list below by that level.",
+          "カードをクリックすると下のリストもそのレベルだけに絞り込めます。",
+          "Click a card to filter the list below by that level.",
         )}
-        {groups.unknown.length > 0 &&
-          tx(
-            ` ⚪ 未判定 ${groups.unknown.length} 件は AI が判断しなかった要素です。`,
-            ` ⚪ ${groups.unknown.length} not assessed by AI.`,
-          )}
+        {groups.unknown.length > 0 && (
+          <>
+            <DotIcon
+              className="w-2 h-2 flex-shrink-0 ml-1"
+              color={SAFETY_META.unknown.color}
+            />
+            {tx(
+              `未判定 ${groups.unknown.length} 件は AI が判断しなかった要素です。`,
+              `${groups.unknown.length} not assessed by AI.`,
+            )}
+          </>
+        )}
       </p>
 
       {/* ────── メイン:画面を選んで影響範囲を見る ────── */}
@@ -263,17 +269,17 @@ function ImpactView({
                 { key: "all" as const, label: tx("すべて", "All") },
                 {
                   key: "easy" as const,
-                  label: tx("🟢 安全", "🟢 Safe"),
+                  label: tx("安全", "Safe"),
                   color: SAFETY_META.easy.color,
                 },
                 {
                   key: "neutral" as const,
-                  label: tx("🟡 注意", "🟡 Care"),
+                  label: tx("注意", "Care"),
                   color: SAFETY_META.neutral.color,
                 },
                 {
                   key: "risky" as const,
-                  label: tx("🔴 慎重", "🔴 Risky"),
+                  label: tx("慎重", "Risky"),
                   color: SAFETY_META.risky.color,
                 },
               ] as { key: Safety | "all"; label: string; color?: string }[]
@@ -284,12 +290,18 @@ function ImpactView({
                   key={opt.key}
                   type="button"
                   onClick={() => setFilter(opt.key)}
-                  className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold transition-colors cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
                     active
                       ? "bg-paper text-ink-strong shadow-sm"
                       : "text-ink-soft hover:text-ink"
                   }`}
                 >
+                  {opt.color && (
+                    <DotIcon
+                      className="w-2 h-2 flex-shrink-0"
+                      color={opt.color}
+                    />
+                  )}
                   {opt.label}
                 </button>
               );
@@ -350,108 +362,52 @@ function ImpactView({
               </ul>
             </div>
 
-            {/* 右:選択画面の詳細 + つながり */}
-            <div className="md:col-span-2 p-5">
-              {focusedNode ? (
-                <>
-                  <div className="flex items-center gap-2 mb-3 flex-wrap">
-                    <span className="text-lg" aria-hidden="true">
-                      {SAFETY_META[getSafety(focusedNode)].emoji}
-                    </span>
-                    <h3 className="text-base font-bold text-ink-strong">
-                      {pickLocalized(
-                        focusedNode.userIntent ?? focusedNode.label,
-                        language,
-                      )}
-                    </h3>
-                    <span
-                      className="ml-auto text-xs font-semibold rounded-full px-2.5 py-0.5"
-                      style={{
-                        background: SAFETY_META[getSafety(focusedNode)].bg,
-                        color: SAFETY_META[getSafety(focusedNode)].color,
-                      }}
-                    >
+            {/* 右:影響マップ + 選択画面の changeHint(重要ポイントだけ)*/}
+            <div className="md:col-span-2 p-3 space-y-3">
+              <ImpactMap
+                nodes={nodes}
+                edges={edges}
+                focusedId={focusedId}
+                language={language}
+                onSelectNode={(id) => {
+                  setFocusedId(id);
+                  onSelectNode(id);
+                }}
+              />
+              {focusedNode?.detail.changeHint && (
+                <div className="text-sm text-ink bg-canvas rounded-[10px] p-3 border border-border-soft flex items-start gap-2">
+                  <LightbulbIcon className="w-4 h-4 flex-shrink-0 mt-0.5 text-feature-amber" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] font-bold text-ink-soft mb-1">
                       {tx(
-                        SAFETY_META[getSafety(focusedNode)].label.ja,
-                        SAFETY_META[getSafety(focusedNode)].label.en,
+                        pickLocalized(
+                          focusedNode.userIntent ?? focusedNode.label,
+                          language,
+                        ),
+                        pickLocalized(
+                          focusedNode.userIntent ?? focusedNode.label,
+                          language,
+                        ),
                       )}
-                    </span>
-                  </div>
-                  {focusedNode.detail.changeHint && (
-                    <div className="text-sm text-ink mb-4 bg-canvas rounded-[10px] p-3 border border-border-soft">
-                      💡{" "}
+                      {" · "}
+                      <span
+                        style={{
+                          color: SAFETY_META[getSafety(focusedNode)].color,
+                        }}
+                      >
+                        {tx(
+                          SAFETY_META[getSafety(focusedNode)].label.ja,
+                          SAFETY_META[getSafety(focusedNode)].label.en,
+                        )}
+                      </span>
+                    </div>
+                    <div className="text-xs">
                       {pickLocalized(
                         focusedNode.detail.changeHint.note,
                         language,
                       )}
                     </div>
-                  )}
-                  <div className="text-xs font-bold text-ink-soft mb-2">
-                    {tx(
-                      `つながっている要素 (${connected.length})`,
-                      `Connected pieces (${connected.length})`,
-                    )}
                   </div>
-                  {connected.length === 0 ? (
-                    <div className="text-sm text-ink-soft py-2 italic">
-                      {tx(
-                        "他とのつながりはありません(変えても他に影響しない独立した要素)。",
-                        "No connections. Changes here stay local.",
-                      )}
-                    </div>
-                  ) : (
-                    <ul className="space-y-1.5">
-                      {connected.map(({ node: c, direction }) => {
-                        const safety = getSafety(c);
-                        const meta = SAFETY_META[safety];
-                        const label = pickLocalized(
-                          c.userIntent ?? c.label,
-                          language,
-                        );
-                        const arrow =
-                          direction === "out"
-                            ? "→"
-                            : direction === "in"
-                            ? "←"
-                            : "⇄";
-                        return (
-                          <li
-                            key={c.id}
-                            className="flex items-center gap-3 bg-canvas rounded-[10px] p-2.5 cursor-pointer hover:bg-paper transition-colors border border-transparent hover:border-border-soft"
-                            onClick={() => onSelectNode(c.id)}
-                          >
-                            <span className="text-ink-soft font-mono text-base w-4 text-center flex-shrink-0">
-                              {arrow}
-                            </span>
-                            <span
-                              className="w-2 h-2 rounded-full flex-shrink-0"
-                              style={{ background: meta.color }}
-                              aria-hidden="true"
-                            />
-                            <span className="text-sm text-ink-strong truncate flex-1">
-                              {label}
-                            </span>
-                            <span
-                              className="text-[10px] font-semibold rounded-full px-2 py-0.5 flex-shrink-0"
-                              style={{
-                                background: meta.bg,
-                                color: meta.color,
-                              }}
-                            >
-                              {tx(meta.label.ja, meta.label.en)}
-                            </span>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </>
-              ) : (
-                <div className="text-sm text-ink-soft py-8 text-center">
-                  {tx(
-                    "左の一覧から画面を選んでください。",
-                    "Pick a screen from the list on the left.",
-                  )}
                 </div>
               )}
             </div>
@@ -528,10 +484,13 @@ function ImpactView({
                     </td>
                     <td className="px-4 py-3">
                       <span
-                        className="text-xs font-semibold rounded-full px-2.5 py-0.5 inline-flex items-center gap-1 whitespace-nowrap"
+                        className="text-xs font-semibold rounded-full px-2.5 py-0.5 inline-flex items-center gap-1.5 whitespace-nowrap"
                         style={{ background: meta.bg, color: meta.color }}
                       >
-                        <span aria-hidden="true">{meta.emoji}</span>
+                        <DotIcon
+                          className="w-2 h-2 flex-shrink-0"
+                          color={meta.color}
+                        />
                         {tx(meta.label.ja, meta.label.en)}
                       </span>
                     </td>

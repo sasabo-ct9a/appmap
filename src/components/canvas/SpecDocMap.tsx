@@ -4,6 +4,7 @@ import type {
   LocalizedText,
 } from "../../types/screen";
 import { pickLocalized, type Language } from "../../lib/i18n";
+import { computeStableColorIndex, paletteAt } from "../../lib/nodeColors";
 
 /**
  * v0.1.7 仕様書 PDF 用の静的マインドマップ SVG。
@@ -12,6 +13,11 @@ import { pickLocalized, type Language } from "../../lib/i18n";
  * 全部削ぎ落とす。コンポーネントは pure に状態を持たないので、印刷時にも安定する。
  *
  * 中心ノードは持たない(MapCanvas と同じく撤去済み)。主枝 + 葉 + 関連エッジを描く。
+ *
+ * v0.1.7 追記:showDataDetails=true のとき MapCanvas と同じ「詳細モード」を再現。
+ *   - 主枝の label は短い画面名 + 主要ファイル名(monospace)
+ *   - 葉に `> ` プレフィックス + monospace
+ *   - 葉のさらに外に dataTech スキーマチップ(エンティティ名 + 副題 + フィールド行)
  */
 type SpecDocMapProps = {
   nodes: ScreenNode[];
@@ -19,6 +25,8 @@ type SpecDocMapProps = {
   language: Language;
   /** ユーザーが MapCanvas で動かした位置の差分(SVG 座標)*/
   nodeOffsets?: Map<number, { x: number; y: number }>;
+  /** 詳細モード:DB スキーマチップを追加描画 */
+  showDataDetails?: boolean;
 };
 
 const BRANCH_W = 172;
@@ -28,19 +36,7 @@ const LEAF_GAP_X = 90;
 const LEAF_SPACING_Y = 38;
 const LEAF_FAN_X = 14;
 
-const PALETTE = [
-  { accent: "#14B8A6", border: "#5EEAD4", soft: "#CCFBF1", text: "#0D9488" },
-  { accent: "#F59E0B", border: "#FCD34D", soft: "#FEF3C7", text: "#B45309" },
-  { accent: "#8B5CF6", border: "#C4B5FD", soft: "#EDE9FE", text: "#6D28D9" },
-  { accent: "#3B82F6", border: "#93C5FD", soft: "#DBEAFE", text: "#1D4ED8" },
-  { accent: "#EC4899", border: "#F9A8D4", soft: "#FCE7F3", text: "#BE185D" },
-  { accent: "#10B981", border: "#6EE7B7", soft: "#D1FAE5", text: "#047857" },
-  { accent: "#06B6D4", border: "#67E8F9", soft: "#CFFAFE", text: "#0E7490" },
-  { accent: "#F97316", border: "#FDBA74", soft: "#FFEDD5", text: "#C2410C" },
-];
-function paletteFor(id: number) {
-  return PALETTE[(id - 1) % PALETTE.length];
-}
+// v0.1.7:色統一のため nodeColors.paletteAt(stableIndex) を使用
 
 function estimateTextWidth(text: string, isJa: boolean): number {
   return text.length * (isJa ? 12 : 7) + 32;
@@ -56,16 +52,39 @@ function SpecDocMap({
   edges,
   language,
   nodeOffsets,
+  showDataDetails = false,
 }: SpecDocMapProps) {
   if (nodes.length === 0) return null;
   const offsetFor = (id: number) =>
     nodeOffsets?.get(id) ?? { x: 0, y: 0 };
+  // v0.1.7 色統一
+  const stableColorIndex = computeStableColorIndex(nodes, edges, language);
+  const paletteFor = (id: number) =>
+    paletteAt(stableColorIndex.get(id) ?? 0);
 
   const N = nodes.length;
   const entry = nodes.find((n) => n.isEntryPoint);
-  const othersRaw = entry ? nodes.filter((n) => n.id !== entry.id) : nodes;
+  const othersRawUnsorted = entry
+    ? nodes.filter((n) => n.id !== entry.id)
+    : nodes;
+  // v0.1.7 安定化:degree 降順 + ロケール順で決定的に並べる(分析ごとのブレを吸収)
+  const degreeAll = (id: number) =>
+    edges.reduce(
+      (a, e) => a + (e.from === id ? 1 : 0) + (e.to === id ? 1 : 0),
+      0,
+    );
+  const stableLabel = (n: ScreenNode) => {
+    const src = n.userIntent ?? n.label;
+    const s = pickLocalized(src, language);
+    return s || String(n.id);
+  };
+  const othersRaw = [...othersRawUnsorted].sort((a, b) => {
+    const dd = degreeAll(b.id) - degreeAll(a.id);
+    if (dd !== 0) return dd;
+    return stableLabel(a).localeCompare(stableLabel(b), "ja");
+  });
 
-  // 交差削減:連結ノード同士を隣接させる greedy 順序
+  // 交差削減:greedy 初期順序 → 2-opt スワップで最終最適化
   const otherIds = new Set(othersRaw.map((n) => n.id));
   const adjacency = new Map<number, Set<number>>();
   for (const e of edges) {
@@ -74,16 +93,14 @@ function SpecDocMap({
     adjacency.set(e.to, (adjacency.get(e.to) ?? new Set()).add(e.from));
   }
   const degree = (id: number) => adjacency.get(id)?.size ?? 0;
-  const ordered: ScreenNode[] = [];
+  const initialOrder: ScreenNode[] = [];
   const visited = new Set<number>();
   if (othersRaw.length > 0) {
-    const start = [...othersRaw].sort(
-      (a, b) => degree(b.id) - degree(a.id),
-    )[0];
-    ordered.push(start);
+    const start = [...othersRaw].sort((a, b) => degree(b.id) - degree(a.id))[0];
+    initialOrder.push(start);
     visited.add(start.id);
-    while (ordered.length < othersRaw.length) {
-      const last = ordered[ordered.length - 1];
+    while (initialOrder.length < othersRaw.length) {
+      const last = initialOrder[initialOrder.length - 1];
       const neighbors = adjacency.get(last.id) ?? new Set();
       let next: ScreenNode | null = null;
       for (const n of othersRaw) {
@@ -98,16 +115,57 @@ function SpecDocMap({
         }
       }
       if (!next) break;
-      ordered.push(next);
+      initialOrder.push(next);
       visited.add(next.id);
     }
   }
-  const others = ordered;
+  const countCrossings = (order: ScreenNode[]): number => {
+    const pos = new Map<number, number>();
+    order.forEach((n, i) => pos.set(n.id, i));
+    const chords: Array<[number, number]> = [];
+    for (const e of edges) {
+      const a = pos.get(e.from);
+      const b = pos.get(e.to);
+      if (a === undefined || b === undefined) continue;
+      chords.push([Math.min(a, b), Math.max(a, b)]);
+    }
+    let c = 0;
+    for (let i = 0; i < chords.length; i++) {
+      for (let j = i + 1; j < chords.length; j++) {
+        const [a, b] = chords[i];
+        const [x, y] = chords[j];
+        if ((a < x && x < b && b < y) || (x < a && a < y && y < b)) c++;
+      }
+    }
+    return c;
+  };
+  const optimized = [...initialOrder];
+  let bestCrossings = countCrossings(optimized);
+  let improved = true;
+  let guard = 0;
+  while (improved && guard++ < 20) {
+    improved = false;
+    for (let i = 0; i < optimized.length - 1; i++) {
+      for (let j = i + 1; j < optimized.length; j++) {
+        [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
+        const c = countCrossings(optimized);
+        if (c < bestCrossings) {
+          bestCrossings = c;
+          improved = true;
+        } else {
+          [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
+        }
+      }
+    }
+  }
+  const others = optimized;
   const M = others.length;
   const leafCap = N >= 10 ? 4 : N >= 7 ? 5 : 7;
   const R_branch = M > 0 ? Math.max(220, 110 + M * 36) : 0;
   const leafOuterReach = BRANCH_W / 2 + LEAF_GAP_X + 200;
-  const reach = R_branch + leafOuterReach;
+  // 詳細モードはデータチップ分を余計に確保
+  const detailExtraReach = showDataDetails ? 320 : 0;
+  const reach = R_branch + leafOuterReach + detailExtraReach;
   const W = Math.max(1100, reach * 2 + 120);
   const heightForLeaves = leafCap * LEAF_SPACING_Y + 80;
   const H = Math.max(620, reach * 2 + heightForLeaves * 0.4);
@@ -116,8 +174,18 @@ function SpecDocMap({
 
   type BranchPos = { x: number; y: number; angle: number };
   type LeafPos = { x: number; y: number; w: number; label: string };
+  type DataChip = {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    name: string;
+    subtitle: string;
+    fields: string[];
+  };
   const branchPositions = new Map<number, BranchPos>();
   const leafPositions = new Map<number, LeafPos[]>();
+  const dataPositions = new Map<number, DataChip[]>();
 
   // 中心にエントリーポイント(葉なし)
   if (entry) {
@@ -148,7 +216,8 @@ function SpecDocMap({
     const K = leafSource.length;
     const leaves = leafSource.map((leaf, k) => {
       const label = pickLocalized(leaf, language);
-      const w = estimateTextWidth(label, isJa);
+      // 詳細モードで `> ` プレフィックスを付けるので追加幅を確保(MapCanvas と同じ)
+      const w = estimateTextWidth(label, isJa) + (showDataDetails ? 14 : 0);
       const offset = k - (K - 1) / 2;
       const leafY = by + offset * LEAF_SPACING_Y;
       const leafX = baseColumnX + sign * Math.abs(offset) * LEAF_FAN_X;
@@ -156,6 +225,100 @@ function SpecDocMap({
     });
     leafPositions.set(node.id, leaves);
   });
+
+  // 詳細モード:各画面の使うデータをさらに外側に「データチップ」として並べる(MapCanvas と同ロジック)
+  if (showDataDetails) {
+    const DATA_EXTRA_GAP_MIN = 60;
+    others.forEach((node) => {
+      const bpos = branchPositions.get(node.id);
+      if (!bpos) return;
+      const isRight = Math.cos(bpos.angle) >= 0;
+      const sign = isRight ? 1 : -1;
+      const nodeLeaves = leafPositions.get(node.id) ?? [];
+      const maxLeafHalf = nodeLeaves.reduce(
+        (m, l) => Math.max(m, l.w / 2),
+        0,
+      );
+      const maxLeafFanOffset =
+        nodeLeaves.length > 1
+          ? ((nodeLeaves.length - 1) / 2) * LEAF_FAN_X
+          : 0;
+      const baseColumnX =
+        bpos.x +
+        sign *
+          (BRANCH_W / 2 +
+            LEAF_GAP_X +
+            maxLeafHalf +
+            maxLeafFanOffset +
+            DATA_EXTRA_GAP_MIN);
+      const humanAt = (i: number): string => {
+        const arr = node.detail.dataUsed ?? [];
+        if (i < arr.length) return pickLocalized(arr[i], language);
+        return "";
+      };
+      const techSource: Array<{
+        name: string;
+        subtitle: string;
+        fields: string[];
+      }> =
+        node.detail.dataTech && node.detail.dataTech.length > 0
+          ? node.detail.dataTech.map((t, i) => {
+              const base =
+                typeof t === "string"
+                  ? { name: t, fields: [] as string[] }
+                  : { name: t.name, fields: t.fields ?? [] };
+              return { ...base, subtitle: humanAt(i) };
+            })
+          : (node.detail.dataUsed ?? []).map((d) => ({
+              name: pickLocalized(d, language),
+              subtitle: "",
+              fields: [],
+            }));
+      const dataSource = techSource.slice(0, leafCap);
+      const estimateMono = (t: string) => t.length * 7.2;
+
+      const boxHeights = dataSource.map((d) => {
+        const shownFieldsN = Math.max(0, Math.min(6, d.fields.length));
+        const subtitleH = d.subtitle ? 14 : 0;
+        const emptyHintH = shownFieldsN === 0 && !d.subtitle ? 14 : 0;
+        return 24 + subtitleH + shownFieldsN * 16 + emptyHintH + 8;
+      });
+      const boxGap = 14;
+      const totalH = boxHeights.reduce((a, b) => a + b + boxGap, 0) - boxGap;
+      let cursorY = bpos.y - totalH / 2;
+
+      const chips: DataChip[] = dataSource.map((d) => {
+        const shownFields = d.fields.slice(0, 6);
+        const nameW = estimateMono(d.name);
+        const subtitleW = d.subtitle
+          ? d.subtitle.length * (language === "ja" ? 11 : 6.5)
+          : 0;
+        const fieldMaxW = shownFields.reduce(
+          (m, f) => Math.max(m, estimateMono(f)),
+          0,
+        );
+        const w = Math.max(nameW, subtitleW, fieldMaxW) + 52;
+        const subtitleRowH = d.subtitle ? 14 : 0;
+        const emptyHintRowH =
+          shownFields.length === 0 && !d.subtitle ? 14 : 0;
+        const h =
+          24 + subtitleRowH + shownFields.length * 16 + emptyHintRowH + 8;
+        const y = cursorY + h / 2;
+        const x = baseColumnX + sign * (w / 2);
+        cursorY += h + boxGap;
+        return {
+          x,
+          y,
+          w,
+          h,
+          name: d.name,
+          subtitle: d.subtitle,
+          fields: shownFields,
+        };
+      });
+      dataPositions.set(node.id, chips);
+    });
+  }
 
   // ユーザーがノードを動かした分も含めて viewBox を再計算(全要素を内包するよう拡張)
   let minX = 0,
@@ -176,10 +339,23 @@ function SpecDocMap({
       maxY = Math.max(maxY, leaf.y + LEAF_H / 2 + 10);
     });
   });
+  dataPositions.forEach((chips) => {
+    chips.forEach((chip) => {
+      minX = Math.min(minX, chip.x - chip.w / 2 - 10);
+      minY = Math.min(minY, chip.y - chip.h / 2 - 10);
+      maxX = Math.max(maxX, chip.x + chip.w / 2 + 10);
+      maxY = Math.max(maxY, chip.y + chip.h / 2 + 10);
+    });
+  });
   const vbX = minX;
   const vbY = minY;
   const vbW = maxX - minX;
   const vbH = maxY - minY;
+
+  const monoStyle = {
+    fontFamily:
+      "'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace",
+  };
 
   return (
     <div className="spec-doc-map">
@@ -274,15 +450,158 @@ function SpecDocMap({
                   textAnchor="middle"
                   dominantBaseline="middle"
                   fill={p.text}
-                  fontSize="11.5"
+                  fontSize={showDataDetails ? 10.5 : 11.5}
                   fontWeight="600"
+                  style={showDataDetails ? monoStyle : undefined}
                 >
-                  {leaf.label}
+                  {showDataDetails ? `> ${leaf.label}` : leaf.label}
                 </text>
               </g>
             ));
           })}
         </g>
+
+        {/* 詳細モード:葉 → データチップの線 + データチップ本体 */}
+        {showDataDetails && (
+          <>
+            <g aria-label={language === "ja" ? "データつながり" : "data links"}>
+              {nodes.map((node) => {
+                const b = branchPositions.get(node.id);
+                const chips = dataPositions.get(node.id);
+                if (!b || !chips) return null;
+                const p = paletteFor(node.id);
+                const isRight = b.x >= cx;
+                const sign = isRight ? 1 : -1;
+                const startX = b.x + sign * (BRANCH_W / 2 - 4);
+                const startY = b.y;
+                return chips.map((chip, i) => {
+                  const endX = chip.x - sign * (chip.w / 2);
+                  const endY = chip.y;
+                  const midX = (startX + endX) / 2;
+                  return (
+                    <path
+                      key={`dlink-${node.id}-${i}`}
+                      d={`M ${startX} ${startY} C ${midX} ${startY} ${midX} ${endY} ${endX} ${endY}`}
+                      fill="none"
+                      stroke={p.accent}
+                      strokeOpacity={0.35}
+                      strokeWidth={1.2}
+                      strokeDasharray="2 4"
+                      strokeLinecap="round"
+                    />
+                  );
+                });
+              })}
+            </g>
+            <g aria-label={language === "ja" ? "使うデータ" : "data used"}>
+              {nodes.map((node) => {
+                const chips = dataPositions.get(node.id);
+                if (!chips) return null;
+                const p = paletteFor(node.id);
+                return chips.map((chip, i) => {
+                  const boxX = chip.x - chip.w / 2;
+                  const boxY = chip.y - chip.h / 2;
+                  return (
+                    <g key={`dchip-${node.id}-${i}`}>
+                      <rect
+                        x={boxX}
+                        y={boxY}
+                        width={chip.w}
+                        height={chip.h}
+                        rx={6}
+                        fill="#FFFFFF"
+                        stroke={p.border}
+                        strokeWidth={1.2}
+                        strokeDasharray="4 3"
+                      />
+                      <rect
+                        x={boxX}
+                        y={boxY}
+                        width={chip.w}
+                        height={24}
+                        rx={6}
+                        fill={p.soft}
+                        stroke="none"
+                      />
+                      <line
+                        x1={boxX}
+                        y1={boxY + 24}
+                        x2={boxX + chip.w}
+                        y2={boxY + 24}
+                        stroke={p.border}
+                        strokeWidth={1}
+                      />
+                      <g
+                        transform={`translate(${boxX + 8}, ${boxY + 6})`}
+                        stroke={p.text}
+                        strokeWidth="1.3"
+                        fill="none"
+                        strokeLinecap="round"
+                      >
+                        <ellipse cx="5" cy="2" rx="4" ry="1.3" />
+                        <path d="M1 2 V7 A4 1.3 0 0 0 9 7 V2" />
+                        <path d="M1 5 A4 1.3 0 0 0 9 5" />
+                      </g>
+                      <text
+                        x={boxX + 24}
+                        y={boxY + 15}
+                        fill={p.text}
+                        fontSize="11.5"
+                        fontWeight="700"
+                        dominantBaseline="middle"
+                        style={monoStyle}
+                      >
+                        {chip.name}
+                      </text>
+                      {chip.subtitle && (
+                        <text
+                          x={boxX + 12}
+                          y={boxY + 24 + 8}
+                          fill="#94A3B8"
+                          fontSize="10"
+                          fontStyle="italic"
+                          dominantBaseline="middle"
+                        >
+                          {chip.subtitle}
+                        </text>
+                      )}
+                      {chip.fields.map((f, j) => {
+                        const yOffset = chip.subtitle ? 14 : 0;
+                        return (
+                          <text
+                            key={`f-${j}`}
+                            x={boxX + 12}
+                            y={boxY + 24 + 12 + yOffset + j * 16}
+                            fill="#475569"
+                            fontSize="10.5"
+                            dominantBaseline="middle"
+                            style={monoStyle}
+                          >
+                            {f}
+                          </text>
+                        );
+                      })}
+                      {chip.fields.length === 0 && !chip.subtitle && (
+                        <text
+                          x={boxX + 12}
+                          y={boxY + 24 + 10}
+                          fill="#CBD5E1"
+                          fontSize="9"
+                          fontStyle="italic"
+                          dominantBaseline="middle"
+                        >
+                          {language === "ja"
+                            ? "フィールド情報なし(再分析で取得)"
+                            : "no fields (re-analyze)"}
+                        </text>
+                      )}
+                    </g>
+                  );
+                });
+              })}
+            </g>
+          </>
+        )}
 
         {/* 主枝ピル */}
         <g>
@@ -290,8 +609,19 @@ function SpecDocMap({
             const b = branchPositions.get(node.id);
             if (!b) return null;
             const p = paletteFor(node.id);
-            const title = pickLocalized(node.userIntent ?? node.label, language);
-            const subtitle = pickLocalized(node.detail.title, language);
+            // 詳細モードでは短い画面名 + 主要ファイル名を使う(MapCanvas と同じ表記)
+            const labelSource = showDataDetails
+              ? node.label
+              : node.userIntent ?? node.label;
+            const title = pickLocalized(labelSource, language);
+            const primaryFile = node.detail.files?.[0];
+            const primaryFileBase = primaryFile
+              ? primaryFile.split(/[\\/]/).pop() ?? primaryFile
+              : null;
+            const subtitle =
+              showDataDetails && primaryFileBase
+                ? primaryFileBase
+                : pickLocalized(node.detail.title, language);
             const x = b.x - BRANCH_W / 2;
             const y = b.y - BRANCH_H / 2;
             return (
@@ -323,22 +653,27 @@ function SpecDocMap({
                   textAnchor="middle"
                   dominantBaseline="middle"
                   fill="#64748b"
-                  fontSize="10.5"
+                  fontSize={showDataDetails ? 10 : 10.5}
+                  style={showDataDetails ? monoStyle : undefined}
                 >
-                  {truncate(subtitle, 16)}
+                  {truncate(subtitle, showDataDetails ? 20 : 16)}
                 </text>
                 {node.isEntryPoint && (
                   <g>
                     <rect
-                      x={b.x - 36}
+                      x={b.x - 40}
                       y={y - 18}
-                      width={72}
+                      width={80}
                       height={16}
                       rx={8}
                       fill={p.accent}
                     />
+                    <path
+                      d={`M ${b.x - 28} ${y - 13} L ${b.x - 22} ${y - 10} L ${b.x - 28} ${y - 7} Z`}
+                      fill="white"
+                    />
                     <text
-                      x={b.x}
+                      x={b.x + 3}
                       y={y - 9}
                       textAnchor="middle"
                       dominantBaseline="middle"
@@ -346,7 +681,7 @@ function SpecDocMap({
                       fontSize="9"
                       fontWeight="700"
                     >
-                      {language === "ja" ? "▶ はじまり" : "▶ START"}
+                      {language === "ja" ? "はじまり" : "START"}
                     </text>
                   </g>
                 )}

@@ -79,13 +79,14 @@ const RESPONSE_SCHEMA = {
           userIntent: BILINGUAL_STRING,
           // 機能拡張クイックウィン 3: 1 ノードだけ true にする(エントリーポイント)。
           isEntryPoint: { type: "boolean" },
-          // v0.1.7 マインドマップ:この画面に紐づく短いアクション(葉チップ)、3-7 個目安。
+          // v0.1.7 マインドマップ:この画面に紐づく短いアクション(葉チップ)、2-4 個目安。
           //   例: 「会話を始める」「履歴を見る」「音声入力」
           //   各要素 bilingual({ja, en})。出力なしでも UI は壊れない(空配列扱い)。
+          //   v0.1.7 短縮:分析時間短縮のため maxItems を 7 → 4 に縮小。
           subActions: {
             type: "array",
             items: BILINGUAL_STRING,
-            maxItems: 7,
+            maxItems: 4,
           },
           detail: {
             type: "object",
@@ -100,10 +101,37 @@ const RESPONSE_SCHEMA = {
                 maxItems: 5,
               },
               // 機能拡張クイックウィン 4: この画面で使っているデータの非技術名(各要素 bilingual)。
+              // v0.1.7 短縮:maxItems を 5 → 3 に縮小(分析時間短縮)。
               dataUsed: {
                 type: "array",
                 items: BILINGUAL_STRING,
-                maxItems: 5,
+                maxItems: 3,
+              },
+              // v0.1.7:同じデータの技術者向け識別子(short English identifier)。
+              // 詳細モードの表示に使う。dataUsed と同じ順序・件数を揃えるのが望ましい。
+              // 各要素は string(識別子のみ)か、または { name, fields } 形式でフィールド一覧も渡せる。
+              // v0.1.7 短縮:maxItems 5→3、fields 8→4 に縮小(分析時間短縮)。
+              dataTech: {
+                type: "array",
+                items: {
+                  oneOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      properties: {
+                        name: { type: "string" },
+                        fields: {
+                          type: "array",
+                          items: { type: "string" },
+                          maxItems: 4,
+                        },
+                      },
+                      required: ["name"],
+                      additionalProperties: false,
+                    },
+                  ],
+                },
+                maxItems: 3,
               },
               // 機能拡張クイックウィン 5: 変更しやすさ / 影響範囲ヒント。
               changeHint: {
@@ -138,6 +166,45 @@ const RESPONSE_SCHEMA = {
         additionalProperties: false,
       },
     },
+    // v0.1.7 仕様書拡張:プロジェクト全体のメタ情報。全部 optional。
+    context: {
+      type: "object",
+      properties: {
+        techStack: {
+          type: "object",
+          properties: {
+            frontend: { type: "string" },
+            backend: { type: "string" },
+            db: { type: "string" },
+            external: {
+              type: "array",
+              items: { type: "string" },
+              maxItems: 6,
+            },
+          },
+          additionalProperties: false,
+        },
+        testing: {
+          type: "object",
+          properties: {
+            framework: { type: "string" },
+            hasTests: { type: "boolean" },
+          },
+          additionalProperties: false,
+        },
+        apiEndpoints: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 20,
+        },
+        edgeCases: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 8,
+        },
+      },
+      additionalProperties: false,
+    },
   },
   required: ["nodes", "edges"],
   additionalProperties: false,
@@ -152,7 +219,7 @@ const RESPONSE_SCHEMA = {
  *
  * 値は Claude Code が認識するエイリアス。最新一覧はドキュメント参照。
  */
-const CLAUDE_MODEL = "claude-sonnet-4-6";
+export const CLAUDE_MODEL = "claude-sonnet-4-6";
 
 const SYSTEM_PROMPT_JA = `You are a JSON-only data extraction tool for AppMap. AppMap visualizes applications as a "screen map": 画面 (screens) as nodes, transitions between them as edges.
 
@@ -496,14 +563,17 @@ OUTPUT SCHEMA — JSON shape:
       "userIntent": { "ja": "<JA 10-14 chars, action phrase>", "en": "<EN 14-22 chars, action phrase>" },
       "isEntryPoint": <boolean — set true on EXACTLY ONE node>,
       "subActions": [
-        { "ja": "<JA 6-12 chars, short verb-phrase action>", "en": "<EN 8-18 chars, short verb-phrase action>" }
+        { "ja": "<JA 6-12 chars, verb-phrase>", "en": "<EN 8-18 chars, verb-phrase>" }
       ],
       "detail": {
         "title": { "ja": "<JA screen title>", "en": "<EN screen title>" },
-        "body": { "ja": "<JA 2-3 sentences, tech vocab OK>", "en": "<EN 2-3 sentences, tech vocab OK>" },
-        "bodyNoCode": { "ja": "<JA non-engineer style, Bubble/Notion 語彙>", "en": "<EN non-engineer style, plain English>" },
+        "body": { "ja": "<JA 1-2 sentences, tech vocab OK>", "en": "<EN 1-2 sentences, tech vocab OK>" },
+        "bodyNoCode": { "ja": "<JA 1-2 sentences, Bubble/Notion 語彙>", "en": "<EN 1-2 sentences, plain English>" },
         "files": ["<project-root-relative path, forward slash>"],
         "dataUsed": [{ "ja": "<JA non-tech data name>", "en": "<EN non-tech data name>" }],
+        "dataTech": [
+          { "name": "<entity or table name>", "fields": ["<field 1>", "<field 2>"] }
+        ],
         "changeHint": {
           "safety": "easy" | "neutral" | "risky",
           "note": { "ja": "<JA 1 sentence>", "en": "<EN 1 sentence>" }
@@ -513,7 +583,18 @@ OUTPUT SCHEMA — JSON shape:
   ],
   "edges": [
     { "id": "<from-to e.g. \\"1-2\\">", "from": <int>, "to": <int>, "bidirectional": <boolean> }
-  ]
+  ],
+  "context": {
+    "techStack": {
+      "frontend": "<e.g. React + TypeScript>",
+      "backend": "<e.g. Rust / Tauri>",
+      "db": "<e.g. SQLite / none>",
+      "external": ["<e.g. OpenAI API, Anthropic API>"]
+    },
+    "testing": { "framework": "<vitest / jest / pytest>", "hasTests": <boolean> },
+    "apiEndpoints": ["<e.g. POST /api/analyze>"],
+    "edgeCases": ["<e.g. ネットワーク断時のリトライ, API キー不正時のエラー表示>"]
+  }
 }
 
 DEPTH — required, integer 0-3:
@@ -560,20 +641,21 @@ isEntryPoint guidance:
 - TRUE on EXACTLY ONE node per map. FALSE/OMIT on all others.
 
 dataUsed guidance:
-- 1-5 short non-technical data labels.
-- JA: "ユーザー情報", "予約情報". EN: "User profile", "Reservations".
+- 1-3 short non-technical data labels. JA: "ユーザー情報". EN: "User profile".
 - NOT raw schema names like "users_table".
 
+dataTech guidance (v0.1.7, for engineer-facing detail mode):
+- 1-3 English engineer identifiers matching dataUsed order.
+- **PREFER object form** { "name": "voice_texts", "fields": ["id", "text", "language"] }
+- Only use plain string form when entity is truly opaque (external ID).
+- Fields: 2-4 short snake_case/camelCase names, no types.
+- Omit if no identifiers exist.
+
 subActions guidance (mind-map leaves, v0.1.7):
-- 3-7 short USER-PERSPECTIVE action chips per node. The map renders each as a small pill orbiting the parent screen — like leaves on a branch.
-- Each chip is a verb-phrase the user would actually DO inside this screen.
-- JA: 6-12 chars. EN: 8-18 chars. Strict limit — chips do not wrap.
-- Good (JA): "会話を始める", "履歴を見る", "音声入力", "表情を選ぶ", "映画を探す".
-- Good (EN): "Start a chat", "View history", "Voice input", "Pick a face", "Find a movie".
-- Bad: "Database access" (technical), "AppMap navigation system" (too long), "Click" (too vague).
-- These should feel like a MENU of things the user can do on this screen — not screen-to-screen transitions (those are edges).
-- Aim for 3-7 chips per node. Omit the field on screens with truly nothing to do (e.g. a 1-shot splash) — empty is fine.
-- Distinct from edges: edges are between SCREENS; subActions are actions WITHIN a single screen.
+- 2-4 short USER-PERSPECTIVE action chips per node (JA 6-12 chars, EN 8-18 chars).
+- Verb-phrase the user actually DOES here. Good: "会話を始める", "音声入力", "Start chat".
+- These are actions WITHIN a screen, not transitions to other screens.
+- Omit the field on splash-like screens with nothing to do.
 
 bodyNoCode SELF-CONTAINED RULE:
 - Explain the screen FIRST in plain everyday language, without requiring readers to know any Bubble/Notion/Glide feature.
@@ -595,6 +677,15 @@ CHANGE HINT guidance:
 - "easy": cosmetic / display-order / text changes; won't break other screens.
 - "neutral": local logic changes; might require checking adjacent screens.
 - "risky": shared logic (auth, navigation root, data shape); affects many screens.
+
+context guidance (v0.1.7, optional block for spec doc):
+- Emit only when you can read it from the codebase. Skip any subfield that would be a guess.
+- techStack: pick from evidence (package.json / Cargo.toml / requirements.txt / imports).
+- testing.framework: detect from files like vitest.config.*, jest.config.*, pytest.ini, __tests__ dir.
+- testing.hasTests: true if any *.test.* or *_test.* or tests/ dir exists.
+- apiEndpoints: read route definitions (express Router, Next.js pages/api, FastAPI @app.get, Rust axum/tauri commands). Format "METHOD /path".
+- edgeCases: short JA phrases for error-handling code paths you can see (retries, timeouts, permission checks, empty states).
+- If context has zero populatable fields, omit the whole context object.
 
 Remember: your response is JSON only. Begin with "{". End with "}". Every text field has BOTH "ja" and "en". Nothing else.`;
 
@@ -629,6 +720,29 @@ export type ScreenMapResult = {
    * v0.1.7 多言語:Bilingual({ja, en})または旧 string。
    */
   appSummary?: import("../types/screen").LocalizedText;
+  /**
+   * v0.1.7 仕様書拡張:AI がコード全体から拾える技術メタ情報。
+   * 全部 optional。無ければ仕様書は ＿＿＿＿ プレースホルダのまま。
+   */
+  context?: {
+    /** 技術スタック要約(1〜3 語ずつ) */
+    techStack?: {
+      frontend?: string;
+      backend?: string;
+      db?: string;
+      /** 使ってる SDK/外部サービス(例: OpenAI, Stripe, Firebase) */
+      external?: string[];
+    };
+    /** テストの状況 */
+    testing?: {
+      framework?: string; // "vitest" / "jest" / "pytest" 等
+      hasTests?: boolean;
+    };
+    /** API エンドポイント一覧(例: "GET /api/users", "POST /api/login") */
+    apiEndpoints?: string[];
+    /** 異常系・エッジケース(コードから読み取れるものだけ) */
+    edgeCases?: string[];
+  };
 };
 
 /**
@@ -1170,6 +1284,20 @@ function isScreenNode(v: unknown): v is ScreenNode {
     if (!Array.isArray(detail.dataUsed)) return false;
     if (!detail.dataUsed.every((d) => isLocalizedText(d))) return false;
   }
+  // v0.1.7 dataTech:省略可、あれば (string | { name, fields? })[]
+  if ("dataTech" in detail) {
+    if (!Array.isArray(detail.dataTech)) return false;
+    for (const item of detail.dataTech) {
+      if (typeof item === "string") continue;
+      if (typeof item !== "object" || item === null) return false;
+      const obj = item as Record<string, unknown>;
+      if (typeof obj.name !== "string") return false;
+      if ("fields" in obj) {
+        if (!Array.isArray(obj.fields)) return false;
+        if (!obj.fields.every((f) => typeof f === "string")) return false;
+      }
+    }
+  }
   // changeHint は省略可、あれば { safety, note: LocalizedText } 形(クイックウィン 5)
   if ("changeHint" in detail) {
     const hint = detail.changeHint;
@@ -1237,5 +1365,54 @@ export function isScreenMapResult(v: unknown): v is ScreenMapResult {
   if (!obj.edges.every(isScreenEdge)) return false;
   // v0.1.7 hotfix:appSummary は省略可、あれば LocalizedText(string | {ja, en})
   if ("appSummary" in obj && !isLocalizedText(obj.appSummary)) return false;
+  // v0.1.7 拡張:context は全部 optional。壊れていたら黙って落とす(表示は継続)
+  if ("context" in obj && !isValidContext(obj.context)) {
+    delete obj.context;
+  }
+  return true;
+}
+
+function isValidContext(v: unknown): boolean {
+  if (typeof v !== "object" || v === null) return false;
+  const c = v as Record<string, unknown>;
+  if ("techStack" in c) {
+    const t = c.techStack;
+    if (typeof t !== "object" || t === null) return false;
+    const ts = t as Record<string, unknown>;
+    if ("frontend" in ts && typeof ts.frontend !== "string") return false;
+    if ("backend" in ts && typeof ts.backend !== "string") return false;
+    if ("db" in ts && typeof ts.db !== "string") return false;
+    if (
+      "external" in ts &&
+      !(
+        Array.isArray(ts.external) &&
+        ts.external.every((x) => typeof x === "string")
+      )
+    )
+      return false;
+  }
+  if ("testing" in c) {
+    const t = c.testing;
+    if (typeof t !== "object" || t === null) return false;
+    const ts = t as Record<string, unknown>;
+    if ("framework" in ts && typeof ts.framework !== "string") return false;
+    if ("hasTests" in ts && typeof ts.hasTests !== "boolean") return false;
+  }
+  if (
+    "apiEndpoints" in c &&
+    !(
+      Array.isArray(c.apiEndpoints) &&
+      c.apiEndpoints.every((x) => typeof x === "string")
+    )
+  )
+    return false;
+  if (
+    "edgeCases" in c &&
+    !(
+      Array.isArray(c.edgeCases) &&
+      c.edgeCases.every((x) => typeof x === "string")
+    )
+  )
+    return false;
   return true;
 }

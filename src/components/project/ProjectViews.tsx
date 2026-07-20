@@ -5,6 +5,7 @@ import type {
 } from "../../types/screen";
 import type { StoredAnalysis, Engine, DetailLevel } from "../../lib/storage";
 import { pickLocalized, type Language } from "../../lib/i18n";
+import { SparkleIcon, PackageIcon } from "../ui/Icons";
 
 /**
  * v0.1.7「プロジェクト情報」配下の 3 ビュー。
@@ -23,6 +24,8 @@ type ProjectOverviewProps = {
   costUsd: number | null;
   analyzedAt: number | null;
   language: Language;
+  /** 詳細モード:最初の要素表示を label に切替 */
+  showDataDetails?: boolean;
 };
 
 export function ProjectOverview({
@@ -34,6 +37,7 @@ export function ProjectOverview({
   costUsd,
   analyzedAt,
   language,
+  showDataDetails = false,
 }: ProjectOverviewProps) {
   const tx = (ja: string, en: string) => (language === "ja" ? ja : en);
   const summaryStr = appSummary ? pickLocalized(appSummary, language) : "";
@@ -54,7 +58,7 @@ export function ProjectOverview({
       <div>
         <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2">
           {tx("プロジェクト概要", "Project overview")}
-          <span className="text-feature-teal">✨</span>
+          <SparkleIcon className="w-5 h-5 text-feature-teal" />
         </h1>
         <p className="text-sm text-ink-soft mt-1">
           {tx(
@@ -111,7 +115,9 @@ export function ProjectOverview({
           <MetaCard
             label={tx("最初の要素", "Entry piece")}
             value={pickLocalized(
-              entryNode.userIntent ?? entryNode.label,
+              showDataDetails
+                ? entryNode.label
+                : entryNode.userIntent ?? entryNode.label,
               language,
             )}
           />
@@ -183,12 +189,15 @@ type ProjectDataProps = {
   nodes: ScreenNode[];
   language: Language;
   onSelectNode: (id: number) => void;
+  /** 詳細モード:要素チップを label + monospace に切替 */
+  showDataDetails?: boolean;
 };
 
 export function ProjectData({
   nodes,
   language,
   onSelectNode,
+  showDataDetails = false,
 }: ProjectDataProps) {
   const tx = (ja: string, en: string) => (language === "ja" ? ja : en);
   const dataList = aggregateData(nodes, language);
@@ -198,7 +207,7 @@ export function ProjectData({
       <div>
         <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2">
           {tx("使われているデータ", "Data used")}
-          <span className="text-feature-purple">✨</span>
+          <SparkleIcon className="w-5 h-5 text-feature-purple" />
         </h1>
         <p className="text-sm text-ink-soft mt-1">
           {tx(
@@ -210,8 +219,8 @@ export function ProjectData({
 
       {dataList.length === 0 ? (
         <div className="bg-paper rounded-[14px] border border-border-soft p-10 text-center">
-          <div className="text-3xl mb-2" aria-hidden="true">
-            📦
+          <div className="flex justify-center mb-2">
+            <PackageIcon className="w-8 h-8 text-ink-soft" />
           </div>
           <h2 className="text-base font-bold text-ink-strong mb-1">
             {tx(
@@ -251,16 +260,29 @@ export function ProjectData({
                 </span>
               </div>
               <div className="flex flex-wrap gap-2 mt-2">
-                {d.screens.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => onSelectNode(s.id)}
-                    className="text-xs bg-canvas hover:bg-paper rounded-full px-3 py-1 border border-border-soft text-ink-strong transition-colors cursor-pointer"
-                  >
-                    {pickLocalized(s.userIntent ?? s.label, language)}
-                  </button>
-                ))}
+                {d.screens.map((s) => {
+                  const labelSource = showDataDetails
+                    ? s.label
+                    : s.userIntent ?? s.label;
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => onSelectNode(s.id)}
+                      className="text-xs bg-canvas hover:bg-paper rounded-full px-3 py-1 border border-border-soft text-ink-strong transition-colors cursor-pointer"
+                      style={
+                        showDataDetails
+                          ? {
+                              fontFamily:
+                                "'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace",
+                            }
+                          : undefined
+                      }
+                    >
+                      {pickLocalized(labelSource, language)}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -303,7 +325,7 @@ export function ProjectSettings({
       <div>
         <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2">
           {tx("設定", "Settings")}
-          <span className="text-feature-blue">✨</span>
+          <SparkleIcon className="w-5 h-5 text-feature-blue" />
         </h1>
         <p className="text-sm text-ink-soft mt-1">
           {tx(

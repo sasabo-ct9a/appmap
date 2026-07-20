@@ -923,10 +923,10 @@ async fn llama_analyze(
             "type": "json_object"
         },
         "temperature": 0.1,
-        // v0.1.7 hotfix(2 回目):詳細レベル化で 8-15 ノード × bilingual を 1 回で吐く。
-        // 旧 14000 では足りないため 20000 に拡張。
-        // 入力 ~12K + 出力 20K = 32K で ctx 枠ギリギリ(margin 0、要観察)。
-        "max_tokens": 20000
+        // v0.1.7:短縮版プロンプト + maxItems 縮小で出力量が減ったので
+        //   max_tokens を 20000 → 12000 に戻す(生成時間短縮の副効果あり)。
+        //   出力量が本当に足りなくなったら再度引き上げる。
+        "max_tokens": 12000
     });
 
     let client = reqwest::Client::builder()
@@ -968,6 +968,572 @@ async fn llama_analyze(
     Ok(content.to_string())
 }
 
+/// v0.1.8: ノード単位の Q&A(Claude 版)。
+/// analyze と違い schema・folder 不要。単一プロンプトを流し、plain text を返す。
+#[tauri::command]
+async fn claude_chat(system_prompt: String, user_prompt: String, model: String) -> Result<String, String> {
+    let exe = find_claude_exe()?;
+    let path_env = augmented_path();
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        StdCommand::new(&exe)
+            .args([
+                "-p",
+                &user_prompt,
+                "--model",
+                &model,
+                "--system-prompt",
+                &system_prompt,
+                "--max-turns",
+                "1",
+            ])
+            .env("PATH", &path_env)
+            .output()
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+    .map_err(|e| format!("failed to spawn claude: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "claude failed (code {:?})\nstderr: {}\nstdout: {}",
+            output.status.code(),
+            if stderr.trim().is_empty() { "(empty)" } else { stderr.trim() },
+            if stdout.trim().is_empty() { "(empty)" } else { stdout.trim() },
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// v0.1.8: ノード単位の Q&A(ローカル LLM 版)。
+/// llama-server の OpenAI 互換 API に plain messages を投げて content を返す。
+#[tauri::command]
+async fn llama_chat(system_prompt: String, user_prompt: String) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "model": "local",
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 800
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("http client error: {}", e))?;
+
+    let url = format!("http://127.0.0.1:{}/v1/chat/completions", LLAMA_PORT);
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("llama-server returned {}: {}", status, body));
+    }
+
+    let response_body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("response parse failed: {}", e))?;
+
+    let content = response_body
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("no content in response: {}", response_body))?;
+
+    Ok(content.trim().to_string())
+}
+
+/// v0.1.8:リリース前チェックのコードスキャン結果。
+/// LLM を呼ばずローカルで regex 相当の文字列マッチだけ実行。
+#[derive(serde::Serialize)]
+struct PreReleaseScanResult {
+    secrets: Vec<ScanHit>,
+    todos: Vec<ScanHit>,
+    console_logs: usize,
+    files_scanned: usize,
+    files_truncated: bool,
+    /// v0.1.8:設定ファイル+package.json を実物 grep してリアルタイム検出。
+    /// AI 分析の context.testing が古い時、こちらを優先する。
+    /// 検出できなかった時は None。
+    detected_test_framework: Option<String>,
+    /// テストファイル(*.test.* / *.spec.* / __tests__/)が存在するか
+    has_test_files: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ScanHit {
+    file: String,
+    line: usize,
+    /// マッチした行の該当部分だけを抜粋(値そのものは伏せ字化)
+    snippet: String,
+    /// 検出パターンの分類(例:"api_key", "password", "aws", "todo")
+    kind: String,
+}
+
+/// v0.1.8:リリース前チェック用のファイルスキャン。
+/// - `SECRET_PATTERNS` に該当するトークンを含む行を検出(値は伏せて先頭 60 字に切詰め)
+/// - TODO / FIXME / XXX / HACK 行を検出
+/// - console.log の総数を集計(存在の目安として)
+/// スキャンは分析用と同じ include_exts + skip_dirs を使い、200 ファイルで打切り。
+#[tauri::command]
+async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String> {
+    let folder_path = PathBuf::from(&folder);
+    if !folder_path.exists() {
+        return Err(format!("folder does not exist: {}", folder));
+    }
+
+    // 分析用と同じディレクトリ / 拡張子フィルタ
+    const SKIP_DIRS: &[&str] = &[
+        "node_modules", ".git", "target", "dist", "build", ".next",
+        ".cache", "venv", ".venv", "__pycache__", ".idea", ".vscode",
+    ];
+    const INCLUDE_EXTS: &[&str] = &[
+        "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "rb",
+        "vue", "svelte", "html", "css", "json", "toml", "yaml", "yml",
+        "env", "sh", "ps1",
+    ];
+    const MAX_FILES: usize = 200;
+
+    // シークレット系:プレフィックス or キー名パターン
+    // 誤検知を減らすため、代入っぽい表現(= の右側 or : の後)に絞る
+    let secret_needles: &[(&str, &str)] = &[
+        ("sk-", "openai-like key"),
+        ("sk_live_", "stripe live key"),
+        ("sk_test_", "stripe test key"),
+        ("AKIA", "aws access key id"),
+        ("AIza", "google api key"),
+        ("ghp_", "github personal token"),
+        ("xoxb-", "slack bot token"),
+        ("xoxp-", "slack user token"),
+        ("-----BEGIN RSA PRIVATE KEY-----", "private key"),
+        ("-----BEGIN PRIVATE KEY-----", "private key"),
+    ];
+    // 変数名系:api_key = "..." 形式 の左辺で拾う(右辺の非空 quote を要求)
+    let secret_var_names: &[&str] = &[
+        "api_key", "apiKey", "api-key",
+        "secret_key", "secretKey", "secret-key",
+        "access_key", "accessKey",
+        "password", "passwd", "pwd",
+        "token", "auth_token", "authToken",
+    ];
+    // 実際の作業マーカーだけに絞る。XXX は "env.XXX" / "example.com/xxx" などのプレースホルダで
+    // 誤検知が多すぎるので外す(HACK/FIXME/TODO で必要十分)。
+    let todo_needles: &[&str] = &["TODO", "FIXME", "HACK"];
+
+    let mut secrets: Vec<ScanHit> = Vec::new();
+    let mut todos: Vec<ScanHit> = Vec::new();
+    let mut console_logs: usize = 0;
+    let mut files_scanned: usize = 0;
+    let mut files_truncated = false;
+    let mut detected_test_framework: Option<String> = None;
+    let mut has_test_files: bool = false;
+
+    fn walk(
+        dir: &Path,
+        base: &Path,
+        skip_dirs: &[&str],
+        include_exts: &[&str],
+        files: &mut Vec<PathBuf>,
+        max_files: usize,
+    ) {
+        if files.len() >= max_files { return; }
+        let Ok(entries) = std::fs::read_dir(dir) else { return; };
+        for entry in entries.flatten() {
+            if files.len() >= max_files { return; }
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !skip_dirs.contains(&name) && !name.starts_with('.') {
+                    walk(&path, base, skip_dirs, include_exts, files, max_files);
+                }
+            } else if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                if include_exts.contains(&ext.as_str()) {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    let folder_owned = folder_path.clone();
+    let file_list: Vec<PathBuf> = tauri::async_runtime::spawn_blocking(move || {
+        let mut list = Vec::new();
+        walk(&folder_owned, &folder_owned, SKIP_DIRS, INCLUDE_EXTS, &mut list, MAX_FILES);
+        list
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?;
+
+    if file_list.len() >= MAX_FILES {
+        files_truncated = true;
+    }
+
+    // v0.1.8:テストフレームワーク検出(AI 分析より新しい情報)
+    // 1) 明示的な設定ファイル
+    // 2) package.json / requirements.txt に framework 名
+    // 3) test ファイル(*.test.*, *.spec.*, __tests__/)の存在
+    for path in &file_list {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if detected_test_framework.is_none() {
+            let n_lower = name.to_lowercase();
+            if n_lower.starts_with("vitest.config.") {
+                detected_test_framework = Some("Vitest".to_string());
+            } else if n_lower.starts_with("jest.config.") {
+                detected_test_framework = Some("Jest".to_string());
+            } else if n_lower == "pytest.ini" || n_lower == "conftest.py" {
+                detected_test_framework = Some("Pytest".to_string());
+            } else if n_lower == "playwright.config.ts" || n_lower == "playwright.config.js" {
+                detected_test_framework = Some("Playwright".to_string());
+            } else if n_lower == "cypress.config.ts" || n_lower == "cypress.config.js"
+                || n_lower == "cypress.json" {
+                detected_test_framework = Some("Cypress".to_string());
+            } else if n_lower == "karma.conf.js" || n_lower == "karma.conf.ts" {
+                detected_test_framework = Some("Karma".to_string());
+            } else if n_lower == "mocharc.json" || n_lower == ".mocharc.json"
+                || n_lower == ".mocharc.js" {
+                detected_test_framework = Some("Mocha".to_string());
+            } else if n_lower == "phpunit.xml" || n_lower == "phpunit.xml.dist" {
+                detected_test_framework = Some("PHPUnit".to_string());
+            }
+        }
+        if !has_test_files {
+            let n_lower = name.to_lowercase();
+            let path_str = path.to_string_lossy().replace('\\', "/");
+            if n_lower.contains(".test.") || n_lower.contains(".spec.")
+                || path_str.contains("/__tests__/")
+                || path_str.contains("/tests/")
+                || path_str.contains("/test/") {
+                has_test_files = true;
+            }
+        }
+    }
+
+    // 4) package.json の dep 探索(まだ検出できていなければ)
+    if detected_test_framework.is_none() {
+        let pkg_json = folder_path.join("package.json");
+        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+            // 単純 substring 検索:名前が含まれていれば十分
+            let candidates = [
+                ("\"vitest\"", "Vitest"),
+                ("\"jest\"", "Jest"),
+                ("\"@playwright/test\"", "Playwright"),
+                ("\"cypress\"", "Cypress"),
+                ("\"mocha\"", "Mocha"),
+                ("\"jasmine\"", "Jasmine"),
+                ("\"karma\"", "Karma"),
+                ("\"ava\"", "AVA"),
+            ];
+            for (needle, name) in candidates {
+                if content.contains(needle) {
+                    detected_test_framework = Some(name.to_string());
+                    break;
+                }
+            }
+        }
+        // Python: requirements.txt / pyproject.toml
+        if detected_test_framework.is_none() {
+            for req_name in ["requirements.txt", "requirements-dev.txt", "pyproject.toml"] {
+                let path = folder_path.join(req_name);
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if content.contains("pytest") {
+                        detected_test_framework = Some("Pytest".to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    for path in file_list {
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        files_scanned += 1;
+        let rel = path.strip_prefix(&folder_path).unwrap_or(&path)
+            .to_string_lossy().replace('\\', "/");
+
+        for (line_idx, raw_line) in content.lines().enumerate() {
+            let line_num = line_idx + 1;
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() { continue; }
+            // コメント風の行は誤検知が多いので TODO のみ抽出、シークレットは非コメントで判定
+            let is_commentish = trimmed.starts_with("//") || trimmed.starts_with('#')
+                || trimmed.starts_with('*') || trimmed.starts_with("<!--");
+
+            // 1) シークレットのプレフィックス(自身のパターン定義や説明文を弾く強化版)
+            if !is_commentish {
+                for (needle, kind) in secret_needles {
+                    if raw_line.contains(needle) && is_plausible_secret_hit(raw_line, needle) {
+                        secrets.push(ScanHit {
+                            file: rel.clone(),
+                            line: line_num,
+                            snippet: mask_snippet(raw_line),
+                            kind: kind.to_string(),
+                        });
+                        break;
+                    }
+                }
+            }
+
+            // 2) 変数名 = "非空" パターン(引用符内の実値が 16 字以上でないと本物とみなさない)
+            if !is_commentish {
+                for name in secret_var_names {
+                    if let Some(idx) = raw_line.to_lowercase().find(name) {
+                        // 変数名の直後に = or : があり、その後に quote と 16 字以上の値
+                        let after = &raw_line[idx + name.len()..];
+                        let after_trim = after.trim_start();
+                        if !(after_trim.starts_with('=') || after_trim.starts_with(':')) { continue; }
+                        let rest = after_trim.trim_start_matches(['=', ':']).trim_start();
+                        // 空 / 参照(env.XXX や process.env) は除外
+                        if rest.starts_with("process.env") || rest.starts_with("env.")
+                            || rest.starts_with("import.meta.env") || rest.starts_with("Deno.env")
+                            || rest.starts_with("Deno.env.get")
+                            || rest.starts_with("System.getenv") {
+                            continue;
+                        }
+                        // 引用符 + 中身 16 字以上を要求
+                        let quote_char = if rest.starts_with('"') { '"' }
+                            else if rest.starts_with('\'') { '\'' }
+                            else { continue };
+                        let inside = &rest[1..];
+                        let inner_len = inside.chars()
+                            .take_while(|c| *c != quote_char)
+                            .count();
+                        if inner_len >= 16 {
+                            secrets.push(ScanHit {
+                                file: rel.clone(),
+                                line: line_num,
+                                snippet: mask_snippet(raw_line),
+                                kind: format!("hardcoded {}", name),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 3) TODO / FIXME(コメント内かつ文字列リテラル外に限定)
+            for tag in todo_needles {
+                if raw_line.contains(tag) && is_tag_in_real_comment(raw_line, tag) {
+                    todos.push(ScanHit {
+                        file: rel.clone(),
+                        line: line_num,
+                        snippet: raw_line.chars().take(120).collect(),
+                        kind: tag.to_string(),
+                    });
+                    break;
+                }
+            }
+
+            // 4) console.log の数え上げ(JS/TS 系のみ、文字列リテラル内は除外)
+            if !is_commentish
+                && (rel.ends_with(".ts") || rel.ends_with(".tsx")
+                    || rel.ends_with(".js") || rel.ends_with(".jsx"))
+                && is_real_console_log(raw_line)
+            {
+                console_logs += 1;
+            }
+        }
+    }
+
+    // ノイズ削減:同ファイルで多発する項目は先頭 20 件までに絞る
+    secrets.truncate(20);
+    todos.truncate(50);
+
+    Ok(PreReleaseScanResult {
+        secrets,
+        todos,
+        console_logs,
+        files_scanned,
+        files_truncated,
+        detected_test_framework,
+        has_test_files,
+    })
+}
+
+/// v0.1.8:プレフィックス マッチが「実際の秘密キー」らしいか判定する。
+/// 目的:AppMap 自身のパターン定義配列(`("sk-", "openai-like key")`)や
+///       README の説明文などを誤検知しないため。
+/// ルール:
+///   1) プレフィックスの直前が `"`/`'` で、直後 15 文字以内に閉じ引用符があれば
+///      「短い引用符囲みの中」= パターン定義や説明文と見なして棄却
+///   2) プレフィックス末尾からキー本体らしき連続文字([A-Za-z0-9_/+=-])を数え、
+///      16 文字未満なら本物のキーではないと見なして棄却
+///   3) PRIVATE KEY のような長いプレフィックスは 1) の判定だけを適用(それ自身が有意)
+fn is_plausible_secret_hit(line: &str, prefix: &str) -> bool {
+    let Some(prefix_start) = line.find(prefix) else { return false };
+    let prefix_end = prefix_start + prefix.len();
+    let bytes = line.as_bytes();
+
+    // ルール 1:短い引用符囲みは棄却
+    if prefix_start > 0 {
+        let quote = bytes[prefix_start - 1];
+        if quote == b'"' || quote == b'\'' {
+            let tail = &line[prefix_end..];
+            let mut chars = tail.char_indices();
+            let mut closed_within = None;
+            for (i, c) in &mut chars {
+                if c as u8 == quote {
+                    closed_within = Some(i);
+                    break;
+                }
+                if i > 30 { break; } // 30 バイト以内で閉じるかだけ見れば充分
+            }
+            if let Some(close_pos) = closed_within {
+                if close_pos < 16 {
+                    return false; // "sk-" のような短い引用符囲み
+                }
+            }
+        }
+    }
+
+    // ルール 3:長いプレフィックスは本体長さ判定をスキップ(--BEGIN PRIVATE KEY-- 等)
+    if prefix.len() >= 20 { return true; }
+
+    // ルール 2:プレフィックス末尾から key-body-like な文字列を数える
+    let tail = &line[prefix_end..];
+    let body_len = tail.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '/' || *c == '+' || *c == '=')
+        .count();
+    body_len >= 16
+}
+
+/// v0.1.8:TODO/FIXME/HACK タグが「実際の作業マーカー」として書かれているか判定する。
+/// AppMap 自身のコード(タグを扱う文字列リテラル・doc コメント)を誤検知しないため。
+///
+/// 判定ルール(全部通ったら真):
+///   1) 単語境界:タグの前後が英数字/アンダースコアでない(TODO_LIST 等をはじく)
+///   2) 文字列リテラル内でない(直前までの引用符が奇数個ならリテラル中と見なす)
+///   3) タグ直後が `:` または `(` である(TODO: xxx / TODO(#123): xxx が典型)
+///      -> `TODO / FIXME` のような doc 内の列挙をはじく主目的
+///   4) コメント境界内にある(タグより前に `//` `/*` `<!--` `#` `*` のいずれかがある)
+///   5) 同じ行に別のタグが出現していない(タグ列挙の doc をさらに強くはじく)
+fn is_tag_in_real_comment(line: &str, tag: &str) -> bool {
+    let Some(idx) = line.find(tag) else { return false };
+    let after = idx + tag.len();
+
+    // ルール 1:単語境界
+    let before_ch = if idx == 0 { ' ' } else { line.as_bytes()[idx - 1] as char };
+    let after_ch = if after >= line.len() { ' ' } else { line.as_bytes()[after] as char };
+    if before_ch.is_ascii_alphanumeric() || after_ch.is_ascii_alphanumeric()
+        || before_ch == '_' || after_ch == '_' {
+        return false;
+    }
+
+    // ルール 2:文字列リテラル内なら棄却
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_back = false;
+    for (i, c) in line.char_indices() {
+        if i >= idx { break; }
+        match c {
+            '\'' if !in_double && !in_back => in_single = !in_single,
+            '"' if !in_single && !in_back => in_double = !in_double,
+            '`' if !in_single && !in_double => in_back = !in_back,
+            _ => {}
+        }
+    }
+    if in_single || in_double || in_back { return false; }
+
+    // ルール 3:タグ直後が `:` または `(` を要求(実際の作業マーカーの記法)
+    // `TODO:` `TODO(#123):` `FIXME:` などにマッチ、`TODO / FIXME` `TODO のみ` を除外
+    if after_ch != ':' && after_ch != '(' {
+        return false;
+    }
+
+    // ルール 4:コメント境界
+    let before_slice = &line[..idx];
+    let trimmed = line.trim_start();
+    let in_comment = trimmed.starts_with('#')
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with("*")
+        || trimmed.starts_with("<!--")
+        || before_slice.contains("//")
+        || before_slice.contains("/*")
+        || before_slice.contains("<!--");
+    if !in_comment { return false; }
+
+    // ルール 5:同じ行にタグが 2 回以上出現していたら doc 説明扱いで棄却
+    // 別タグの列挙(TODO / FIXME)も、同じタグの複数出現(TODO: xxx / TODO(#123): yyy)も対象。
+    let mut total_occurrences = 0usize;
+    for t in ["TODO", "FIXME", "HACK"] {
+        total_occurrences += line.matches(t).count();
+        if total_occurrences >= 2 { return false; }
+    }
+
+    true
+}
+
+/// v0.1.8:`console.log` が「実際のコード呼び出し」か判定する。
+/// 文字列リテラル・doc コメント内の説明的な `console.log` を誤検知しない。
+///   - 単語境界チェック(`foo.console.log` はあまりないが念のため)
+///   - 引用符囲みの中にあるなら棄却
+///   - `.log(` の呼び出し形をあわせて要求(`console.log` 単独出現も棄却)
+fn is_real_console_log(line: &str) -> bool {
+    let target = "console.log";
+    let Some(idx) = line.find(target) else { return false };
+
+    // 呼び出し形:直後が `(` であることを要求(`console.log(...)` の形)
+    let after = idx + target.len();
+    if after >= line.len() || line.as_bytes()[after] != b'(' {
+        return false;
+    }
+
+    // 文字列リテラル内(直前までの引用符が奇数個)なら棄却
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_back = false;
+    for (i, c) in line.char_indices() {
+        if i >= idx { break; }
+        match c {
+            '\'' if !in_double && !in_back => in_single = !in_single,
+            '"' if !in_single && !in_back => in_double = !in_double,
+            '`' if !in_single && !in_double => in_back = !in_back,
+            _ => {}
+        }
+    }
+    !(in_single || in_double || in_back)
+}
+
+/// 値そのものを晒さないための伏せ字化。
+/// クオート内の 8 字以上の値は "..." に置換する。
+fn mask_snippet(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' || c == '\'' {
+            let quote = c;
+            out.push(quote);
+            let mut inner = String::new();
+            while let Some(&nc) = chars.peek() {
+                if nc == quote { break; }
+                inner.push(nc);
+                chars.next();
+            }
+            if inner.len() >= 8 {
+                out.push_str("*** (伏字) ***");
+            } else {
+                out.push_str(&inner);
+            }
+            if let Some(&nc) = chars.peek() {
+                if nc == quote { out.push(quote); chars.next(); }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out.chars().take(200).collect()
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // /v0.1.7 ローカル LLM 機能ここまで
 // ═════════════════════════════════════════════════════════════════════
@@ -996,6 +1562,11 @@ pub fn run() {
             llama_start_server,
             llama_stop_server,
             llama_analyze,
+            // v0.1.8 Q&A(ノード単位のチャット)
+            claude_chat,
+            llama_chat,
+            // v0.1.8 リリース前チェック(ローカル regex スキャン)
+            pre_release_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

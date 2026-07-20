@@ -74,6 +74,14 @@ export type StoredAnalysis = {
    * 旧 v0.1.5 以前のデータは load 時に "ja" でバックフィルされる。
    */
   language: Language;
+  /**
+   * v0.1.8 差分マップ:同じフォルダを再分析した際に、上書き前の screens を
+   * ここに退避する。差分表示トグルで「前回はあったが今回無い」画面を可視化する用途。
+   *   - 直近 1 回分のみ保持(それより古いのは自然に破棄)
+   *   - 初回分析時は undefined
+   *   - サンプルには適用しない(常に undefined 想定)
+   */
+  previousScreens?: ScreenMapResult;
 };
 
 type AppMapStore = {
@@ -158,11 +166,22 @@ function saveStore(store: AppMapStore): void {
 /**
  * 分析結果を保存。同じ folderPath が既にあれば置き換え、先頭に持ってくる。
  * 自動的に currentFolderPath をこの folder にセットする(次回起動でこれが復元される)。
+ *
+ * v0.1.8 差分マップ:同じフォルダの既存エントリがあれば、その screens を
+ * 新エントリの previousScreens として退避する(直近 1 回分のみ)。
+ * 呼び出し側は entry.previousScreens を敢えて渡す必要は無い(渡していれば尊重するが)。
  */
 export function saveAnalysis(entry: StoredAnalysis): void {
   const store = loadStore();
+  const existing = store.history.find((e) => e.folderPath === entry.folderPath);
+  const withPrev: StoredAnalysis =
+    entry.previousScreens !== undefined
+      ? entry
+      : existing
+        ? { ...entry, previousScreens: existing.screens }
+        : entry;
   const filtered = store.history.filter((e) => e.folderPath !== entry.folderPath);
-  const newHistory = [entry, ...filtered].slice(0, MAX_HISTORY);
+  const newHistory = [withPrev, ...filtered].slice(0, MAX_HISTORY);
   saveStore({
     ...store,
     history: newHistory,

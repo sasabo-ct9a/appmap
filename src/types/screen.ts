@@ -112,6 +112,15 @@ export type ScreenNode = {
      */
     dataUsed?: LocalizedText[];
     /**
+     * v0.1.7:同じデータの技術者向け識別子(例:users, sessions, apiKey,
+     * ReservationModel, product_list)。詳細モードのマインドマップで使う。
+     * 言語非依存の英数字 string[]、最大 5 件目安。AI が判断できなければ省略可。
+     *
+     * v0.1.7 拡張:単なる文字列だけでなく、`{ name, fields }` 形式で
+     * テーブルのカラム相当も持てるように。フィールドは 0-6 個目安。
+     */
+    dataTech?: Array<string | { name: string; fields?: string[] }>;
+    /**
      * 機能拡張クイックウィン 5:変更しやすさ / 影響範囲のヒント。
      * AI が判断できれば設定、できなければ undefined。
      */

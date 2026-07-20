@@ -1,5 +1,6 @@
-import type { ScreenNode } from "../../types/screen";
-import { pickLocalized, type Language } from "../../lib/i18n";
+import type { ScreenNode, ScreenEdge } from "../../types/screen";
+import { pickLocalized, t, type Language } from "../../lib/i18n";
+import { computeStableColorIndex } from "../../lib/nodeColors";
 
 /**
  * v0.1.7 大刷新 v2:絵文字撤廃、カラー + タイポでデザインする機能カード(spec 準拠)。
@@ -7,8 +8,11 @@ import { pickLocalized, type Language } from "../../lib/i18n";
  */
 type FeatureCardGridProps = {
   nodes: ScreenNode[];
+  edges: ScreenEdge[];
   language: Language;
   onCardClick: (id: number) => void;
+  /** 詳細モード:タイトルを label、サブタイトルを主要ファイル名(monospace)に */
+  showDataDetails?: boolean;
 };
 
 /** カードカラー(枠線 + 主色 + 背景ソフト + バッジソフト + 装飾線色)*/
@@ -49,15 +53,17 @@ const PALETTE = [
 
 function FeatureCardGrid({
   nodes,
+  edges,
   language,
   onCardClick,
+  showDataDetails = false,
 }: FeatureCardGridProps) {
-  // depth=0 を先頭、isEntryPoint をその先頭に。全要素を横スクロールで出す。
+  // v0.1.7 色統一:マップと同じ stable 順序で並べる(degree 降順 + label 順)
+  const stableColorIndex = computeStableColorIndex(nodes, edges, language);
   const sortedNodes = [...nodes].sort((a, b) => {
-    const da = a.depth ?? 0;
-    const db = b.depth ?? 0;
-    if (da !== db) return da - db;
-    return (b.isEntryPoint ? 1 : 0) - (a.isEntryPoint ? 1 : 0);
+    const ia = stableColorIndex.get(a.id) ?? 999;
+    const ib = stableColorIndex.get(b.id) ?? 999;
+    return ia - ib;
   });
 
   if (sortedNodes.length === 0) return null;
@@ -65,13 +71,24 @@ function FeatureCardGrid({
   return (
     <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x snap-mandatory">
       {sortedNodes.map((node, idx) => {
+        // v0.1.7 色統一:sortedNodes は stable 順なので idx で palette 引ける
+        // (idx はマップの stable color index と一致 → 同じ意味の要素は常に同じ色)
         const p = PALETTE[idx % PALETTE.length];
+        void stableColorIndex; // (使用済み、明示)
         const isMain = (node.depth ?? 0) === 0;
-        // 動詞ベース(userIntent)を優先。spec:画面名ではなくユーザー行動。
-        const titleText = node.userIntent
-          ? pickLocalized(node.userIntent, language)
-          : pickLocalized(node.label, language);
-        const subtitleText = pickLocalized(node.detail.title, language);
+        // かんたんモード:userIntent(ユーザー行動)を優先。
+        // 詳細モード:label(短い画面名)を優先、サブタイトルは主要ファイル名。
+        const primaryFile = node.detail.files?.[0];
+        const primaryFileBase = primaryFile
+          ? primaryFile.split(/[\\/]/).pop() ?? primaryFile
+          : null;
+        const titleText = showDataDetails
+          ? pickLocalized(node.label, language)
+          : pickLocalized(node.userIntent ?? node.label, language);
+        const subtitleText =
+          showDataDetails && primaryFileBase
+            ? primaryFileBase
+            : pickLocalized(node.detail.title, language);
 
         return (
           <button
@@ -113,7 +130,17 @@ function FeatureCardGrid({
               >
                 {titleText}
               </div>
-              <div className="text-xs text-ink-soft mt-2 leading-relaxed line-clamp-2">
+              <div
+                className="text-xs text-ink-soft mt-2 leading-relaxed line-clamp-2"
+                style={
+                  showDataDetails
+                    ? {
+                        fontFamily:
+                          "'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace",
+                      }
+                    : undefined
+                }
+              >
                 {subtitleText}
               </div>
             </div>
@@ -126,7 +153,7 @@ function FeatureCardGrid({
                 color: isMain ? p.badgeText : "#64748b",
               }}
             >
-              {isMain ? "主要機能" : "サポート機能"}
+              {isMain ? t(language).featureCard.badgeMain : t(language).featureCard.badgeSupport}
             </span>
           </button>
         );

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 import Header from "./components/layout/Header";
 import Sidebar, { type NavKey } from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
@@ -8,6 +9,8 @@ import FeatureCardGrid from "./components/canvas/FeatureCardGrid";
 import BottomSection from "./components/canvas/BottomSection";
 import InspectorPanel from "./components/inspector/InspectorPanel";
 import ImpactView from "./components/impact/ImpactView";
+import PreReleaseChecklist from "./components/checklist/PreReleaseChecklist";
+import { SparkleIcon } from "./components/ui/Icons";
 import {
   ProjectOverview,
   ProjectData,
@@ -34,6 +37,8 @@ import {
   checkLlamaModel,
 } from "./lib/llamaClient";
 import { analyzeFolder } from "./lib/engineSelector";
+import { computeMapDiff } from "./lib/mapDiff";
+import { buildShareHTML } from "./lib/shareHTML";
 import {
   loadStore,
   saveAnalysis,
@@ -51,7 +56,7 @@ import {
   type Engine,
   type DetailLevel,
 } from "./lib/storage";
-import { t, asLanguage, type Language } from "./lib/i18n";
+import { t, asLanguage, pickLocalized, type Language } from "./lib/i18n";
 
 /**
  * Phase 3 Step 3-5(polish 込み完成版):
@@ -75,6 +80,8 @@ type ClaudeAvailability =
 
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
+  // v0.1.8:ノートの変更を検知して MapCanvas のバッジを再描画するための単純カウンタ
+  const [notesTick, setNotesTick] = useState<number>(0);
   const [noCodeMode, setNoCodeMode] = useState<boolean>(false);
   const [folderPath, setFolderPath] = useState<string | null>(null);
   const [fileCount, setFileCount] = useState<number | null>(null);
@@ -106,6 +113,8 @@ function App() {
   // v0.1.7 AI エンジン(Claude / Local LLM)+ 設定モーダル開閉
   const [engine, setEngineState] = useState<Engine>("claude");
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  // v0.1.8 差分マップ表示 ON/OFF(前回分析との比較)
+  const [showDiff, setShowDiff] = useState<boolean>(false);
   // v0.1.7 ローカル LLM のセットアップ状態(バイナリ配置 + モデル DL)
   const [llamaBinaryOk, setLlamaBinaryOk] = useState<boolean>(false);
   const [llamaModelOk, setLlamaModelOk] = useState<boolean>(false);
@@ -114,6 +123,9 @@ function App() {
   const [detailLevel, setDetailLevelState] = useState<DetailLevel>("detailed");
   // v0.1.7 大刷新:左サイドバーのナビ
   const [activeNav, setActiveNav] = useState<NavKey>("intro");
+
+  // v0.1.7:ホームの表示モード。かんたん=マインドマップ、詳細=データベース配置
+  const [viewMode, setViewMode] = useState<"map" | "database">("map");
 
   // v0.1.7 lift up:マインドマップのノード移動オフセット(MapCanvas / SpecDocMap で共有)。
   //   別解析(folder)に切り替わったらリセット。
@@ -139,6 +151,39 @@ function App() {
     saveEngine(next);
     if (next === "local") {
       void refreshLlamaSetup();
+    }
+  };
+
+  /**
+   * v0.1.8:共有 HTML エクスポート。
+   * 現在の分析結果を単一 HTML ファイル(外部依存ゼロ)として保存。
+   * 受け手は AppMap 不要でブラウザで開くだけでマップと詳細を閲覧できる。
+   */
+  const handleExportShareHTML = async () => {
+    try {
+      const html = buildShareHTML({
+        screens,
+        language,
+        appName,
+        generatedAt: Date.now(),
+      });
+      // ファイル名はプロジェクト名 or "AppMap" + .html
+      const safeName = (appName || "AppMap").replace(/[\\/:*?"<>|]/g, "_");
+      const defaultPath = `${safeName}-share.html`;
+      const path = await save({
+        title: t(language).topBar.exportShareHTMLDialogTitle,
+        defaultPath,
+        filters: [{ name: "HTML", extensions: ["html"] }],
+      });
+      if (!path) return; // キャンセル
+      await writeTextFile(path, html);
+      // 完了通知(alert は簡易だが確実)
+      window.alert(t(language).topBar.exportShareHTMLSuccess);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      window.alert(
+        `${t(language).topBar.exportShareHTMLFailure}: ${msg}`,
+      );
     }
   };
 
@@ -378,6 +423,20 @@ function App() {
     };
   }, [rawScreens, detailLevel]);
 
+  // v0.1.8 差分マップ:現在の分析エントリの previousScreens を取り出す
+  const activeAnalysis = useMemo(
+    () =>
+      lastAnalyzedFolder
+        ? history.find((h) => h.folderPath === lastAnalyzedFolder) ?? null
+        : null,
+    [history, lastAnalyzedFolder],
+  );
+  const previousScreens = activeAnalysis?.previousScreens ?? null;
+  const mapDiff = useMemo(
+    () => computeMapDiff(screens, previousScreens, language),
+    [screens, previousScreens, language],
+  );
+
   const selectedNode =
     selectedNodeId !== null
       ? screens.nodes.find((n) => n.id === selectedNodeId) ?? null
@@ -421,12 +480,8 @@ function App() {
       // ユーザーがコンテキストを失わない(空白で sampleScreens に戻ると認知負荷↑)。
       // 完了時に setAiResult(outcome.screens) で置き換える。
 
-      console.log(
-        `Analyzing folder: ${result.folder} (${result.fileCount} files)`,
-      );
+      // v0.1.8:デバッグ用 console.log は撤去(進捗はステータスバー、結果はマップ描画で可視化済)
       const outcome = await analyzeFolder(result.folder, language, engine);
-
-      console.log("AI screen map outcome:", outcome);
       setAiResult(outcome.screens);
       setLastCostUsd(outcome.costUsd);
       setLastAnalyzedFolder(result.folder);
@@ -624,6 +679,7 @@ function App() {
         activeFolderPath={lastAnalyzedFolder}
         onSelectTab={handleSelectTab}
         onCloseTab={closeTab}
+        language={language}
       />
 
       {/* 中央カラム */}
@@ -631,13 +687,13 @@ function App() {
         <TopBar
           appName={appName}
           appSubtitle={appSubtitle}
-          mode={detailLevel === "simple" ? "easy" : "detail"}
-          onModeChange={(m) =>
-            handleDetailLevelChange(m === "easy" ? "simple" : "detailed")
-          }
+          mode={viewMode === "map" ? "easy" : "detail"}
+          onModeChange={(m) => setViewMode(m === "easy" ? "map" : "database")}
           onExport={() => setSpecDocOpen(true)}
+          onExportShareHTML={handleExportShareHTML}
           engine={engine}
           onEngineChange={handleEngineChange}
+          language={language}
         />
 
         {/* 旧 Header(設定モーダル / 言語切替 / ノーコード語 経由のため一時残置)*/}
@@ -730,11 +786,11 @@ function App() {
                   <div className="flex items-end justify-between mb-4">
                     <div>
                       <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2">
-                        このアプリでできること
-                        <span className="text-feature-teal">✨</span>
+                        {t(language).intro.heading}
+                        <SparkleIcon className="w-5 h-5 text-feature-teal" />
                       </h1>
                       <p className="text-sm text-ink-soft mt-1">
-                        ユーザーがアプリでできる主なことを、かんたんな言葉でまとめました。
+                        {t(language).intro.subheading}
                       </p>
                     </div>
                     <div className="flex items-center gap-2.5">
@@ -761,7 +817,7 @@ function App() {
                           {screens.nodes.length}
                         </span>
                         <span className="text-xs font-bold text-feature-teal">
-                          要素
+                          {t(language).intro.countsScreens}
                         </span>
                       </span>
                       <span
@@ -786,25 +842,116 @@ function App() {
                           {screens.edges.length}
                         </span>
                         <span className="text-xs font-bold text-feature-purple">
-                          つながり
+                          {t(language).intro.countsLinks}
                         </span>
                       </span>
                     </div>
                   </div>
                 )}
 
-                {/* 機能カードグリッド(4 枚)*/}
+                {/* 機能カードグリッド(4 枚)— 両モード共通 + モード連動表記 */}
                 {screens.nodes.length > 0 && (
                   <div className="mb-6">
                     <FeatureCardGrid
                       nodes={screens.nodes}
+                      edges={screens.edges}
                       language={language}
                       onCardClick={(id) => setSelectedNodeId(id)}
+                      showDataDetails={viewMode === "database"}
                     />
                   </div>
                 )}
 
-                {/* マップ + 下部セクション(元のレイアウトに戻す)*/}
+                {/* v0.1.8 差分マップ:前回分析がある時だけ表示するトグルバー + 削除画面リスト */}
+                {previousScreens && (
+                  <div className="mb-3">
+                    <div className="flex items-center gap-3 bg-paper border border-border-soft rounded-[12px] px-4 py-2.5 shadow-sm">
+                      <span className="text-xs text-ink-strong font-semibold flex items-center gap-1.5">
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{ background: "#10b981" }}
+                        />
+                        {t(language).diff.toggleLabel}
+                      </span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={showDiff}
+                        onClick={() => setShowDiff((v) => !v)}
+                        className="w-9 h-5 rounded-full relative transition-colors cursor-pointer"
+                        style={{ background: showDiff ? "#10b981" : "#cbd5e1" }}
+                      >
+                        <span
+                          className={`absolute top-0.5 w-4 h-4 rounded-full bg-paper transition-all shadow ${
+                            showDiff ? "left-[18px]" : "left-0.5"
+                          }`}
+                        />
+                      </button>
+                      {showDiff && (
+                        <span className="text-[11px] text-ink-soft flex-1">
+                          {mapDiff.hasChanges ? (
+                            <>
+                              <span className="text-emerald-600 font-semibold">
+                                {t(language).diff.addedNodesLabel(
+                                  mapDiff.addedNodeIds.size,
+                                )}
+                              </span>
+                              {" · "}
+                              <span className="text-slate-500 font-semibold">
+                                {t(language).diff.removedNodesLabel(
+                                  mapDiff.removedNodes.length,
+                                )}
+                              </span>
+                              {" · "}
+                              <span className="text-orange-500 font-semibold">
+                                {t(language).diff.addedEdgesLabel(
+                                  mapDiff.addedEdges.size,
+                                )}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="italic">
+                              {t(language).diff.noChanges}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      {!showDiff && (
+                        <span className="text-[11px] text-ink-soft italic flex-1">
+                          {t(language).diff.toggleAvailable}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* 削除された画面リスト(トグル ON かつ削除ありのときだけ)*/}
+                    {showDiff && mapDiff.removedNodes.length > 0 && (
+                      <div className="mt-2 bg-paper border border-border-soft rounded-[12px] px-4 py-2.5 shadow-sm">
+                        <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5">
+                          {t(language).diff.removedSectionTitle}
+                        </div>
+                        <ul className="flex flex-wrap gap-1.5">
+                          {mapDiff.removedNodes.map((rn) => (
+                            <li
+                              key={rn.id}
+                              className="inline-flex items-center gap-1.5 text-xs bg-slate-50 border border-slate-200 rounded-full px-2.5 py-1 text-slate-600"
+                              style={{ textDecoration: "line-through" }}
+                            >
+                              <span
+                                className="text-[9px] font-bold uppercase tracking-wide px-1 py-0.5 rounded bg-slate-200 text-slate-600"
+                                style={{ textDecoration: "none" }}
+                              >
+                                {t(language).diff.removedBadge}
+                              </span>
+                              {pickLocalized(rn.userIntent ?? rn.label, language)}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* マインドマップ + 下部セクション — 詳細モードでは各画面に「使うデータ」チップを追加 */}
                 <div
                   className="mb-6 transition-opacity duration-200"
                   style={{ minHeight: "320px" }}
@@ -816,15 +963,19 @@ function App() {
                     onNodeClick={(id) => setSelectedNodeId(id)}
                     noCodeMode={noCodeMode}
                     language={language}
-                    showImportantOnly={detailLevel === "simple"}
-                    onToggleImportantOnly={(v) =>
-                      handleDetailLevelChange(v ? "simple" : "detailed")
-                    }
-                    onShowAll={() => handleDetailLevelChange("detailed")}
                     appSummary={screens.appSummary}
                     appName={appName}
                     nodeOffsets={nodeOffsets}
                     onNodeOffsetsChange={setNodeOffsets}
+                    showDataDetails={viewMode === "database"}
+                    folderPath={lastAnalyzedFolder}
+                    notesTick={notesTick}
+                    diffAddedNodeIds={
+                      showDiff ? mapDiff.addedNodeIds : undefined
+                    }
+                    diffAddedEdgeIds={
+                      showDiff ? mapDiff.addedEdges : undefined
+                    }
                   />
 
                   <div className="mt-4">
@@ -833,44 +984,11 @@ function App() {
                       edges={screens.edges}
                       appSummary={screens.appSummary}
                       language={language}
+                      showDataDetails={viewMode === "database"}
                     />
                   </div>
                 </div>
               </>
-            )}
-
-            {activeNav === "structure" && screens.nodes.length > 0 && (
-              <div className="transition-opacity duration-200">
-                <div className="mb-4 flex items-end justify-between">
-                  <div>
-                    <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2">
-                      アプリの全体像
-                      <span className="text-feature-teal">✨</span>
-                    </h1>
-                    <p className="text-sm text-ink-soft mt-1">
-                      画面のつながりをマインドマップで一望できます。マウスホイールで拡大/縮小、ドラッグで移動できます。
-                    </p>
-                  </div>
-                </div>
-                <MapCanvas
-                  nodes={screens.nodes}
-                  edges={screens.edges}
-                  selectedNodeId={selectedNodeId}
-                  onNodeClick={(id) => setSelectedNodeId(id)}
-                  noCodeMode={noCodeMode}
-                  language={language}
-                  showImportantOnly={detailLevel === "simple"}
-                  onToggleImportantOnly={(v) =>
-                    handleDetailLevelChange(v ? "simple" : "detailed")
-                  }
-                  onShowAll={() => handleDetailLevelChange("detailed")}
-                  appSummary={screens.appSummary}
-                  appName={appName}
-                  tall
-                  nodeOffsets={nodeOffsets}
-                  onNodeOffsetsChange={setNodeOffsets}
-                />
-              </div>
             )}
 
             {activeNav === "impact" && screens.nodes.length > 0 && (
@@ -879,6 +997,14 @@ function App() {
                 edges={screens.edges}
                 language={language}
                 onSelectNode={(id) => setSelectedNodeId(id)}
+              />
+            )}
+
+            {activeNav === "checklist" && (
+              <PreReleaseChecklist
+                screens={screens}
+                folderPath={lastAnalyzedFolder}
+                language={language}
               />
             )}
 
@@ -896,6 +1022,7 @@ function App() {
                   )?.analyzedAt ?? null
                 }
                 language={language}
+                showDataDetails={viewMode === "database"}
               />
             )}
 
@@ -904,6 +1031,7 @@ function App() {
                 nodes={screens.nodes}
                 language={language}
                 onSelectNode={(id) => setSelectedNodeId(id)}
+                showDataDetails={viewMode === "database"}
               />
             )}
 
@@ -931,6 +1059,9 @@ function App() {
             noCodeMode={noCodeMode}
             language={language}
             onSelectNode={(id) => setSelectedNodeId(id)}
+            folderPath={lastAnalyzedFolder}
+            onNoteChange={() => setNotesTick((t) => t + 1)}
+            engine={engine}
           />
         </div>
       </div>
@@ -943,6 +1074,7 @@ function App() {
         folderPath={lastAnalyzedFolder}
         language={language}
         nodeOffsets={nodeOffsets}
+        showDataDetails={viewMode === "database"}
       />
 
       {/* v0.1.7 設定モーダル(AI エンジン切替) */}
