@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { t, type Language } from "../../lib/i18n";
-import type { Engine } from "../../lib/storage";
+import type { EditorChoice, Engine } from "../../lib/storage";
 
 /**
  * v0.1.7 設定モーダル(現状は AI エンジン切替のみ)。
@@ -16,6 +16,9 @@ type SettingsModalProps = {
   engine: Engine;
   onEngineChange: (next: Engine) => void;
   language: Language;
+  /** v0.1.8:外部エディタ選択 */
+  preferredEditor: EditorChoice;
+  onPreferredEditorChange: (next: EditorChoice) => void;
 };
 
 function SettingsModal({
@@ -24,6 +27,8 @@ function SettingsModal({
   engine,
   onEngineChange,
   language,
+  preferredEditor,
+  onPreferredEditorChange,
 }: SettingsModalProps) {
   const T = t(language).localLLM;
 
@@ -83,7 +88,59 @@ function SettingsModal({
         </header>
 
         {/* 本体 */}
-        <div className="px-5 py-4 space-y-4">
+        <div className="px-5 py-4 space-y-5">
+          {/* v0.1.8:外部エディタ選択 */}
+          <section>
+            <h3 className="text-xs font-medium text-soft-grid uppercase tracking-wide mb-1.5">
+              {T.editorLabel}
+            </h3>
+            <p className="text-[11px] text-soft-grid mb-3 leading-relaxed">
+              {T.editorNote}
+            </p>
+            <div className="space-y-2">
+              {(
+                [
+                  { key: "cursor", label: T.editorCursor },
+                  { key: "vscode", label: T.editorVscode },
+                  { key: "system", label: T.editorSystem },
+                ] as { key: EditorChoice; label: string }[]
+              ).map((opt) => {
+                const active = preferredEditor === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => onPreferredEditorChange(opt.key)}
+                    aria-pressed={active}
+                    className={`w-full text-left rounded-[8px] px-4 py-2.5 transition-colors cursor-pointer border ${
+                      active
+                        ? "bg-electric-teal/10 border-electric-teal"
+                        : "bg-charcoal/40 border-charcoal hover:bg-charcoal/70"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`w-3 h-3 rounded-full flex-shrink-0 border-2 ${
+                          active
+                            ? "border-electric-teal bg-electric-teal"
+                            : "border-soft-grid bg-transparent"
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <span
+                        className={`text-sm font-semibold ${
+                          active ? "text-electric-teal" : "text-off-white"
+                        }`}
+                      >
+                        {opt.label}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
           <section>
             <h3 className="text-xs font-medium text-soft-grid uppercase tracking-wide mb-3">
               {T.engineLabel}

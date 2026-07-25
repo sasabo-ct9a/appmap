@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import LogoMark from "../ui/LogoMark";
 import type { StoredAnalysis } from "../../lib/storage";
 import { LightbulbIcon } from "../ui/Icons";
@@ -75,6 +76,14 @@ function Sidebar({
     { key: "project-data", label: T.projectData },
     { key: "project-settings", label: T.projectSettings },
   ];
+
+  // v0.1.8:タブ検索(5 件以上ある時だけ入力欄を出す)
+  const [tabQuery, setTabQuery] = useState<string>("");
+  const filteredTabs = useMemo(() => {
+    const q = tabQuery.trim().toLowerCase();
+    if (!q) return tabs;
+    return tabs.filter((t) => t.folderPath.toLowerCase().includes(q));
+  }, [tabs, tabQuery]);
 
   return (
     <aside
@@ -211,13 +220,55 @@ function Sidebar({
           {tabs.length > 0 && (
             <li className="pt-5">
               <div
-                className="px-3 pb-1.5 text-[10px] font-bold tracking-wider uppercase"
+                className="px-3 pb-1.5 text-[10px] font-bold tracking-wider uppercase flex items-baseline justify-between"
                 style={{ color: "var(--color-nav-text-soft)" }}
               >
-                {T.sectionOpenProjects}
+                <span>{T.sectionOpenProjects}</span>
+                {tabs.length > 5 && (
+                  <span
+                    className="text-[9px] font-normal normal-case tracking-normal"
+                    style={{ color: "var(--color-nav-text-soft)" }}
+                  >
+                    {filteredTabs.length}/{tabs.length}
+                  </span>
+                )}
               </div>
+              {/* v0.1.8:プロジェクトが 5 件を超えたら検索欄を出す */}
+              {tabs.length > 5 && (
+                <div className="px-3 pb-2">
+                  <input
+                    type="text"
+                    value={tabQuery}
+                    onChange={(e) => setTabQuery(e.target.value)}
+                    placeholder={T.tabSearchPlaceholder}
+                    aria-label={T.tabSearchPlaceholder}
+                    className="w-full rounded-[6px] px-2 py-1 text-xs outline-none border transition-colors"
+                    style={{
+                      background: "rgba(255,255,255,0.04)",
+                      borderColor: "rgba(255,255,255,0.08)",
+                      color: "var(--color-nav-text-strong)",
+                    }}
+                    onFocus={(e) => {
+                      e.currentTarget.style.borderColor =
+                        "var(--color-nav-accent)";
+                    }}
+                    onBlur={(e) => {
+                      e.currentTarget.style.borderColor =
+                        "rgba(255,255,255,0.08)";
+                    }}
+                  />
+                </div>
+              )}
               <ul className="space-y-0.5">
-                {tabs.map((tab) => {
+                {filteredTabs.length === 0 && (
+                  <li
+                    className="px-3 py-2 text-[11px] italic"
+                    style={{ color: "var(--color-nav-text-soft)" }}
+                  >
+                    {T.tabSearchNoMatch}
+                  </li>
+                )}
+                {filteredTabs.map((tab) => {
                   const active = tab.folderPath === activeFolderPath;
                   const short = shortFolder(tab.folderPath);
                   return (

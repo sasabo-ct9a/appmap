@@ -15,7 +15,8 @@ import {
   saveQAHistory,
   type QAMessage,
 } from "../../lib/nodeQA";
-import type { Engine } from "../../lib/storage";
+import type { EditorChoice, Engine } from "../../lib/storage";
+import { openInEditor } from "../../lib/openInEditor";
 
 /**
  * v0.1.7 リファイン:LIGHT モード Inspector パネル(360px、右側固定)。
@@ -45,6 +46,8 @@ type InspectorPanelProps = {
   onNoteChange?: () => void;
   /** v0.1.8:AI Q&A の呼び分け(claude / local)*/
   engine: Engine;
+  /** v0.1.8:関連ファイルクリックで開くエディタ */
+  preferredEditor: EditorChoice;
 };
 
 // v0.1.7 色統一:nodeColors の stable index + paletteAt を使用
@@ -83,6 +86,7 @@ function InspectorPanel({
   folderPath,
   onNoteChange,
   engine,
+  preferredEditor,
 }: InspectorPanelProps) {
   const T = t(language);
   // v0.1.8:メモ・タグ。ノード切替時に該当データを再読込
@@ -131,9 +135,12 @@ function InspectorPanel({
     try {
       const answer = await askNode({
         node,
+        allNodes,
+        allEdges,
         question,
         engine,
         language,
+        folderPath,
       });
       const aiMsg: QAMessage = {
         role: "assistant",
@@ -748,22 +755,77 @@ function InspectorPanel({
           )}
         </Section>
 
-        {/* 関連ファイル(エンジニア向け、折り畳み)*/}
+        {/* 関連ファイル(v0.1.8:クリックで外部エディタ起動)*/}
         {files.length > 0 && (
           <details className="group">
             <summary className="text-[11px] font-bold text-ink-soft uppercase tracking-wide cursor-pointer flex items-center gap-1.5 select-none hover:text-ink transition-colors">
               <ChevronRight className="group-open:rotate-90 transition-transform" />
               {tx("関連ファイル", "Related files")} ({files.length})
+              <span
+                className="text-[9px] font-normal normal-case tracking-normal text-ink-soft ml-1 opacity-70"
+                title={
+                  folderPath
+                    ? tx(
+                        `クリックで ${editorLabel(preferredEditor, language)} で開く`,
+                        `Click to open in ${editorLabel(preferredEditor, language)}`,
+                      )
+                    : tx("サンプル表示中は開けません", "Sample mode — files aren't openable")
+                }
+              >
+                {folderPath
+                  ? tx(
+                      `— クリックで ${editorLabel(preferredEditor, language)} で開く`,
+                      `— click to open in ${editorLabel(preferredEditor, language)}`,
+                    )
+                  : ""}
+              </span>
             </summary>
             <ul className="mt-2 space-y-1 pl-4">
-              {files.map((f) => (
-                <li
-                  key={f}
-                  className="text-[11px] text-ink-soft font-mono break-all leading-relaxed select-text"
-                >
-                  {f}
-                </li>
-              ))}
+              {files.map((f) => {
+                const isOpenable = folderPath !== null;
+                return (
+                  <li key={f}>
+                    <button
+                      type="button"
+                      disabled={!isOpenable}
+                      onClick={async () => {
+                        if (!isOpenable) return;
+                        try {
+                          await openInEditor({
+                            editor: preferredEditor,
+                            folder: folderPath,
+                            file: f,
+                          });
+                        } catch (err) {
+                          const msg =
+                            err instanceof Error ? err.message : String(err);
+                          window.alert(
+                            `${T.localLLM.editorOpenFailedTitle}\n\n${T.localLLM.editorOpenFailedBody}\n\n(${msg})`,
+                          );
+                        }
+                      }}
+                      className={`w-full text-left text-[11px] font-mono break-all leading-relaxed rounded px-2 py-1 -mx-2 transition-colors ${
+                        isOpenable
+                          ? "text-ink cursor-pointer hover:bg-canvas hover:text-feature-teal"
+                          : "text-ink-soft cursor-not-allowed opacity-60"
+                      }`}
+                      title={
+                        isOpenable
+                          ? tx(
+                              `${editorLabel(preferredEditor, language)} で開く`,
+                              `Open in ${editorLabel(preferredEditor, language)}`,
+                            )
+                          : tx(
+                              "サンプル表示中はファイルパスが実在しないため開けません",
+                              "Sample paths don't exist on disk",
+                            )
+                      }
+                    >
+                      {f}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </details>
         )}
@@ -839,6 +901,14 @@ function ChevronRight({ className }: { className?: string }) {
       <path d="M9 6 L15 12 L9 18" />
     </svg>
   );
+}
+
+/** v0.1.8:エディタ選択を短いラベルに整形(tooltip / hint 表示用)。 */
+function editorLabel(editor: EditorChoice, language: Language): string {
+  const isJa = language === "ja";
+  if (editor === "cursor") return "Cursor";
+  if (editor === "vscode") return "VS Code";
+  return isJa ? "OS 既定" : "OS default";
 }
 
 export default InspectorPanel;

@@ -88,8 +88,6 @@ export type Verdict = "ready" | "caution" | "block";
 
 export type OverallAssessment = {
   verdict: Verdict;
-  /** 0〜100(高いほど良い)*/
-  score: number;
   /** 判定短ラベル(色付きバッジ用)*/
   label: string;
   /** 判定サマリー文(1〜2 文、なぜその判定になったか)*/
@@ -97,23 +95,9 @@ export type OverallAssessment = {
   /** 優先アクション(重大度順に最大 3 件のタイトル抜粋)*/
   priorityTitles: string[];
 };
-
-/**
- * スコアリング:
- *   100 スタート → 各 finding の重大度に応じて減点(0 で床固定)
- *   - high: -25
- *   - medium: -10
- *   - low: -3
- */
-function calcScore(findings: Finding[]): number {
-  let score = 100;
-  for (const f of findings) {
-    if (f.severity === "high") score -= 25;
-    else if (f.severity === "medium") score -= 10;
-    else score -= 3;
-  }
-  return Math.max(0, score);
-}
+// v0.1.8:calcScore(100 減点式)は撤去。数字の権威性がユーザーに
+//         「品質保証」と誤読される害の方が実利用より大きかった。
+//         verdict(block/caution/ready)+ 件数だけで意思決定させる。
 
 function calcVerdict(findings: Finding[]): Verdict {
   const highs = findings.filter((f) => f.severity === "high").length;
@@ -156,10 +140,11 @@ export function buildAIFixPrompt({
   );
   lines.push("");
 
-  // ── 現状評価
+  // ── 現状評価(v0.1.8:スコア数値は削除。AI に「65/100」と伝えても意味が無く、
+  //     受け手の AI が根拠のある数値と誤解して修正提案の重み付けを誤る恐れがある)
   lines.push(isJa ? "## 現状評価" : "## Current assessment");
   lines.push(
-    `- ${isJa ? "判定" : "Verdict"}: **${assessment.label}** (${isJa ? "スコア" : "score"} ${assessment.score} / 100)`,
+    `- ${isJa ? "判定" : "Verdict"}: **${assessment.label}**`,
   );
   lines.push(`- ${assessment.summary}`);
   lines.push("");
@@ -238,7 +223,6 @@ export function computeOverallAssessment(
   language: Language,
 ): OverallAssessment {
   const verdict = calcVerdict(findings);
-  const score = calcScore(findings);
   const t = translations(language);
   const highs = findings.filter((f) => f.severity === "high").length;
   const meds = findings.filter((f) => f.severity === "medium").length;
@@ -269,7 +253,7 @@ export function computeOverallAssessment(
     .slice(0, 3)
     .map((f) => f.title);
 
-  return { verdict, score, label, summary, priorityTitles };
+  return { verdict, label, summary, priorityTitles };
 }
 
 export function buildFindings({
@@ -465,7 +449,6 @@ type Copy = {
   verdictReadyLabel: string;
   verdictReadyPerfectSummary: string;
   verdictReadyWithLowSummary: (lows: number) => string;
-  scoreLabel: string;
   overallHeading: string;
   priorityHeading: string;
 };
@@ -558,19 +541,18 @@ const JA: Copy = {
     "既に対応済みのコメントは削除",
     "以降は TODO を書くときに「担当者 or Issue 番号」を必ず添える運用にすると溜まりにくい",
   ],
-  // 全体評価(JA)
-  verdictBlockLabel: "出荷を止めて修正を",
+  // 全体評価(JA)v0.1.8:「品質保証」に読める強い口調をやめ、抜け漏れチェックの実態に合わせる
+  verdictBlockLabel: "出荷前に修正したい項目あり",
   verdictBlockSummary: (h, m) =>
-    `重大な問題が ${h} 件${m > 0 ? `、注意項目が ${m} 件` : ""}あります。まず重大項目(赤)を全部潰してから本番投入してください。ここを放置すると個人情報漏洩・不正利用・データ破損などの直接被害につながります。`,
-  verdictCautionLabel: "出せるけど注意",
+    `重大レベルの抜けが ${h} 件${m > 0 ? `、中レベルが ${m} 件` : ""}見つかりました。まず重大(赤)を潰してから出荷するのが安全です。放置すると個人情報漏洩・不正利用・データ破損につながる可能性のある項目が含まれます。`,
+  verdictCautionLabel: "修正したい項目あり",
   verdictCautionSummary: (m, l) =>
-    `致命的な問題はありませんが、注意項目が ${m} 件${l > 0 ? `(軽微 ${l} 件も)` : ""}あります。今すぐの出荷は可能ですが、運用中にトラブルが起きた時の対処が難しくなります。可能なら中(黄)項目を先に潰してから出すのが安全です。`,
-  verdictReadyLabel: "出荷準備 OK",
+    `致命的な抜けは見つかりませんでしたが、中レベルが ${m} 件${l > 0 ? `(軽微 ${l} 件も)` : ""}あります。可能なら中(黄)から潰しておくと、運用中のトラブル対処が楽になります。`,
+  verdictReadyLabel: "明らかな抜けは見つかりませんでした",
   verdictReadyPerfectSummary:
-    "重大・中・軽微いずれのリスクも検出されませんでした。本番リリース準備が整っています。あとは実際のユーザー動作を 1 度確認して出荷できます。",
+    "このチェックが見る範囲では、重大・中・軽微いずれの抜けも検出されませんでした。ただし本チェックはバグ・セキュリティ・実際の動作までは確認していません。出荷前に手動での動作確認を必ず行ってください。",
   verdictReadyWithLowSummary: (l) =>
-    `重大リスクはありません。軽微な項目が ${l} 件ありますが、リリースをブロックする理由にはなりません。時間ができたら潰しておくと以降が楽になります。`,
-  scoreLabel: "スコア",
+    `重大レベルの抜けはありません。軽微が ${l} 件ありますが、リリースをブロックする理由にはなりません。時間ができたら潰しておくと以降が楽になります。`,
   overallHeading: "全体評価",
   priorityHeading: "まず対応すべき項目",
 };
@@ -661,19 +643,18 @@ const EN: Copy = {
     "Delete already-handled comments outright",
     "Going forward, always tag TODOs with an owner or Issue number to keep them from accumulating",
   ],
-  // Overall assessment (EN)
-  verdictBlockLabel: "Fix before shipping",
+  // Overall assessment (EN) v0.1.8: softened to reflect the checklist's actual scope
+  verdictBlockLabel: "Fix these before shipping",
   verdictBlockSummary: (h, m) =>
-    `${h} critical issue(s)${m > 0 ? ` and ${m} caution item(s)` : ""} found. Resolve all the red items before going to production. Leaving them causes data leaks, unauthorized use, or corruption.`,
-  verdictCautionLabel: "Ship with caution",
+    `${h} high-severity gap(s)${m > 0 ? ` and ${m} medium` : ""} were found. Resolving the red items before shipping is safer — some can lead to data leaks, unauthorized access, or corruption.`,
+  verdictCautionLabel: "Items worth fixing",
   verdictCautionSummary: (m, l) =>
-    `No critical issues, but ${m} caution item(s)${l > 0 ? ` (and ${l} low)` : ""} remain. You can ship now, but troubleshooting will be harder. Ideally, resolve the yellow items first.`,
-  verdictReadyLabel: "Ready to ship",
+    `No critical gaps found, but ${m} medium item(s)${l > 0 ? ` (and ${l} low)` : ""} remain. Resolving the yellow items first makes runtime troubleshooting easier.`,
+  verdictReadyLabel: "No obvious gaps found",
   verdictReadyPerfectSummary:
-    "No critical, medium, or low-severity issues found. You're ready for production release. Just verify the main user flow once and ship.",
+    "Within this checklist's scope, no high, medium, or low-severity gaps were detected. Note: this check does NOT cover bugs, security, or actual runtime behavior. Manually verify the main user flow before shipping.",
   verdictReadyWithLowSummary: (l) =>
-    `No critical risks. ${l} low-severity item(s) remain, but they don't block release. Handle them when you have time to make future work easier.`,
-  scoreLabel: "Score",
+    `No high-severity gaps. ${l} low item(s) remain but do not block release. Handle them when convenient to make future work easier.`,
   overallHeading: "Overall assessment",
   priorityHeading: "Fix these first",
 };

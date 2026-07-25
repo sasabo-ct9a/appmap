@@ -16,6 +16,19 @@ export function asEngine(v: unknown): Engine {
 }
 
 /**
+ * v0.1.8 機能拡張:Inspector の関連ファイルクリック時に開くエディタ。
+ *   - "cursor" = Cursor(AI コーディング標準)
+ *   - "vscode" = VS Code
+ *   - "system" = OS デフォルト(Explorer / Finder / xdg-open)
+ * 未設定時は "cursor"(ノーコード経験者が使う AI コーディング環境の主流)。
+ */
+export type EditorChoice = "cursor" | "vscode" | "system";
+export function asEditorChoice(v: unknown): EditorChoice {
+  if (v === "vscode" || v === "system") return v;
+  return "cursor";
+}
+
+/**
  * v0.1.7 機能拡張:詳細レベル選択(ヘッダーの 2 段 segmented pill 連動)。
  *   - "simple"   = 最低限の主要ノードだけ(初学者向け、約 40% の重要ノード)
  *   - "detailed" = 全表示(デフォルト)
@@ -111,6 +124,11 @@ type AppMapStore = {
    * 未保存時は asEngine() で "claude" に fallback(既存ユーザー無影響)。
    */
   engine?: Engine;
+  /**
+   * v0.1.8 Inspector からの外部エディタ選択(Cursor / VS Code / システムデフォルト)。
+   * 未保存時は asEditorChoice() で "cursor" に fallback。
+   */
+  preferredEditor?: EditorChoice;
   /**
    * v0.1.7 詳細レベル選択(ヘッダーの 3 段 pill 連動)。
    * 未保存時は asDetailLevel() で "standard" に fallback。
@@ -234,6 +252,18 @@ export function saveEngine(engine: Engine): void {
 export function loadEngine(): Engine {
   const store = loadStore();
   return asEngine(store.engine);
+}
+
+/** v0.1.8 外部エディタ選択を永続化。 */
+export function savePreferredEditor(editor: EditorChoice): void {
+  const store = loadStore();
+  saveStore({ ...store, preferredEditor: editor });
+}
+
+/** v0.1.8 保存済み外部エディタを取り出す。未保存・不正値は "cursor"。 */
+export function loadPreferredEditor(): EditorChoice {
+  const store = loadStore();
+  return asEditorChoice(store.preferredEditor);
 }
 
 /** v0.1.7 詳細レベルを永続化。 */

@@ -8,7 +8,7 @@ import SpecDocMap from "../canvas/SpecDocMap";
  * 仕様書プレビューモーダル(v0.1.7)。
  *
  * 役割:
- *   - 「想定読者」を 3 段トグルで切替(engineer / noCode / endUser)
+ *   - v0.1.8:想定読者を 2 段トグルで切替(engineer / noCode)。旧 endUser は削除
  *   - その都度 specDoc.buildSpecDoc() で Markdown を再生成してプレビュー
  *   - 「Markdown をコピー」→ navigator.clipboard.writeText
  *   - 「PDF で保存」→ window.print()(@media print で本文だけ印刷)
@@ -156,10 +156,10 @@ function SpecDocModal({
 
   if (!open) return null;
 
+  // v0.1.8:「エンドユーザー」は実質未実装だったため削除。2 択に絞ってそれぞれ実際に切り替える
   const audienceOptions: { key: SpecAudience; label: string }[] = [
     { key: "engineer", label: T.audienceEngineer },
     { key: "noCode", label: T.audienceNoCode },
-    { key: "endUser", label: T.audienceEndUser },
   ];
 
   return (
@@ -435,13 +435,29 @@ function DownloadIcon() {
 }
 
 function WatermarkLogo() {
-  // 4-quad のシンプルな AppMap ブランドマーク(印刷時のみ表示)
+  // v0.1.8:LogoMark と揃えた Tilted Needle 羅針盤(単色版、印刷時のみ表示)。
+  //         印刷 CSS 側で color: #14b8a6 を強制するため currentColor で受ける。
+  //         2 色針は cost が高いので、単色でも針の方向感が伝わるよう傾いた菱形 1 つ + 中央ドットに簡略化。
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="3" y="3" width="8" height="8" rx="1.5" />
-      <rect x="13" y="3" width="8" height="8" rx="1.5" />
-      <rect x="3" y="13" width="8" height="8" rx="1.5" />
-      <rect x="13" y="13" width="8" height="8" rx="1.5" />
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      {/* 羅針盤の外周円 */}
+      <circle cx="12" cy="12" r="9" opacity="0.6" />
+      {/* 傾いた針(35deg、菱形)*/}
+      <g transform="rotate(35 12 12)">
+        <path
+          d="M12 3.5 L14 12 L12 10 L10 12 Z"
+          fill="currentColor"
+          stroke="none"
+        />
+        <path
+          d="M12 20.5 L14 12 L12 14 L10 12 Z"
+          fill="currentColor"
+          stroke="none"
+          opacity="0.55"
+        />
+      </g>
+      {/* 中央ピボット */}
+      <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
     </svg>
   );
 }

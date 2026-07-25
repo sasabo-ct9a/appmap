@@ -1053,6 +1053,141 @@ async fn llama_chat(system_prompt: String, user_prompt: String) -> Result<String
     Ok(content.trim().to_string())
 }
 
+/// v0.1.8:Inspector の関連ファイルを外部エディタで開く。
+/// 対応:
+///   - "cursor"  → cursor://file/{abs_path}:{line?}
+///   - "vscode"  → vscode://file/{abs_path}:{line?}
+///   - "system"  → OS のデフォルトファイルハンドラ(Explorer / Finder / xdg-open)
+///
+/// URL scheme は該当エディタがインストール & プロトコル登録済みの時のみ機能する。
+/// 未登録なら OS が「関連付けが無い」ダイアログを出す(致命的エラーにはしない)。
+#[tauri::command]
+async fn open_in_editor(
+    editor: String,
+    folder: String,
+    file: String,
+    line: Option<u32>,
+) -> Result<(), String> {
+    let abs_path = PathBuf::from(&folder).join(&file);
+    if !abs_path.exists() {
+        return Err(format!("file does not exist: {}", abs_path.display()));
+    }
+    // Windows パス を URL に載せるので `\` を `/` に、先頭は `/C:/...` にはせず
+    // `C:/Users/...` のまま(vscode/cursor はこの形式を受け付ける)
+    let path_str = abs_path.to_string_lossy().replace('\\', "/");
+    let with_line = match line {
+        Some(l) => format!("{}:{}", path_str, l),
+        None => path_str.clone(),
+    };
+
+    match editor.as_str() {
+        "cursor" | "vscode" => {
+            let scheme = if editor == "cursor" { "cursor" } else { "vscode" };
+            let url = format!("{}://file/{}", scheme, with_line);
+            open_target(&url)
+        }
+        "system" => open_target(&abs_path.to_string_lossy()),
+        other => Err(format!("unknown editor: {}", other)),
+    }
+}
+
+/// OS のデフォルトハンドラで URL / パスを開く。
+/// Tauri の opener plugin を直接呼ばず std::process::Command で自前実装
+/// (URL scheme と file path の両方を同じ経路で扱えるため)
+fn open_target(target: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // `start "" <url>`  空タイトル("")を挟むのが Windows の作法
+        StdCommand::new("cmd")
+            .args(["/c", "start", "", target])
+            .spawn()
+            .map_err(|e| format!("failed to open: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        StdCommand::new("open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("failed to open: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        StdCommand::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("failed to open: {}", e))?;
+        Ok(())
+    }
+}
+
+/// v0.1.8:AI 質問(askNode)向けにノードの関連ファイルを実読する。
+/// path traversal 防止のため、必ず folder 配下に正規化して収まる分だけ返す。
+#[derive(serde::Serialize)]
+struct QAFileContent {
+    file: String,
+    content: String,
+    truncated: bool,
+}
+
+const QA_MAX_FILES: usize = 10;
+const QA_MAX_BYTES_PER_FILE: usize = 8 * 1024; // 1 ファイル最大 8KB
+const QA_MAX_TOTAL_BYTES: usize = 64 * 1024; // 合計 64KB(トークン爆発防止)
+
+#[tauri::command]
+async fn read_files_for_qa(
+    folder: String,
+    files: Vec<String>,
+) -> Result<Vec<QAFileContent>, String> {
+    let folder_path = PathBuf::from(&folder);
+    // フォルダ実体の canonical(シンボリックリンク解決)を取り、以降の比較基準にする
+    let folder_canon = folder_path
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve folder: {}", e))?;
+
+    let mut out: Vec<QAFileContent> = Vec::new();
+    let mut total_bytes: usize = 0;
+
+    for rel in files.into_iter().take(QA_MAX_FILES) {
+        if total_bytes >= QA_MAX_TOTAL_BYTES {
+            break;
+        }
+        let candidate = folder_path.join(&rel);
+        let Ok(canon) = candidate.canonicalize() else {
+            continue; // 存在しないパスは黙って skip(ノードの files が古いだけかも)
+        };
+        // path traversal 防止:必ず folder 配下であること
+        if !canon.starts_with(&folder_canon) {
+            continue;
+        }
+        // バイナリ判定は「null byte を含むか」で簡易判定
+        let Ok(bytes) = std::fs::read(&canon) else {
+            continue;
+        };
+        if bytes.contains(&0) {
+            continue; // バイナリはスキップ
+        }
+        let mut truncated = false;
+        let remaining_budget = QA_MAX_TOTAL_BYTES.saturating_sub(total_bytes);
+        let per_file_cap = QA_MAX_BYTES_PER_FILE.min(remaining_budget);
+        let take = bytes.len().min(per_file_cap);
+        if take < bytes.len() {
+            truncated = true;
+        }
+        // UTF-8 変換:失敗時は lossy でも渡す(コード解析用途なので雑で OK)
+        let content = String::from_utf8_lossy(&bytes[..take]).to_string();
+        total_bytes += take;
+        out.push(QAFileContent {
+            file: rel,
+            content,
+            truncated,
+        });
+    }
+
+    Ok(out)
+}
+
 /// v0.1.8:リリース前チェックのコードスキャン結果。
 /// LLM を呼ばずローカルで regex 相当の文字列マッチだけ実行。
 #[derive(serde::Serialize)]
@@ -1068,6 +1203,12 @@ struct PreReleaseScanResult {
     detected_test_framework: Option<String>,
     /// テストファイル(*.test.* / *.spec.* / __tests__/)が存在するか
     has_test_files: bool,
+    /// v0.1.8 セキュリティ:.env ファイル存在 + .gitignore カバー状況。
+    ///   - env_files_present:.env / .env.local / .env.production 等が実在するか
+    ///   - env_covered_by_gitignore:.gitignore が .env パターンを含むか
+    /// 両者から「秘密情報を Git に上げる危険な状態か」を判定する。
+    env_files_present: bool,
+    env_covered_by_gitignore: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1137,6 +1278,40 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     let mut files_truncated = false;
     let mut detected_test_framework: Option<String> = None;
     let mut has_test_files: bool = false;
+
+    // v0.1.8 セキュリティ:.env の存在 + .gitignore カバー状況を独立に判定
+    // (この 2 つの and で「危険な状態」を確定させる。ファイル読み取りだけ、依存なし)
+    let env_names = &[
+        ".env", ".env.local", ".env.development", ".env.production",
+        ".env.dev", ".env.prod", ".env.staging",
+    ];
+    let env_files_present = env_names
+        .iter()
+        .any(|n| folder_path.join(n).exists());
+    let env_covered_by_gitignore = {
+        let gi_path = folder_path.join(".gitignore");
+        match std::fs::read_to_string(&gi_path) {
+            Ok(content) => {
+                // .gitignore の各行(コメント・空行を除く)で `.env` を実質カバーするパターン
+                content.lines().any(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') { return false; }
+                    // 否定ルール(先頭 !)は除外
+                    if trimmed.starts_with('!') { return false; }
+                    // よくあるパターン網羅:
+                    //   .env / .env.* / .env* / *.env / **/.env
+                    trimmed == ".env"
+                        || trimmed == ".env*"
+                        || trimmed == ".env.*"
+                        || trimmed == "*.env"
+                        || trimmed == "**/.env"
+                        || trimmed == "/.env"
+                        || trimmed.starts_with(".env ") // trailing whitespace/comment パターン
+                })
+            }
+            Err(_) => false, // .gitignore 自体が無い = カバーしていない
+        }
+    };
 
     fn walk(
         dir: &Path,
@@ -1356,6 +1531,8 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         files_truncated,
         detected_test_framework,
         has_test_files,
+        env_files_present,
+        env_covered_by_gitignore,
     })
 }
 
@@ -1567,6 +1744,10 @@ pub fn run() {
             llama_chat,
             // v0.1.8 リリース前チェック(ローカル regex スキャン)
             pre_release_scan,
+            // v0.1.8 エディタで開く(vscode / cursor URL scheme or system default)
+            open_in_editor,
+            // v0.1.8 Q&A 精度向上:関連ファイルの実コードを読んで AI に渡す
+            read_files_for_qa,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

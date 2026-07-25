@@ -177,6 +177,8 @@ export type Translations = {
     projectSettings: string;
     sectionOpenProjects: string;
     closeTabAria: (label: string) => string;
+    tabSearchPlaceholder: string;
+    tabSearchNoMatch: string;
     tipTitle: string;
     tipLine1: string;
     tipLine2: string;
@@ -266,6 +268,14 @@ export type Translations = {
     engineLocal: string;
     engineClaudeNote: string;
     engineLocalNote: string;
+    // v0.1.8:外部エディタ選択(Inspector の関連ファイルクリック時)
+    editorLabel: string;
+    editorNote: string;
+    editorCursor: string;
+    editorVscode: string;
+    editorSystem: string;
+    editorOpenFailedTitle: string;
+    editorOpenFailedBody: string;
     // セットアップウィザード
     wizardTitle: string;
     wizardProgress: (done: number) => string;
@@ -476,6 +486,8 @@ const JA: Translations = {
     projectSettings: "設定",
     sectionOpenProjects: "開いているプロジェクト",
     closeTabAria: (label) => `${label} を閉じる`,
+    tabSearchPlaceholder: "検索",
+    tabSearchNoMatch: "該当なし",
     tipTitle: "3 分で理解するコツ",
     tipLine1: "まずは「できること」から",
     tipLine2: "全体像をつかみましょう",
@@ -565,6 +577,15 @@ const JA: Translations = {
     engineLocal: "ローカル LLM(オフライン)",
     engineClaudeNote: "高品質。Claude Pro/Max 契約が必要、1 回 ~$0.6。",
     engineLocalNote: "オフライン・無料。初回 4.5 GB DL が必要、品質はやや劣る。",
+    editorLabel: "外部エディタ",
+    editorNote:
+      "Inspector で関連ファイルをクリックしたとき、どのエディタで開くかを選びます。",
+    editorCursor: "Cursor(AI コーディング標準)",
+    editorVscode: "VS Code",
+    editorSystem: "OS のデフォルト(エクスプローラ等)",
+    editorOpenFailedTitle: "エディタを起動できませんでした",
+    editorOpenFailedBody:
+      "選んだエディタが未インストール、または OS にプロトコルが登録されていません。設定で別のエディタに切り替えてください。",
     wizardTitle: "ローカル LLM の準備",
     wizardProgress: (done) => `${done} / 2 完了`,
     stepDone: "完了",
@@ -784,6 +805,8 @@ const EN: Translations = {
     projectSettings: "Settings",
     sectionOpenProjects: "Open projects",
     closeTabAria: (label) => `Close ${label}`,
+    tabSearchPlaceholder: "Search",
+    tabSearchNoMatch: "No match",
     tipTitle: "Understand in 3 minutes",
     tipLine1: "Start with what it does,",
     tipLine2: "then grasp the whole picture.",
@@ -876,6 +899,15 @@ const EN: Translations = {
       "Highest quality. Requires Claude Pro/Max, ~$0.6 per analysis.",
     engineLocalNote:
       "Offline and free. Needs a one-time 4.5 GB download. Quality is lower.",
+    editorLabel: "External editor",
+    editorNote:
+      "Choose which editor opens when you click a related file in the Inspector.",
+    editorCursor: "Cursor (AI-coding standard)",
+    editorVscode: "VS Code",
+    editorSystem: "OS default (Explorer / Finder)",
+    editorOpenFailedTitle: "Couldn't launch the editor",
+    editorOpenFailedBody:
+      "The selected editor isn't installed, or its protocol isn't registered with the OS. Switch to a different editor in Settings.",
     wizardTitle: "Set up local LLM",
     wizardProgress: (done) => `${done} / 2 done`,
     stepDone: "done",

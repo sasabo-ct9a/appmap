@@ -3612,7 +3612,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",

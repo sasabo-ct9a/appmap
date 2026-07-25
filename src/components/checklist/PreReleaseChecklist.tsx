@@ -101,6 +101,7 @@ function PreReleaseChecklist({
   const assessment = computeOverallAssessment(findings, language);
 
   const isJa = language === "ja";
+  const isSample = folderPath === null;
   const heading = isJa ? "リリース前チェック" : "Pre-release check";
   const intro = isJa
     ? "本番に出す前に確認しておきたい項目を、危険度の高い順に並べています。"
@@ -115,8 +116,8 @@ function PreReleaseChecklist({
     ? "スキャン失敗(画面情報だけで判定します):"
     : "Scan failed (using screen data only):";
   const sampleNote = isJa
-    ? "サンプル表示中はコードスキャンは走りません。実際のフォルダを分析すると秘密情報などのコード側チェックも有効になります。"
-    : "Code scan is skipped for the sample. Analyze a real folder to enable secret / TODO checks.";
+    ? "これはサンプルデータの参考表示です。実際のリスクではありません。フォルダを選んで分析すると本番診断が走ります。"
+    : "This is a preview using sample data — not real findings. Analyze a folder to run the actual diagnosis.";
   const scannedNote = (n: number, truncated: boolean) =>
     isJa
       ? `対象ファイル ${n} 件${truncated ? "(200 件で打切り)" : ""}を検査済み`
@@ -126,17 +127,58 @@ function PreReleaseChecklist({
     <div className="mb-6">
       {/* ヘッダー */}
       <div className="mb-4">
-        <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2">
+        <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2 flex-wrap">
           <ShieldIcon />
           {heading}
+          {/* v0.1.8:サンプル表示中は amber バッジで明示(MapCanvas と統一) */}
+          {isSample && (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border"
+              style={{
+                background: "rgba(212, 163, 115, 0.14)",
+                color: "#8a5a2b",
+                borderColor: "rgba(212, 163, 115, 0.55)",
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  display: "inline-block",
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  background: "#c98a3d",
+                }}
+              />
+              {isJa ? "サンプル" : "Sample"}
+            </span>
+          )}
         </h1>
         <p className="text-sm text-ink-soft mt-1">{intro}</p>
       </div>
 
       {/* スキャン状態 */}
-      {folderPath === null && (
-        <div className="mb-3 text-[11px] text-ink-soft italic px-3 py-2 bg-canvas rounded-[8px] border border-border-soft">
-          {sampleNote}
+      {isSample && (
+        <div
+          className="mb-3 text-[12px] px-3 py-2.5 rounded-[8px] border flex items-start gap-2"
+          style={{
+            background: "rgba(212, 163, 115, 0.10)",
+            borderColor: "rgba(212, 163, 115, 0.45)",
+            color: "#7a4d24",
+          }}
+        >
+          <span
+            aria-hidden="true"
+            className="flex-shrink-0 mt-0.5"
+            style={{
+              display: "inline-block",
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: "#c98a3d",
+            }}
+          />
+          <span className="leading-relaxed">{sampleNote}</span>
         </div>
       )}
       {scanning && (
@@ -187,17 +229,23 @@ function PreReleaseChecklist({
       ) : (
         <ul className="space-y-2">
           {findings.map((f) => (
-            <FindingCard key={f.id} finding={f} language={language} />
+            <FindingCard
+              key={f.id}
+              finding={f}
+              language={language}
+              isSample={isSample}
+            />
           ))}
         </ul>
       )}
 
-      {/* 全体評価パネル(findings が 1 つでもあれば表示。empty state 時は緑チェックが既に出ているので不要)*/}
+      {/* 全体評価パネル(サンプル表示中も表示するが、明確にサンプル扱いだと分かるようマーキング)*/}
       {!scanning && findings.length > 0 && (
         <AssessmentPanel
           assessment={assessment}
           language={language}
           onOpenAIPrompt={() => setPromptOpen(true)}
+          isSample={isSample}
         />
       )}
 
@@ -258,15 +306,16 @@ function AssessmentPanel({
   assessment,
   language,
   onOpenAIPrompt,
+  isSample = false,
 }: {
   assessment: OverallAssessment;
   language: Language;
   onOpenAIPrompt?: () => void;
+  isSample?: boolean;
 }) {
   const isJa = language === "ja";
   const s = VERDICT_STYLE[assessment.verdict];
   const headingLabel = isJa ? "全体評価" : "Overall assessment";
-  const scoreLabel = isJa ? "スコア" : "Score";
   const priorityLabel = isJa ? "まず対応すべき項目" : "Fix these first";
   const aiButtonLabel = isJa
     ? "AI に依頼するプロンプトを生成"
@@ -274,6 +323,14 @@ function AssessmentPanel({
   const aiButtonHint = isJa
     ? "Cursor / Claude Code などに貼るだけで一括修正を依頼できます"
     : "Paste into Cursor / Claude Code to request a batch fix";
+  // v0.1.8:サンプル表示中は AI プロンプト生成を封じ、代わりに理由を表示
+  const sampleAiHint = isJa
+    ? "サンプル表示中は AI 修正プロンプトを生成できません。フォルダを選んで分析してください。"
+    : "AI fix prompt is disabled while showing sample data. Analyze a folder first.";
+  // v0.1.8:スコア表示を撤廃し、代わりにこのチェックが「網羅診断ではない」ことを常時明示
+  const scopeNote = isJa
+    ? "このチェックは「よくある抜け漏れ」だけを見ています。バグ・セキュリティ深堀・実際の動作確認は含みません。"
+    : "This check only surfaces common gaps. It does NOT include bug detection, deep security audit, or runtime verification.";
   return (
     <div
       className="mt-5 rounded-[14px] border-2 shadow-sm overflow-hidden"
@@ -290,10 +347,33 @@ function AssessmentPanel({
         </span>
         <div className="flex-1 min-w-0">
           <div
-            className="text-[10px] font-bold uppercase tracking-wider mb-0.5"
+            className="text-[10px] font-bold uppercase tracking-wider mb-0.5 flex items-center gap-1.5 flex-wrap"
             style={{ color: s.accent }}
           >
             {headingLabel}
+            {/* v0.1.8:サンプル表示中は評価もサンプル扱いだと明示 */}
+            {isSample && (
+              <span
+                className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border normal-case tracking-normal"
+                style={{
+                  background: "rgba(212, 163, 115, 0.16)",
+                  color: "#8a5a2b",
+                  borderColor: "rgba(212, 163, 115, 0.6)",
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    display: "inline-block",
+                    width: 5,
+                    height: 5,
+                    borderRadius: "50%",
+                    background: "#c98a3d",
+                  }}
+                />
+                {isJa ? "サンプル" : "Sample"}
+              </span>
+            )}
           </div>
           <div
             className="text-xl font-bold leading-tight"
@@ -302,32 +382,22 @@ function AssessmentPanel({
             {assessment.label}
           </div>
         </div>
-        {/* スコア表示(0-100)*/}
-        <div className="flex-shrink-0 flex flex-col items-center gap-0 pl-3">
-          <div className="text-[10px] font-bold uppercase tracking-wide" style={{ color: s.accent }}>
-            {scoreLabel}
-          </div>
-          <div className="flex items-baseline gap-0.5">
-            <span
-              className="text-3xl font-black tabular-nums leading-none"
-              style={{ color: s.text }}
-            >
-              {assessment.score}
-            </span>
-            <span className="text-xs font-semibold" style={{ color: s.text, opacity: 0.6 }}>
-              / 100
-            </span>
-          </div>
-        </div>
+        {/* v0.1.8:0-100 スコアは撤去。数字の権威性がユーザーに「品質保証」と誤読される害の方が大きかった */}
       </div>
 
-      {/* サマリー文 */}
+      {/* サマリー文 + スコープ注釈(常時表示、verdict に関係なく)*/}
       <div className="px-5 pb-4">
         <p
           className="text-sm leading-relaxed"
           style={{ color: s.text }}
         >
           {assessment.summary}
+        </p>
+        <p
+          className="mt-2 text-[11px] leading-relaxed"
+          style={{ color: s.text, opacity: 0.72 }}
+        >
+          {scopeNote}
         </p>
       </div>
 
@@ -364,7 +434,7 @@ function AssessmentPanel({
         </div>
       )}
 
-      {/* v0.1.8:AI 修正プロンプト生成ボタン */}
+      {/* v0.1.8:AI 修正プロンプト生成ボタン(サンプル表示中は無効化して理由を出す)*/}
       {onOpenAIPrompt && (
         <div
           className="px-5 py-3 border-t bg-paper flex items-center justify-between gap-3"
@@ -375,13 +445,19 @@ function AssessmentPanel({
               {aiButtonLabel}
             </div>
             <div className="text-[11px] text-ink-soft leading-snug">
-              {aiButtonHint}
+              {isSample ? sampleAiHint : aiButtonHint}
             </div>
           </div>
           <button
             type="button"
             onClick={onOpenAIPrompt}
-            className="flex-shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-[10px] bg-feature-teal text-white text-xs font-bold hover:bg-feature-teal/90 transition-colors cursor-pointer shadow-sm"
+            disabled={isSample}
+            title={isSample ? sampleAiHint : undefined}
+            className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-[10px] text-white text-xs font-bold transition-colors shadow-sm ${
+              isSample
+                ? "bg-ink-soft/60 cursor-not-allowed opacity-70"
+                : "bg-feature-teal hover:bg-feature-teal/90 cursor-pointer"
+            }`}
           >
             <SparkleIcon />
             {isJa ? "生成" : "Generate"}
@@ -659,9 +735,11 @@ function SummaryPill({
 function FindingCard({
   finding,
   language,
+  isSample = false,
 }: {
   finding: Finding;
   language: Language;
+  isSample?: boolean;
 }) {
   const s = SEVERITY_STYLE[finding.severity];
   const [open, setOpen] = useState(false);
@@ -689,6 +767,19 @@ function FindingCard({
             >
               {s.label}
             </span>
+            {/* v0.1.8:サンプル表示中は各 finding にも「サンプル」チップを出す */}
+            {isSample && (
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border"
+                style={{
+                  background: "rgba(212, 163, 115, 0.14)",
+                  color: "#8a5a2b",
+                  borderColor: "rgba(212, 163, 115, 0.55)",
+                }}
+              >
+                {isJa ? "サンプル" : "Sample"}
+              </span>
+            )}
             <h3 className="text-sm font-bold text-ink-strong">
               {finding.title}
             </h3>

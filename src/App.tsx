@@ -20,7 +20,7 @@ import Button from "./components/ui/Button";
 import Spinner from "./components/ui/Spinner";
 import HistoryDropdown from "./components/ui/HistoryDropdown";
 import SetupWizard from "./components/ui/SetupWizard";
-import TabBar from "./components/ui/TabBar";
+// v0.1.8:上部 TabBar は撤去(サイドバーに一本化)
 import SpecDocModal from "./components/ui/SpecDocModal";
 import SettingsModal from "./components/ui/SettingsModal";
 import LocalLLMSetupWizard from "./components/ui/LocalLLMSetupWizard";
@@ -50,11 +50,14 @@ import {
   saveLanguage,
   saveEngine,
   saveDetailLevel,
+  savePreferredEditor,
+  loadPreferredEditor,
   asEngine,
   asDetailLevel,
   type StoredAnalysis,
   type Engine,
   type DetailLevel,
+  type EditorChoice,
 } from "./lib/storage";
 import { t, asLanguage, pickLocalized, type Language } from "./lib/i18n";
 
@@ -112,6 +115,8 @@ function App() {
   const [specDocOpen, setSpecDocOpen] = useState<boolean>(false);
   // v0.1.7 AI エンジン(Claude / Local LLM)+ 設定モーダル開閉
   const [engine, setEngineState] = useState<Engine>("claude");
+  // v0.1.8 外部エディタ(関連ファイルクリックで使う)
+  const [preferredEditor, setPreferredEditor] = useState<EditorChoice>("cursor");
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   // v0.1.8 差分マップ表示 ON/OFF(前回分析との比較)
   const [showDiff, setShowDiff] = useState<boolean>(false);
@@ -152,6 +157,13 @@ function App() {
     if (next === "local") {
       void refreshLlamaSetup();
     }
+  };
+
+  /** v0.1.8:外部エディタ選択を保存 + state 反映。 */
+  const handlePreferredEditorChange = (next: EditorChoice) => {
+    if (next === preferredEditor) return;
+    setPreferredEditor(next);
+    savePreferredEditor(next);
   };
 
   /**
@@ -291,6 +303,8 @@ function App() {
     }
     // v0.1.7: 詳細レベル設定を復元(未保存は "standard")。
     setDetailLevelState(asDetailLevel(store.detailLevel));
+    // v0.1.8: 外部エディタ設定を復元(未保存は "cursor")。
+    setPreferredEditor(loadPreferredEditor());
     // 過去に成功分析が 1 件でもあれば、login も済んでいるはず。Backfill して
     // SetupWizard が「2/3 完了」と訴え続けないようにする。
     if (store.history.length > 0 && store.loginCompletedAt === undefined) {
@@ -714,14 +728,7 @@ function App() {
           <div className="mx-auto max-w-6xl">
             {setupWizard}
 
-            {/* タブバー(サイドバーとメイン上部の両方に表示)*/}
-            <TabBar
-              tabs={tabEntries}
-              activeFolderPath={lastAnalyzedFolder}
-              onSelectTab={handleSelectTab}
-              onCloseTab={closeTab}
-              language={language}
-            />
+            {/* v0.1.8:上部の重複タブバーは撤去。サイドバー「開いているプロジェクト」に一本化 */}
 
             {/* ツールバー(v0.1.7 配置変更 + LIGHT 化) */}
             <div className="flex items-center gap-3 mb-5 flex-wrap">
@@ -739,11 +746,9 @@ function App() {
                 language={language}
               />
 
-              {aiResult !== null && analysisStatus !== "loading" ? (
-                <Button variant="secondary" onClick={handleResetToSample}>
-                  {T.app.resetToSample}
-                </Button>
-              ) : null}
+              {/* v0.1.8: 「サンプルに戻す」ボタンは撤去。
+                  タブ全閉じで自動的にサンプルに戻る fallback は残しているので
+                  ボタンとしては不要(handleResetToSample は closeTab から呼ばれる)。*/}
 
               {/* v0.1.7: 仕様書を作成(サンプルでも生成可能、aiResult のあるなしに関係なく screens から作る)*/}
               <Button
@@ -976,6 +981,7 @@ function App() {
                     diffAddedEdgeIds={
                       showDiff ? mapDiff.addedEdges : undefined
                     }
+                    isSample={aiResult === null}
                   />
 
                   <div className="mt-4">
@@ -1062,6 +1068,7 @@ function App() {
             folderPath={lastAnalyzedFolder}
             onNoteChange={() => setNotesTick((t) => t + 1)}
             engine={engine}
+            preferredEditor={preferredEditor}
           />
         </div>
       </div>
@@ -1077,13 +1084,15 @@ function App() {
         showDataDetails={viewMode === "database"}
       />
 
-      {/* v0.1.7 設定モーダル(AI エンジン切替) */}
+      {/* v0.1.7 設定モーダル(AI エンジン切替 + v0.1.8 エディタ選択) */}
       <SettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         engine={engine}
         onEngineChange={handleEngineChange}
         language={language}
+        preferredEditor={preferredEditor}
+        onPreferredEditorChange={handlePreferredEditorChange}
       />
     </div>
   );

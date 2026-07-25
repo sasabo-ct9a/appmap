@@ -24,7 +24,52 @@ import { pickLocalized, type Language } from "./i18n";
  *   - 画面設計           ← 全画面(label + subActions + 遷移先)
  */
 
-export type SpecAudience = "engineer" | "noCode" | "endUser";
+// v0.1.8:エンドユーザーは実際に使う場面が薄く、また未実装だったため削除
+//         2 択(エンジニア / ノーコード経験者)は実際に文言を切り替える
+export type SpecAudience = "engineer" | "noCode";
+
+/**
+ * ノーコード読者向けに、DB 型・制約・優先度などのエンジニア用語を日常語に置換する。
+ * engineer モードでは何もしない。
+ * 部分置換なので、`INTEGER / UUID (id)` のように括弧付き文字列も自然に読める形に落ちる。
+ */
+export function simplifyForNoCode(
+  text: string,
+  audience: SpecAudience,
+): string {
+  if (audience !== "noCode") return text;
+  const pairs: Array<[RegExp | string, string]> = [
+    // DB 型
+    [/INTEGER \/ UUID/g, "数値 ID"],
+    [/INTEGER/g, "数値"],
+    [/TIMESTAMP/g, "日時"],
+    [/VARCHAR\(255\)/g, "文字列(短め)"],
+    [/VARCHAR\(50\)/g, "文字列(短め)"],
+    [/VARCHAR\(30\) \/ ENUM/g, "選択肢(いくつかから選ぶ)"],
+    [/VARCHAR\(30\)/g, "文字列(短め)"],
+    [/TEXT/g, "長文"],
+    [/BOOLEAN/g, "はい/いいえ"],
+    [/DECIMAL\(10, 2\)/g, "金額(小数あり)"],
+    // 制約
+    [/PRIMARY KEY, NOT NULL/g, "主キー(必須・重複禁止)"],
+    [/FOREIGN KEY, NOT NULL/g, "参照キー(必須)"],
+    [/UNIQUE, NOT NULL/g, "重複禁止・必須"],
+    [/NOT NULL, DEFAULT now\(\)/g, "必須(自動で今の日時が入る)"],
+    [/NOT NULL, DEFAULT false/g, "必須(初期はいいえ)"],
+    [/NOT NULL, DEFAULT 0/g, "必須(初期は 0)"],
+    [/NOT NULL/g, "必須"],
+    [/NULL 可/g, "空欄可"],
+    // 機能要件テーブルの優先度
+    [/(^|\|)\s*Must\s*(\||$)/g, "$1 必須 $2"],
+    [/(^|\|)\s*Should\s*(\||$)/g, "$1 あると良い $2"],
+    [/(^|\|)\s*Could\s*(\||$)/g, "$1 後回しでOK $2"],
+  ];
+  let out = text;
+  for (const [pat, rep] of pairs) {
+    out = typeof pat === "string" ? out.split(pat).join(rep) : out.replace(pat, rep);
+  }
+  return out;
+}
 
 type BuildOptions = {
   screens: ScreenMapResult;
@@ -263,9 +308,11 @@ function detectStack(files: string[]): {
 
 export function buildSpecDoc(opts: BuildOptions): string {
   const { screens, audience, language, folderPath } = opts;
-  void audience;
   const authorName = (opts.authorName ?? "").trim();
   const authorCell = authorName || PH;
+  // v0.1.8:対象読者に応じて用語を切り替える
+  const audienceLabel =
+    audience === "noCode" ? "ノーコード経験者向け" : "エンジニア向け";
   const { outgoing, incoming } = indexEdges(screens.edges);
   const nodeById = indexNodes(screens.nodes);
   const nowIso = today();
@@ -292,6 +339,7 @@ export function buildSpecDoc(opts: BuildOptions): string {
   lines.push(`- 作成者: ${authorCell}`);
   lines.push(`- 最終更新: ${nowIso}`);
   lines.push(`- ステータス: draft / review / approved`);
+  lines.push(`- 対象読者: ${audienceLabel}`);
   lines.push("");
   lines.push("---");
   lines.push("");
@@ -844,5 +892,6 @@ export function buildSpecDoc(opts: BuildOptions): string {
   lines.push(`| ${nowIso} | v0.1 | 初版(AppMap 自動生成) | ${authorCell} |`);
   lines.push("");
 
-  return lines.join("\n");
+  // v0.1.8:ノーコード読者モードでは DB 型・制約・優先度を日常語に一括置換
+  return simplifyForNoCode(lines.join("\n"), audience);
 }

@@ -60,6 +60,8 @@ type MapCanvasProps = {
   diffAddedNodeIds?: Set<number>;
   /** v0.1.8 差分マップ:今回追加されたエッジ id を橙点線でハイライト */
   diffAddedEdgeIds?: Set<string>;
+  /** v0.1.8:サンプル表示中(未分析)フラグ。true のとき見出し横にバッジ表示 */
+  isSample?: boolean;
 };
 
 const ZOOM_MIN = 0.4;
@@ -101,6 +103,7 @@ function MapCanvas({
   notesTick = 0,
   diffAddedNodeIds,
   diffAddedEdgeIds,
+  isSample = false,
 }: MapCanvasProps) {
   const [hoveredId, setHoveredId] = useState<number | null>(null);
   // v0.1.7 色統一:安定インデックスから引くローカル palette 関数
@@ -587,6 +590,34 @@ function MapCanvas({
           <span className="text-sm text-ink-soft">
             {language === "ja" ? "(マインドマップ)" : "(mind map)"}
           </span>
+          {/* v0.1.8:サンプル表示中は amber バッジで一目で分かるようにする */}
+          {isSample && (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border"
+              style={{
+                background: "rgba(212, 163, 115, 0.14)",
+                color: "#8a5a2b",
+                borderColor: "rgba(212, 163, 115, 0.55)",
+              }}
+              title={
+                language === "ja"
+                  ? "サンプルマップを表示中。フォルダを選ぶと実際のアプリを分析します。"
+                  : "Showing the sample map. Pick a folder to analyze your app."
+              }
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  display: "inline-block",
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  background: "#c98a3d",
+                }}
+              />
+              {language === "ja" ? "サンプル" : "Sample"}
+            </span>
+          )}
           {/* 常時表示の操作ヒント:Inspector / ズーム / ドラッグの存在を案内 */}
           <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-feature-teal-soft text-feature-teal border border-feature-teal/30">
             <svg
