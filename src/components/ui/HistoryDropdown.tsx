@@ -41,6 +41,22 @@ function relativeTime(timestamp: number, language: Language): string {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/**
+ * v0.1.10:分析にかかった時間を短く表記。
+ * 60 秒未満は「12 秒」、それ以上は「1 分 20 秒」/ "1m20s"。
+ */
+function formatDuration(ms: number, language: Language): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (language === "ja") {
+    if (min === 0) return `${sec} 秒`;
+    return sec === 0 ? `${min} 分` : `${min} 分 ${sec} 秒`;
+  }
+  if (min === 0) return `${sec}s`;
+  return sec === 0 ? `${min}m` : `${min}m${sec}s`;
+}
+
 function HistoryDropdown({
   history,
   currentFolderPath,
@@ -127,6 +143,10 @@ function HistoryDropdown({
                         {relativeTime(entry.analyzedAt, language)}
                         {entry.costUsd !== null && (
                           <> · ${entry.costUsd.toFixed(4)}</>
+                        )}
+                        {/* v0.1.10:分析にかかった時間(古いエントリは null なので条件付き) */}
+                        {entry.durationMs !== null && entry.durationMs > 0 && (
+                          <> · {formatDuration(entry.durationMs, language)}</>
                         )}
                         {" · "}
                         {T.history.screens(entry.screens.nodes.length)}

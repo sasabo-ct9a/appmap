@@ -63,7 +63,7 @@ function TopBar({
       </div>
 
       {/* モード切替セグメントピル(かんたん / 詳細) */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2" data-tour="mode-toggle">
         <ModePill
           active={mode === "easy"}
           onClick={() => onModeChange("easy")}
@@ -83,7 +83,7 @@ function TopBar({
       </div>
 
       {/* エクスポート(ドロップダウン)*/}
-      <div className="relative" ref={exportRef}>
+      <div className="relative" ref={exportRef} data-tour="export">
         <button
           type="button"
           onClick={() => setExportOpen((v) => !v)}
@@ -133,6 +133,7 @@ function TopBar({
         type="button"
         onClick={() => onEngineChange(engine === "claude" ? "local" : "claude")}
         aria-label={T.engineToggleAria}
+        data-tour="engine-switch"
         title={
           engine === "claude" ? T.engineTooltipClaude : T.engineTooltipLocal
         }

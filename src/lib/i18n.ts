@@ -31,9 +31,16 @@ export type Translations = {
   app: {
     pickFolder: string;
     analyzing: string;
+    reloadFolder: string;
     resetToSample: string;
     summaryBadge: string;
     errorPrefix: string;
+    authRecoveryTitle: string;
+    authRecoveryBody: string;
+    authRecoveryButton: string;
+    authRecoveryInProgress: string;
+    authRecoveryDone: string;
+    authRecoveryFailed: (msg: string) => string;
     statusChecking: string;
     statusSetupIncomplete: string;
     statusLoginIncomplete: string;
@@ -179,6 +186,8 @@ export type Translations = {
     closeTabAria: (label: string) => string;
     tabSearchPlaceholder: string;
     tabSearchNoMatch: string;
+    tourButtonLabel: string;
+    tourButtonTitle: string;
     tipTitle: string;
     tipLine1: string;
     tipLine2: string;
@@ -315,9 +324,18 @@ const JA: Translations = {
   app: {
     pickFolder: "フォルダを選ぶ",
     analyzing: "分析中…",
+    reloadFolder: "再読込",
     resetToSample: "サンプルに戻す",
     summaryBadge: "サマリー",
     errorPrefix: "エラー:",
+    authRecoveryTitle: "Claude のログインが切れています",
+    authRecoveryBody:
+      "下のボタンを押すとブラウザで Claude のログイン画面が開きます。ブラウザで認証を完了すると、再度分析できるようになります。",
+    authRecoveryButton: "ブラウザでログインする",
+    authRecoveryInProgress:
+      "ブラウザで Claude にログインしてください。完了するとここに戻ってきます…",
+    authRecoveryDone: "ログイン成功。もう一度「フォルダを選ぶ」または「再読込」を押してください。",
+    authRecoveryFailed: (msg) => `ログイン失敗:${msg}`,
     statusChecking: "Claude CLI を確認中…",
     statusSetupIncomplete: "セットアップを完了してください(上の案内を参照)",
     statusLoginIncomplete: "Claude にログインしてください(上の案内を参照)",
@@ -478,8 +496,8 @@ const JA: Translations = {
     navHomeSubtitle: "このアプリでできること",
     navImpactTitle: "変更の影響を確認",
     navImpactSubtitle: "どこを変えると影響する?",
-    navChecklistTitle: "リリース前チェック",
-    navChecklistSubtitle: "本番に出せる状態か診断",
+    navChecklistTitle: "コードチェック",
+    navChecklistSubtitle: "秘密情報・テスト・残置コードを確認",
     sectionProjectInfo: "プロジェクト情報",
     projectOverview: "概要",
     projectData: "データ",
@@ -488,6 +506,8 @@ const JA: Translations = {
     closeTabAria: (label) => `${label} を閉じる`,
     tabSearchPlaceholder: "検索",
     tabSearchNoMatch: "該当なし",
+    tourButtonLabel: "ガイド付きツアー",
+    tourButtonTitle: "AppMap の使い方を順に案内します",
     tipTitle: "3 分で理解するコツ",
     tipLine1: "まずは「できること」から",
     tipLine2: "全体像をつかみましょう",
@@ -628,9 +648,18 @@ const EN: Translations = {
   app: {
     pickFolder: "Pick folder",
     analyzing: "Analyzing…",
+    reloadFolder: "Reload",
     resetToSample: "Back to sample",
     summaryBadge: "SUMMARY",
     errorPrefix: "Error:",
+    authRecoveryTitle: "Claude sign-in has expired",
+    authRecoveryBody:
+      "Click the button below to open the Claude sign-in page in your browser. Once you finish signing in, you can analyze again.",
+    authRecoveryButton: "Sign in via browser",
+    authRecoveryInProgress:
+      "Please complete sign-in in the browser. This message will update when done…",
+    authRecoveryDone: "Signed in. Please click 'Pick folder' or 'Reload' again.",
+    authRecoveryFailed: (msg) => `Sign-in failed: ${msg}`,
     statusChecking: "Checking Claude CLI…",
     statusSetupIncomplete:
       "Please finish setup (see the guide above)",
@@ -797,8 +826,8 @@ const EN: Translations = {
     navHomeSubtitle: "What this app can do",
     navImpactTitle: "Impact preview",
     navImpactSubtitle: "See what a change affects",
-    navChecklistTitle: "Pre-release check",
-    navChecklistSubtitle: "Ready to ship?",
+    navChecklistTitle: "Code check",
+    navChecklistSubtitle: "Secrets, tests, leftover code",
     sectionProjectInfo: "Project info",
     projectOverview: "Overview",
     projectData: "Data",
@@ -807,6 +836,8 @@ const EN: Translations = {
     closeTabAria: (label) => `Close ${label}`,
     tabSearchPlaceholder: "Search",
     tabSearchNoMatch: "No match",
+    tourButtonLabel: "Guided tour",
+    tourButtonTitle: "Walk through AppMap step by step",
     tipTitle: "Understand in 3 minutes",
     tipLine1: "Start with what it does,",
     tipLine2: "then grasp the whole picture.",

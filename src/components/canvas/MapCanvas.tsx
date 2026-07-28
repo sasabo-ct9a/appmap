@@ -122,6 +122,10 @@ function MapCanvas({
   const svgWrapRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  // v0.1.10:マップの操作は「1 回クリックしてアクティブ化」した時のみ有効。
+  //   Google Maps 埋め込み方式:ページスクロール中に誤ってマップを拡大縮小する事故を防ぐ。
+  //   マップ外(document 上のマップ以外)クリックで再ロック。
+  const [mapInteractive, setMapInteractive] = useState(false);
   const dragRef = useRef<{
     startX: number;
     startY: number;
@@ -458,22 +462,46 @@ function MapCanvas({
   const vbY = (H - vbH) / 2 - pan.y;
   const viewBox = `${vbX} ${vbY} ${vbW} ${vbH}`;
 
-  // マウスホイールでズーム(passive: false で preventDefault)
+  // マウスホイールでズーム(passive: false で preventDefault)。
+  // v0.1.10:mapInteractive === false の時はページスクロールを妨げないよう preventDefault
+  //   せず、そのままバブリング → ページがスクロールされる(埋め込みマップ方式)。
   useEffect(() => {
     const el = svgWrapRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
+      if (!mapInteractive) return; // ページスクロールに任せる
       e.preventDefault();
       const delta = -e.deltaY * 0.0018;
       setZoom((z) => clamp(z * (1 + delta), ZOOM_MIN, ZOOM_MAX));
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, []);
+  }, [mapInteractive]);
 
-  // ドラッグでパン
+  // v0.1.10:マップ外クリックで非アクティブ化(document 全体で監視)
+  useEffect(() => {
+    if (!mapInteractive) return;
+    const el = svgWrapRef.current;
+    if (!el) return;
+    const onDocPointerDown = (e: PointerEvent) => {
+      if (el.contains(e.target as Node)) return;
+      setMapInteractive(false);
+    };
+    document.addEventListener("pointerdown", onDocPointerDown);
+    return () => document.removeEventListener("pointerdown", onDocPointerDown);
+  }, [mapInteractive]);
+
+  // ドラッグでパン。
+  // v0.1.10:非アクティブ状態の 1 回目のクリックは「アクティブ化のみ」で消費し、
+  //   マップは動かさない(ユーザーがまず「触るぞ」と意思表示するステップ)。
+  //   ノードクリックはこれとは別で常に動作する(node 要素側の handler)。
   const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    if (!mapInteractive) {
+      setMapInteractive(true);
+      // ドラッグ開始情報は残さない(アクティブ化クリックだけで終わる)
+      return;
+    }
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
@@ -633,13 +661,19 @@ function MapCanvas({
             </svg>
             {language === "ja" ? (
               <>
-                クリックで詳細 <span className="opacity-60">/</span> ホイールで拡大縮小{" "}
-                <span className="opacity-60">/</span> ドラッグで移動
+                ノードクリックで詳細 <span className="opacity-60">/</span>{" "}
+                マップを 1 回クリックで操作有効化{" "}
+                <span className="opacity-60">→</span> ホイールで拡大縮小{" "}
+                <span className="opacity-60">/</span> ドラッグで移動{" "}
+                <span className="opacity-60">/</span> マップ外クリックで固定
               </>
             ) : (
               <>
-                Click for detail <span className="opacity-60">/</span> wheel to zoom{" "}
-                <span className="opacity-60">/</span> drag to move
+                Click a node for detail <span className="opacity-60">/</span>{" "}
+                click the map once to activate{" "}
+                <span className="opacity-60">→</span> wheel to zoom{" "}
+                <span className="opacity-60">/</span> drag to move{" "}
+                <span className="opacity-60">/</span> click outside to lock
               </>
             )}
           </span>
@@ -684,10 +718,16 @@ function MapCanvas({
         </div>
       </div>
 
-      {/* SVG マップ */}
+      {/* SVG マップ
+          v0.1.10:mapInteractive === false の時はクリック待ちの視覚を出す
+          (border 色 + カーソル pointer)。アクティブ化後は通常の grab カーソル。 */}
       <div
         ref={svgWrapRef}
-        className="bg-canvas-soft rounded-[12px] relative overflow-hidden touch-none"
+        className={`bg-canvas-soft rounded-[12px] relative overflow-hidden touch-none border-2 transition-colors ${
+          mapInteractive
+            ? "border-feature-teal/40"
+            : "border-transparent cursor-pointer"
+        }`}
         style={
           tall
             ? { height: "min(calc(100vh - 280px), 780px)", minHeight: 560 }
@@ -1210,6 +1250,30 @@ function MapCanvas({
               ─ 分析対象アプリの構成と誤解されるため。
               枝同士の関連線は残し、主枝 + 葉のみで表現する。 */}
         </svg>
+
+        {/* v0.1.10:非アクティブ時のオーバーレイヒント。
+            マップ全体をカバーする透明レイヤーで pointer 通過を許容。
+            右下に「クリックで操作」小バッジを浮かせる。 */}
+        {!mapInteractive && (
+          <div
+            className="absolute inset-0 flex items-end justify-end pointer-events-none"
+            aria-hidden="true"
+          >
+            <div
+              className="m-3 px-3 py-1.5 rounded-full text-[11px] font-semibold shadow-sm border"
+              style={{
+                background: "rgba(20,184,166,0.14)",
+                color: "#0d9488",
+                borderColor: "rgba(20,184,166,0.4)",
+                backdropFilter: "blur(2px)",
+              }}
+            >
+              {language === "ja"
+                ? "クリックして操作を有効化"
+                : "Click to enable interaction"}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 凡例 */}

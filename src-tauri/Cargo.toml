@@ -28,4 +28,9 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
+# v0.1.10 ファイル監視:コード保存を検知して自動で再スキャンさせるため。
+#   notify: OS ネイティブのファイルシステムイベント
+#   notify-debouncer-mini: 保存時の連続イベントを 500ms でデバウンス
+notify = "6"
+notify-debouncer-mini = "0.4"
 

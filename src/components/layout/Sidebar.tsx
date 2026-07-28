@@ -25,6 +25,8 @@ type SidebarProps = {
   onSelectTab: (folderPath: string) => void;
   onCloseTab: (folderPath: string) => void;
   language: Language;
+  /** v0.1.10:ガイド付きツアーを開始するコールバック */
+  onStartTour?: () => void;
 };
 
 function shortFolder(path: string): string {
@@ -48,6 +50,7 @@ function Sidebar({
   onSelectTab,
   onCloseTab,
   language,
+  onStartTour,
 }: SidebarProps) {
   const T = t(language).sidebar;
   const navItems: NavItem[] = [
@@ -111,6 +114,7 @@ function Sidebar({
                 <button
                   type="button"
                   onClick={() => onNavChange(item.key)}
+                  data-tour={`nav-${item.key}`}
                   className="w-full text-left rounded-[10px] px-3 py-2.5 flex items-start gap-3 transition-all cursor-pointer"
                   style={
                     active
@@ -355,7 +359,7 @@ function Sidebar({
 
       {/* tips カード(deep navy 上で teal アクセント)*/}
       <div
-        className="mx-3 mb-3 rounded-[12px] p-3"
+        className="mx-3 mb-2 rounded-[12px] p-3"
         style={{ background: "var(--color-nav-bg-card)" }}
       >
         <div className="flex items-start gap-2">
@@ -381,6 +385,45 @@ function Sidebar({
           </div>
         </div>
       </div>
+
+      {/* v0.1.10:ガイド付きツアー起動ボタン */}
+      {onStartTour && (
+        <div className="mx-3 mb-3">
+          <button
+            type="button"
+            onClick={onStartTour}
+            className="w-full flex items-center justify-center gap-1.5 rounded-[10px] px-3 py-2 text-[12px] font-medium transition-colors cursor-pointer"
+            style={{
+              background: "rgba(20,184,166,0.15)",
+              color: "var(--color-nav-accent)",
+              border: "1px solid rgba(20,184,166,0.3)",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "rgba(20,184,166,0.25)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "rgba(20,184,166,0.15)";
+            }}
+            title={T.tourButtonTitle}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="w-3.5 h-3.5"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M9 9 A3 3 0 1 1 12 13 V14" />
+              <circle cx="12" cy="17" r="0.5" fill="currentColor" />
+            </svg>
+            {T.tourButtonLabel}
+          </button>
+        </div>
+      )}
 
     </aside>
   );

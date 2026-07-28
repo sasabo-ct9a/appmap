@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use std::io::Read;
+use std::io::{Read, Write};
 
 use futures_util::StreamExt;
 use tauri::{Emitter, Manager, State};
@@ -367,8 +367,11 @@ async fn claude_login() -> Result<String, String> {
     let path_env = augmented_path();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // v0.1.10:`claude login` は無効。正しくは `claude auth login`(OAuth ブラウザフロー起動)。
+        //   以前の実装ミス:i18n の説明文でも `claude auth login` と案内していたのに、
+        //   Rust 側は誤って `claude login` を呼んでいて exit code 1 で常に失敗していた。
         let mut child = StdCommand::new(&exe)
-            .arg("login")
+            .args(["auth", "login"])
             .env("PATH", &path_env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -974,24 +977,48 @@ async fn llama_analyze(
 async fn claude_chat(system_prompt: String, user_prompt: String, model: String) -> Result<String, String> {
     let exe = find_claude_exe()?;
     let path_env = augmented_path();
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        StdCommand::new(&exe)
+    // v0.1.9:user_prompt を stdin 経由で渡す。
+    //   理由:Windows の CreateProcess のコマンドライン長制限(32,768 文字)を回避するため。
+    //   深掘り機能では 64KB のコード + プロンプトを渡すので、argv だと `os error 206
+    //   (ファイル名または拡張子が長すぎます)` で spawn 失敗する。
+    //   Claude CLI は `-p` 引数なしで起動すると stdin からプロンプトを読む仕様。
+    let output = tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
+        let mut child = StdCommand::new(&exe)
             .args([
                 "-p",
-                &user_prompt,
                 "--model",
                 &model,
                 "--system-prompt",
                 &system_prompt,
+                // v0.1.10:1 だと大きなプロンプト(深掘りで JSON を返す等)で
+                // `Reached max turns (1)` エラーが出る。5 なら Q&A / 深掘り両方に十分。
                 "--max-turns",
-                "1",
+                "5",
             ])
             .env("PATH", &path_env)
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {}", e))?;
+
+        // stdin に user_prompt を書き込む(drop でクローズされ、CLI に EOF が伝わる)
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "failed to open claude stdin".to_string())?;
+            stdin
+                .write_all(user_prompt.as_bytes())
+                .map_err(|e| format!("failed to write to claude stdin: {}", e))?;
+        }
+
+        child
+            .wait_with_output()
+            .map_err(|e| format!("failed to wait for claude: {}", e))
     })
     .await
-    .map_err(|e| format!("join error: {}", e))?
-    .map_err(|e| format!("failed to spawn claude: {}", e))?;
+    .map_err(|e| format!("join error: {}", e))??;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1194,7 +1221,16 @@ async fn read_files_for_qa(
 struct PreReleaseScanResult {
     secrets: Vec<ScanHit>,
     todos: Vec<ScanHit>,
-    console_logs: usize,
+    // v0.1.10(Codex 指摘 Medium #4 対応):件数だけでなく file:line も返す。
+    //   count だけだと Cursor に「XX 箇所削除して」と依頼した時に全体 grep で
+    //   意図的な console.error まで巻き込む過剰修正リスクがあった。
+    console_logs: Vec<ScanHit>,
+    // v0.1.10(Codex 二次指摘 Medium #4 対応):truncate 前の総数。
+    //   secrets/todos/console_logs は payload を軽くするため truncate しているが、
+    //   UI/AI prompt での count 表示は truncate 後ではなく総数を使う必要がある。
+    secrets_total: usize,
+    todos_total: usize,
+    console_logs_total: usize,
     files_scanned: usize,
     files_truncated: bool,
     /// v0.1.8:設定ファイル+package.json を実物 grep してリアルタイム検出。
@@ -1243,29 +1279,68 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         "vue", "svelte", "html", "css", "json", "toml", "yaml", "yml",
         "env", "sh", "ps1",
     ];
-    const MAX_FILES: usize = 200;
+    // v0.1.10(Codex 指摘 Medium #6 対応):
+    //   - MAX_SCAN_FILES:ソース内容を読む上限(現状値を維持、パフォーマンス保護)
+    //   - MAX_WALK_FILES:ファイル名リストの上限(test framework/test file 検出は
+    //     名前だけ見るので大きめに)
+    //   分離することで monorepo で source が 200 件超えても test framework は
+    //   落とさない。
+    const MAX_SCAN_FILES: usize = 200;
+    const MAX_WALK_FILES: usize = 10_000;
 
     // シークレット系:プレフィックス or キー名パターン
     // 誤検知を減らすため、代入っぽい表現(= の右側 or : の後)に絞る
+    // v0.1.10(Codex 指摘 Medium #5 対応):代表的な token prefix を追加。
     let secret_needles: &[(&str, &str)] = &[
         ("sk-", "openai-like key"),
         ("sk_live_", "stripe live key"),
         ("sk_test_", "stripe test key"),
+        ("pk_live_", "stripe publishable live"),
+        ("rk_live_", "stripe restricted live"),
+        ("whsec_", "stripe webhook secret"),
         ("AKIA", "aws access key id"),
+        ("ASIA", "aws temporary access key"),
         ("AIza", "google api key"),
         ("ghp_", "github personal token"),
+        ("gho_", "github oauth token"),
+        ("ghu_", "github user token"),
+        ("ghs_", "github server token"),
+        ("ghr_", "github refresh token"),
+        ("github_pat_", "github fine-grained pat"),
         ("xoxb-", "slack bot token"),
         ("xoxp-", "slack user token"),
+        ("xoxa-", "slack workspace token"),
+        ("xoxs-", "slack app token"),
+        ("dckr_pat_", "docker hub pat"),
+        ("SG.", "sendgrid api key"),
+        ("mongodb+srv://", "mongodb connection string"),
+        ("postgres://", "postgres connection string"),
+        ("postgresql://", "postgres connection string"),
+        ("mysql://", "mysql connection string"),
+        ("redis://", "redis connection string"),
         ("-----BEGIN RSA PRIVATE KEY-----", "private key"),
+        ("-----BEGIN OPENSSH PRIVATE KEY-----", "openssh private key"),
         ("-----BEGIN PRIVATE KEY-----", "private key"),
+        ("-----BEGIN EC PRIVATE KEY-----", "ec private key"),
+        ("-----BEGIN DSA PRIVATE KEY-----", "dsa private key"),
     ];
     // 変数名系:api_key = "..." 形式 の左辺で拾う(右辺の非空 quote を要求)
+    // v0.1.10(Codex 指摘 Medium #5 対応):ENV 変数名で見かける代表的な名前を追加。
     let secret_var_names: &[&str] = &[
         "api_key", "apiKey", "api-key",
         "secret_key", "secretKey", "secret-key",
         "access_key", "accessKey",
+        "client_secret", "clientSecret",
         "password", "passwd", "pwd",
-        "token", "auth_token", "authToken",
+        "token", "auth_token", "authToken", "access_token", "accessToken", "refresh_token", "refreshToken",
+        "jwt_secret", "jwtSecret", "JWT_SECRET",
+        "session_secret", "sessionSecret", "SESSION_SECRET",
+        "webhook_secret", "webhookSecret",
+        "database_url", "DATABASE_URL", "databaseUrl",
+        "mongodb_uri", "MONGODB_URI", "mongoUri",
+        "redis_url", "REDIS_URL",
+        "encryption_key", "encryptionKey", "ENCRYPTION_KEY",
+        "private_key", "privateKey", "PRIVATE_KEY",
     ];
     // 実際の作業マーカーだけに絞る。XXX は "env.XXX" / "example.com/xxx" などのプレースホルダで
     // 誤検知が多すぎるので外す(HACK/FIXME/TODO で必要十分)。
@@ -1273,7 +1348,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
 
     let mut secrets: Vec<ScanHit> = Vec::new();
     let mut todos: Vec<ScanHit> = Vec::new();
-    let mut console_logs: usize = 0;
+    let mut console_logs: Vec<ScanHit> = Vec::new();
     let mut files_scanned: usize = 0;
     let mut files_truncated = false;
     let mut detected_test_framework: Option<String> = None;
@@ -1281,32 +1356,61 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
 
     // v0.1.8 セキュリティ:.env の存在 + .gitignore カバー状況を独立に判定
     // (この 2 つの and で「危険な状態」を確定させる。ファイル読み取りだけ、依存なし)
+    //
+    // v0.1.10(Codex 二次指摘 High #2 対応):
+    //   従来は「.env / .env* / ...」の完全一致だけを見ていたため、`.env.local` に
+    //   `.env.local` パターンで保護してあっても covered 扱いにならず誤って
+    //   env-unprotected finding が出ていた。実存する env file 名 1 つずつを
+    //   小さな glob matcher で判定する形に置き換える。
     let env_names = &[
         ".env", ".env.local", ".env.development", ".env.production",
         ".env.dev", ".env.prod", ".env.staging",
     ];
-    let env_files_present = env_names
+    let existing_env_files: Vec<&str> = env_names
         .iter()
-        .any(|n| folder_path.join(n).exists());
-    let env_covered_by_gitignore = {
+        .filter(|n| folder_path.join(n).exists())
+        .copied()
+        .collect();
+    let env_files_present = !existing_env_files.is_empty();
+    let env_covered_by_gitignore = if !env_files_present {
+        // 対象ファイルが無ければ「守るものが無い」→ true 扱いで finding は発火しない
+        true
+    } else {
         let gi_path = folder_path.join(".gitignore");
         match std::fs::read_to_string(&gi_path) {
             Ok(content) => {
-                // .gitignore の各行(コメント・空行を除く)で `.env` を実質カバーするパターン
-                content.lines().any(|line| {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') { return false; }
-                    // 否定ルール(先頭 !)は除外
-                    if trimmed.starts_with('!') { return false; }
-                    // よくあるパターン網羅:
-                    //   .env / .env.* / .env* / *.env / **/.env
-                    trimmed == ".env"
-                        || trimmed == ".env*"
-                        || trimmed == ".env.*"
-                        || trimmed == "*.env"
-                        || trimmed == "**/.env"
-                        || trimmed == "/.env"
-                        || trimmed.starts_with(".env ") // trailing whitespace/comment パターン
+                // v0.1.10(Codex 四次指摘 Medium #1 対応):
+                //   Git のルール評価は「上から順、最後に一致したルールが勝ち」。
+                //   前の実装(positive/negation を集合として扱う)は
+                //     `!.env.production` → `.env*` の順で Git は ignore するのに
+                //     未保護扱いにする、といった順序依存を落とすバグがあった。
+                //   ここでは (pattern, is_negation) のタプルで順序保存し、
+                //   ファイルごとに上から評価して最後の match 結果を採用する。
+                let rules: Vec<(&str, bool)> = content
+                    .lines()
+                    .filter_map(|line| {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            return None;
+                        }
+                        let first = trimmed.split_whitespace().next()?;
+                        if let Some(stripped) = first.strip_prefix('!') {
+                            Some((stripped, true)) // negation
+                        } else {
+                            Some((first, false)) // positive
+                        }
+                    })
+                    .collect();
+                existing_env_files.iter().all(|f| {
+                    // Git 挙動:マッチしたルールがなければ ignored=false、
+                    //           あれば「最後にマッチしたルール」の種類で決定。
+                    let mut ignored = false;
+                    for (pattern, is_negation) in &rules {
+                        if gitignore_pattern_matches(pattern, f) {
+                            ignored = !is_negation; // positive で ignore、negation で un-ignore
+                        }
+                    }
+                    ignored
                 })
             }
             Err(_) => false, // .gitignore 自体が無い = カバーしていない
@@ -1343,13 +1447,15 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     let folder_owned = folder_path.clone();
     let file_list: Vec<PathBuf> = tauri::async_runtime::spawn_blocking(move || {
         let mut list = Vec::new();
-        walk(&folder_owned, &folder_owned, SKIP_DIRS, INCLUDE_EXTS, &mut list, MAX_FILES);
+        walk(&folder_owned, &folder_owned, SKIP_DIRS, INCLUDE_EXTS, &mut list, MAX_WALK_FILES);
         list
     })
     .await
     .map_err(|e| format!("join error: {}", e))?;
 
-    if file_list.len() >= MAX_FILES {
+    // 「打ち切り表示」は content scan の上限で判断(名前列挙は 10k まで持つので、
+    // ユーザーが気にする「見てもらえたか」の閾値は content 読み込みの方)。
+    if file_list.len() > MAX_SCAN_FILES {
         files_truncated = true;
     }
 
@@ -1394,27 +1500,44 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     }
 
     // 4) package.json の dep 探索(まだ検出できていなければ)
+    //    v0.1.10(Codex 指摘 Medium #6 対応):root だけでなく apps/*/ や
+    //    packages/*/ の package.json も見る(pnpm/yarn/npm workspace 対応)。
     if detected_test_framework.is_none() {
-        let pkg_json = folder_path.join("package.json");
-        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
-            // 単純 substring 検索:名前が含まれていれば十分
-            let candidates = [
-                ("\"vitest\"", "Vitest"),
-                ("\"jest\"", "Jest"),
-                ("\"@playwright/test\"", "Playwright"),
-                ("\"cypress\"", "Cypress"),
-                ("\"mocha\"", "Mocha"),
-                ("\"jasmine\"", "Jasmine"),
-                ("\"karma\"", "Karma"),
-                ("\"ava\"", "AVA"),
-            ];
-            for (needle, name) in candidates {
-                if content.contains(needle) {
-                    detected_test_framework = Some(name.to_string());
-                    break;
+        let candidates = [
+            ("\"vitest\"", "Vitest"),
+            ("\"jest\"", "Jest"),
+            ("\"@playwright/test\"", "Playwright"),
+            ("\"cypress\"", "Cypress"),
+            ("\"mocha\"", "Mocha"),
+            ("\"jasmine\"", "Jasmine"),
+            ("\"karma\"", "Karma"),
+            ("\"ava\"", "AVA"),
+        ];
+
+        // 探索候補パス:root + monorepo 慣例の apps/*/packages/*
+        let mut pkg_paths: Vec<PathBuf> = vec![folder_path.join("package.json")];
+        for mono_dir in ["apps", "packages", "services"] {
+            let base = folder_path.join(mono_dir);
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        pkg_paths.push(p.join("package.json"));
+                    }
                 }
             }
         }
+
+        'outer: for pkg_json in &pkg_paths {
+            let Ok(content) = std::fs::read_to_string(pkg_json) else { continue };
+            for (needle, name) in candidates {
+                if content.contains(needle) {
+                    detected_test_framework = Some(name.to_string());
+                    break 'outer;
+                }
+            }
+        }
+
         // Python: requirements.txt / pyproject.toml
         if detected_test_framework.is_none() {
             for req_name in ["requirements.txt", "requirements-dev.txt", "pyproject.toml"] {
@@ -1429,7 +1552,10 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         }
     }
 
-    for path in file_list {
+    // v0.1.10(Codex 指摘 Medium #6):content 読み込みは MAX_SCAN_FILES で打ち切る。
+    //   file_list 自体は上流で MAX_WALK_FILES(10k)までを許容してあり、
+    //   test framework/test file 検出のループは既にそちらを消化済み。
+    for path in file_list.into_iter().take(MAX_SCAN_FILES) {
         let Ok(content) = std::fs::read_to_string(&path) else { continue };
         files_scanned += 1;
         let rel = path.strip_prefix(&folder_path).unwrap_or(&path)
@@ -1508,25 +1634,43 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                 }
             }
 
-            // 4) console.log の数え上げ(JS/TS 系のみ、文字列リテラル内は除外)
+            // 4) console.log 検出(JS/TS 系のみ、文字列リテラル内は除外)
+            //   v0.1.10(Codex 指摘 Medium #4):件数だけでなく file:line も記録。
+            //   Cursor に「XX 箇所削除して」ではなく具体場所を渡せるようになり、
+            //   意図的な console.error を巻き込む過剰修正が起きにくくなる。
             if !is_commentish
                 && (rel.ends_with(".ts") || rel.ends_with(".tsx")
                     || rel.ends_with(".js") || rel.ends_with(".jsx"))
                 && is_real_console_log(raw_line)
             {
-                console_logs += 1;
+                console_logs.push(ScanHit {
+                    file: rel.clone(),
+                    line: line_num,
+                    snippet: raw_line.chars().take(120).collect::<String>().trim().to_string(),
+                    kind: "console.log".to_string(),
+                });
             }
+
         }
     }
 
-    // ノイズ削減:同ファイルで多発する項目は先頭 20 件までに絞る
+    // v0.1.10(Codex 二次指摘 Medium #4):truncate 前に総数を保存。
+    let secrets_total = secrets.len();
+    let todos_total = todos.len();
+    let console_logs_total = console_logs.len();
+
+    // ノイズ削減:同ファイルで多発する項目は先頭 N 件までに絞る
     secrets.truncate(20);
     todos.truncate(50);
+    console_logs.truncate(50);
 
     Ok(PreReleaseScanResult {
         secrets,
         todos,
         console_logs,
+        secrets_total,
+        todos_total,
+        console_logs_total,
         files_scanned,
         files_truncated,
         detected_test_framework,
@@ -1534,6 +1678,65 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         env_files_present,
         env_covered_by_gitignore,
     })
+}
+
+// v0.1.10:detect_potential_error は誤検知率が高すぎて実害の方が大きく、削除。
+// リリース前チェックは信頼度の高い実 grep ベース検出のみに絞った。
+
+/// v0.1.10(Codex 二次指摘 High #2 対応):.gitignore のパターン 1 行が、
+/// 指定のファイル名にマッチするかを判定する(最小 glob 実装)。
+///
+/// サポート:
+///   - `*` ワイルドカード(任意文字列にマッチ、`/` も含む・シンプル)
+///   - 先頭 `/` 除去(root-relative パターン扱い)
+///   - 先頭 `**/` 除去(サブディレクトリ再帰、file 名判定なので実質同義)
+///   - 末尾 `/` 除去(ディレクトリ指定は今回無視)
+/// 制限:
+///   - `?` は非対応(実運用でほぼ使われない)
+///   - `[abc]` クラスは非対応
+///   - 否定ルール `!` は呼び出し側で事前に除外している前提
+fn gitignore_pattern_matches(pattern: &str, filename: &str) -> bool {
+    let mut p = pattern;
+    p = p.strip_prefix('/').unwrap_or(p);
+    p = p.strip_prefix("**/").unwrap_or(p);
+    p = p.strip_suffix('/').unwrap_or(p);
+
+    if p == filename {
+        return true;
+    }
+    // `*` を含まないなら完全一致以外はマッチしない
+    if !p.contains('*') {
+        return false;
+    }
+
+    // `*` で分割して順序どおり出現するか確認
+    let parts: Vec<&str> = p.split('*').collect();
+    let mut pos = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            // 連続 * / 先頭 * / 末尾 * のダミー要素はスキップ
+            continue;
+        }
+        if i == 0 {
+            // 最初の非空 part は先頭マッチ
+            if !filename[pos..].starts_with(part) {
+                return false;
+            }
+            pos += part.len();
+        } else if i == parts.len() - 1 {
+            // 最後の非空 part は末尾マッチ(pos 以降が part で終わるか)
+            if !filename[pos..].ends_with(part) {
+                return false;
+            }
+        } else {
+            // 中間 part は pos 以降のどこかに出現
+            match filename[pos..].find(part) {
+                Some(idx) => pos += idx + part.len(),
+                None => return false,
+            }
+        }
+    }
+    true
 }
 
 /// v0.1.8:プレフィックス マッチが「実際の秘密キー」らしいか判定する。
@@ -1570,6 +1773,29 @@ fn is_plausible_secret_hit(line: &str, prefix: &str) -> bool {
                 }
             }
         }
+    }
+
+    // ルール 1.5(Codex 二次指摘 Low #6 対応):URL 形式の prefix は
+    //   credential 分離子 `@` を含む場合のみ secret 扱いにする。
+    //   例:`mongodb+srv://user:pass@host/db` → 検出
+    //       `mongodb+srv://localhost/app`     → 誤検知扱いで棄却
+    //   接続先ホスト名は情報漏洩リスクこそあれ「秘密キー」ではないため、
+    //   リリース前チェックとしては credential ありのみに絞る。
+    if prefix.ends_with("://") {
+        let tail = &line[prefix_end..];
+        // 空白 / クオート / セミコロン / バッククォート で URL 終端と判断
+        let terminator = tail.find(|c: char| {
+            c.is_whitespace() || c == '"' || c == '\'' || c == ';' || c == '`' || c == '<'
+        });
+        let body = match terminator {
+            Some(pos) => &tail[..pos],
+            None => tail,
+        };
+        if !body.contains('@') {
+            return false;
+        }
+        // credential ありなら以下のルール 2/3 を通さず即真(URL 自体で 20 字超)
+        return true;
     }
 
     // ルール 3:長いプレフィックスは本体長さ判定をスキップ(--BEGIN PRIVATE KEY-- 等)
@@ -1626,6 +1852,33 @@ fn is_tag_in_real_comment(line: &str, tag: &str) -> bool {
         return false;
     }
 
+    // ルール 3.5(Codex 指摘 Medium #3 対応):tracked TODO/FIXME は finding にしない。
+    //   `TODO(#123): xxx` `TODO(ISSUE-42): xxx` `TODO(123): xxx` は
+    //   既に issue に紐付いた既知タスク。fixSteps でユーザーに
+    //   「issue 番号付きに整理して」と依頼するので、これを再検出すると
+    //   Cursor が指示通り直しても finding が消えず矛盾する。
+    //
+    //   v0.1.10(Codex 二次指摘 Low #5 対応):`TODO(@user)` は tracked 扱いから
+    //   外す。owner が付いてるだけでは「作業が管理されている」ことを保証しない
+    //   (実際は担当者が付いた未完了タスクこそ出荷前に見逃したくない)。
+    if after_ch == '(' {
+        let after_paren = &line[after + 1..];
+        if let Some(close_pos) = after_paren.find(')') {
+            let inside = after_paren[..close_pos].trim();
+            if !inside.is_empty() {
+                let is_tracked = inside.starts_with('#')      // #123
+                    || inside.chars().all(|c| c.is_ascii_digit()) // 123
+                    // JIRA / linear 風:PROJECT-123 / ENG-42
+                    || (inside.contains('-')
+                        && inside.chars().any(|c| c.is_ascii_digit())
+                        && inside.chars().next().map_or(false, |c| c.is_ascii_alphabetic()));
+                if is_tracked {
+                    return false;
+                }
+            }
+        }
+    }
+
     // ルール 4:コメント境界
     let before_slice = &line[..idx];
     let trimmed = line.trim_start();
@@ -1652,20 +1905,38 @@ fn is_tag_in_real_comment(line: &str, tag: &str) -> bool {
 
 /// v0.1.8:`console.log` が「実際のコード呼び出し」か判定する。
 /// 文字列リテラル・doc コメント内の説明的な `console.log` を誤検知しない。
-///   - 単語境界チェック(`foo.console.log` はあまりないが念のため)
-///   - 引用符囲みの中にあるなら棄却
-///   - `.log(` の呼び出し形をあわせて要求(`console.log` 単独出現も棄却)
+///
+/// v0.1.10(Codex 指摘 Low #7 対応):
+///   - `console.log(` に加え `console.log (`(空白許容)と `console?.log(`(optional chaining)も検出
 fn is_real_console_log(line: &str) -> bool {
-    let target = "console.log";
-    let Some(idx) = line.find(target) else { return false };
+    // マッチ候補と、それぞれの「タグ直後にどこまで空白を許すか」の判定は
+    // 共通ロジックにまとめる。まず候補位置を探す。
+    let candidates = [
+        ("console.log", 11),
+        ("console?.log", 12),
+    ];
 
-    // 呼び出し形:直後が `(` であることを要求(`console.log(...)` の形)
-    let after = idx + target.len();
-    if after >= line.len() || line.as_bytes()[after] != b'(' {
-        return false;
+    for (target, target_len) in candidates {
+        let mut search_from = 0usize;
+        while let Some(rel_idx) = line[search_from..].find(target) {
+            let idx = search_from + rel_idx;
+            // 直後は空白 0〜複数を許容してから `(` を要求
+            let after_target = idx + target_len;
+            let rest = &line[after_target..];
+            let stripped = rest.trim_start();
+            let paren_ok = stripped.starts_with('(');
+            if paren_ok && !is_inside_string_literal(line, idx) {
+                return true;
+            }
+            search_from = after_target;
+        }
     }
+    false
+}
 
-    // 文字列リテラル内(直前までの引用符が奇数個)なら棄却
+/// v0.1.10:`idx` の位置が文字列リテラル内かを判定するヘルパ。
+/// `'` `"` `` ` `` の奇偶で in-quote 状態を追う。
+fn is_inside_string_literal(line: &str, idx: usize) -> bool {
     let mut in_single = false;
     let mut in_double = false;
     let mut in_back = false;
@@ -1678,7 +1949,7 @@ fn is_real_console_log(line: &str) -> bool {
             _ => {}
         }
     }
-    !(in_single || in_double || in_back)
+    in_single || in_double || in_back
 }
 
 /// 値そのものを晒さないための伏せ字化。
@@ -1715,6 +1986,123 @@ fn mask_snippet(line: &str) -> String {
 // /v0.1.7 ローカル LLM 機能ここまで
 // ═════════════════════════════════════════════════════════════════════
 
+// ═════════════════════════════════════════════════════════════════════
+// v0.1.10 ファイル監視:選択中フォルダ配下のコード保存を検知して
+//   frontend に "folder-changed" イベントを emit する。
+//   frontend 側はそれを受けて再スキャンを自動実行する。
+//
+//   実装:
+//     - notify-debouncer-mini で 500ms のデバウンス(保存時の連続イベント吸収)
+//     - .git / node_modules / dist / target / build / .DS_Store 等は無視
+//     - Debouncer は Mutex に格納して 1 プロジェクト = 1 監視。
+//       start_folder_watch を再度呼ぶと古い debouncer が drop されて自動停止
+// ═════════════════════════════════════════════════════════════════════
+
+use notify::RecommendedWatcher;
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub struct WatchState {
+    // (watcher_id, Debouncer)。id は「誰が仕掛けたか」の識別。
+    // stop は自分の id を指定した時だけクリア → 古い stop が新 watcher を殺す
+    // race(Codex 指摘 High #1・#2)を防ぐ。
+    debouncer: Mutex<Option<(u64, Debouncer<RecommendedWatcher>)>>,
+    next_id: AtomicU64,
+}
+
+fn should_ignore_watch_path(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some(".git")
+                | Some("node_modules")
+                | Some("dist")
+                | Some("target")
+                | Some("build")
+                | Some(".next")
+                | Some(".turbo")
+                | Some(".vite")
+                | Some(".DS_Store")
+                | Some(".idea")
+                | Some(".vscode")
+        )
+    })
+}
+
+#[tauri::command]
+fn start_folder_watch(
+    folder: String,
+    app: tauri::AppHandle,
+    state: State<'_, WatchState>,
+) -> Result<u64, String> {
+    let folder_path = PathBuf::from(&folder);
+    if !folder_path.exists() {
+        return Err(format!("folder does not exist: {}", folder));
+    }
+
+    // v0.1.10(Codex 二次指摘 High #1 対応):
+    //   自分の id を先に取っておく。install 時点で「もっと新しい start が
+    //   既に current に入っていたら install しない」ようにするため。
+    //   これで「古い start 完了 → 新 watcher を上書き」の race を防ぐ。
+    let new_id = state.next_id.fetch_add(1, Ordering::SeqCst);
+
+    let app_clone = app.clone();
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(500),
+        move |result: DebounceEventResult| {
+            if let Ok(events) = result {
+                // 監視対象外(ビルド生成物・.git 等)しか変わってなければ無視
+                let interesting = events
+                    .iter()
+                    .any(|e| !should_ignore_watch_path(&e.path));
+                if interesting {
+                    // frontend に通知(payload は不要)
+                    let _ = app_clone.emit("folder-changed", ());
+                }
+            }
+        },
+    )
+    .map_err(|e| format!("failed to create watcher: {}", e))?;
+
+    debouncer
+        .watcher()
+        .watch(&folder_path, notify::RecursiveMode::Recursive)
+        .map_err(|e| format!("failed to watch folder: {}", e))?;
+
+    let mut current = state
+        .debouncer
+        .lock()
+        .map_err(|_| "watch state mutex poisoned".to_string())?;
+    // Install ガード:current の id が自分より新しい(=別の start が既に完了して
+    // 上書き済み)ときは自分を install しない。自分の debouncer はここで drop → 停止。
+    let should_install = current
+        .as_ref()
+        .map_or(true, |(cur_id, _)| *cur_id < new_id);
+    if should_install {
+        *current = Some((new_id, debouncer));
+    }
+    // else: 自分は古い start だった。debouncer を drop して黙って終了。
+    // 呼び出し側は new_id を受け取るが、stop_folder_watch(new_id) は id 不一致で no-op。
+    Ok(new_id)
+}
+
+/// v0.1.10 更新:id を要求する形にして race を防ぐ。
+///   - id が現在の watcher と一致 → クリア
+///   - 一致しない → 既に別の watcher が上書きしている(自分は「古い stop」)。何もしない。
+#[tauri::command]
+fn stop_folder_watch(id: u64, state: State<'_, WatchState>) -> Result<(), String> {
+    let mut current = state
+        .debouncer
+        .lock()
+        .map_err(|_| "watch state mutex poisoned".to_string())?;
+    if let Some((current_id, _)) = current.as_ref() {
+        if *current_id == id {
+            *current = None;
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1724,6 +2112,11 @@ pub fn run() {
         // v0.1.7: ローカル LLM 用 state(llama-server プロセスの ownership を保持)
         .manage(LlamaState {
             server: Mutex::new(None),
+        })
+        // v0.1.10:ファイル監視 state(選択中フォルダの Debouncer を 1 個だけ保持)
+        .manage(WatchState {
+            debouncer: Mutex::new(None),
+            next_id: AtomicU64::new(1),
         })
         .invoke_handler(tauri::generate_handler![
             claude_check_version,
@@ -1748,6 +2141,9 @@ pub fn run() {
             open_in_editor,
             // v0.1.8 Q&A 精度向上:関連ファイルの実コードを読んで AI に渡す
             read_files_for_qa,
+            // v0.1.10 ファイル監視(選択中フォルダの変更検知 → frontend に emit)
+            start_folder_watch,
+            stop_folder_watch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

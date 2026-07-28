@@ -17,6 +17,8 @@ type ButtonProps = {
   disabled?: boolean;
   onClick?: () => void;
   children: ReactNode;
+  /** v0.1.10:ガイド付きツアーの対象マーカー */
+  dataTour?: string;
 };
 
 // v0.1.7 大刷新:LIGHT モードに合わせて色更新。Primary は teal、Secondary は白背景 + ink テキスト。
@@ -33,12 +35,14 @@ function Button({
   disabled,
   onClick,
   children,
+  dataTour,
 }: ButtonProps) {
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={disabled}
+      data-tour={dataTour}
       className={`px-4 py-2 rounded-[14px] text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${VARIANT_CLASSES[variant]}`}
     >
       {children}

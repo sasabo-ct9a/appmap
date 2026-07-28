@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ScreenMapResult } from "../../lib/claudeCli";
 import type { Language } from "../../lib/i18n";
+// v0.1.10:Engine import は AI 深掘り削除により不要に
 import {
   buildAIFixPrompt,
   buildFindings,
@@ -12,6 +15,8 @@ import {
   type Severity,
   type Verdict,
 } from "../../lib/preReleaseCheck";
+// v0.1.10:AI 深掘り機能は全削除。リリース前チェックは実 grep ベースの
+// 信頼度の高い検出結果のみを表示する構成に。
 
 /**
  * v0.1.8 リリース前チェック UI。
@@ -67,32 +72,129 @@ function PreReleaseChecklist({
   const [scanError, setScanError] = useState<string | null>(null);
   // v0.1.8:AI 修正プロンプトのモーダル
   const [promptOpen, setPromptOpen] = useState<boolean>(false);
+  // v0.1.9:「このチェックで確認していること」の折り畳み開閉
+  const [scopeOpen, setScopeOpen] = useState<boolean>(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    setScanError(null);
-    if (!folderPath) {
+  // v0.1.10(Codex 指摘 Low #8 対応):scan の進行状態を ref でも持つ。
+  //   file-changed イベントハンドラの中で「今 scan 中?」を判定するため。
+  //   state だと stale closure になり、debounce 直後に scan が重なる可能性がある。
+  //   同時に、scan 中にイベントが来た場合は「pending」フラグを立てて、
+  //   scan 完了直後に 1 度だけ追いスキャン → backlog を防ぐ。
+  //
+  //   v0.1.10 追加(Codex 二次指摘 Medium #3 対応):folderPath 変更時に
+  //   pending を必ずクリアする + scanNow 内で「実行時点の folderPath」を
+  //   snapshot して比較。これで folder 切替直後の flush が古いフォルダで
+  //   走って setScan する事故を防ぐ。
+  const scanningRef = useRef(false);
+  const pendingRescanRef = useRef(false);
+  const scanNowRef = useRef<() => void>(() => {});
+  // v0.1.10(Codex 三次指摘 Medium #1 対応):現在の folderPath を ref でも保持。
+  //   scan 完了時に「まだ同じ folder を見ているか」を確認して setScan するため。
+  //   folderPath 変更中に古い scan が完走しても、B の画面に A の結果が
+  //   一時表示される事故を防ぐ。
+  //
+  //   v0.1.10 追加(Codex 四次指摘 Low #2 対応):ref 更新は useEffect(passive)
+  //   ではなく render body で同期。commit と useEffect の間に scan promise が
+  //   resolve すると ref が古いままの race を潰す。ref の mutation は React の
+  //   render-purity 制約に触れない(state 更新と違って再 render 誘発しない)。
+  const folderPathRef = useRef(folderPath);
+  folderPathRef.current = folderPath;
+
+  // v0.1.10:スキャン実行を関数化(初回 + フォーカス時 + 手動更新ボタンで共通に使う)
+  const scanNow = useCallback(() => {
+    const targetFolder = folderPath; // この scan が走っている間の「対象」を固定
+    if (!targetFolder) {
       setScan(null);
+      setScanError(null);
       return;
     }
+    // 既に走ってる時はキューに 1 件だけ立てて終わる(coalescing)
+    if (scanningRef.current) {
+      pendingRescanRef.current = true;
+      return;
+    }
+    scanningRef.current = true;
+    setScanError(null);
     setScanning(true);
-    runCodeScan(folderPath)
+    runCodeScan(targetFolder)
       .then((result) => {
-        if (!cancelled) setScan(result);
+        // 完了時点で folder が変わっていたら結果を捨てる(stale scan 破棄)
+        if (folderPathRef.current === targetFolder) {
+          setScan(result);
+        }
       })
       .catch((err) => {
-        if (!cancelled) {
+        if (folderPathRef.current === targetFolder) {
           setScan(null);
           setScanError(err instanceof Error ? err.message : String(err));
         }
       })
       .finally(() => {
-        if (!cancelled) setScanning(false);
+        scanningRef.current = false;
+        setScanning(false);
+        if (pendingRescanRef.current) {
+          pendingRescanRef.current = false;
+          // 最新の scanNow(= 最新の folderPath に bind)で再実行。
+          // 微タスク遅延で state 反映後、かつ folder 切替が反映された後に flush。
+          Promise.resolve().then(() => scanNowRef.current());
+        }
       });
+  }, [folderPath]);
+
+  // scanNowRef は常に最新の scanNow を指す(microtask flush から使う)
+  // v0.1.10(Codex 五次指摘 Low #1 対応):useEffect(passive)ではなく render body で同期。
+  //   folderPathRef と同じ理由:folder 切替直後に旧 scanNow が flush 経由で
+  //   走ると、古いフォルダの scan が余計に走って新フォルダの反映が遅れる。
+  scanNowRef.current = scanNow;
+
+  // folderPath が変わったら、古いフォルダに対する pending は捨てる
+  useEffect(() => {
+    pendingRescanRef.current = false;
+  }, [folderPath]);
+
+  // 初回 + folderPath 変更時
+  useEffect(() => {
+    scanNow();
+  }, [scanNow]);
+
+  // v0.1.10:ファイル監視で自動再スキャン。
+  //   Rust の notify-debouncer-mini(500ms デバウンス済み)がフォルダを常時監視。
+  //   Cursor / VS Code / vim / どのエディタで保存しても、CLI で書き換えても検知。
+  //
+  //   Codex 指摘 High #1・#2 対応:
+  //     - watcher の start は id(u64)を返す。stop は id 一致時のみクリアする。
+  //     - deps から scanning を外し、scanningRef 経由で参照。
+  //       (scanning を deps に入れていると scan 開始/終了ごとに watcher が
+  //        張り直され、古い stop が新 watcher を殺す race が起きる。)
+  useEffect(() => {
+    if (!folderPath) return;
+    let cancelled = false;
+    let myWatcherId: number | null = null;
+    invoke<number>("start_folder_watch", { folder: folderPath })
+      .then((id) => {
+        if (cancelled) {
+          // マウント中に unmount された場合。自分の watcher を即停止。
+          invoke("stop_folder_watch", { id }).catch(() => {});
+          return;
+        }
+        myWatcherId = id;
+      })
+      .catch((err) => {
+        console.warn("start_folder_watch failed:", err);
+      });
+    const unlistenPromise = listen<void>("folder-changed", () => {
+      if (cancelled) return;
+      // scan 中は pending フラグを立てるだけ(scanNow 内で判定)
+      scanNow();
+    });
     return () => {
       cancelled = true;
+      unlistenPromise.then((un) => un()).catch(() => {});
+      if (myWatcherId !== null) {
+        invoke("stop_folder_watch", { id: myWatcherId }).catch(() => {});
+      }
     };
-  }, [folderPath]);
+  }, [folderPath, scanNow]);
 
   const findings = buildFindings({ screens, scan, language });
   const highs = findings.filter((f) => f.severity === "high");
@@ -102,10 +204,10 @@ function PreReleaseChecklist({
 
   const isJa = language === "ja";
   const isSample = folderPath === null;
-  const heading = isJa ? "リリース前チェック" : "Pre-release check";
+  const heading = isJa ? "コードチェック" : "Code check";
   const intro = isJa
-    ? "本番に出す前に確認しておきたい項目を、危険度の高い順に並べています。"
-    : "Things to verify before shipping to production, sorted by risk.";
+    ? "スキャンしたコードを、危険度の高い順に並べています。"
+    : "Scanned code items, sorted by risk.";
   const emptyState = isJa
     ? "重大な問題は見つかりませんでした。出荷準備が整っています!"
     : "No serious issues found. You're ready to ship!";
@@ -122,39 +224,179 @@ function PreReleaseChecklist({
     isJa
       ? `対象ファイル ${n} 件${truncated ? "(200 件で打切り)" : ""}を検査済み`
       : `${n} files scanned${truncated ? " (capped at 200)" : ""}`;
+  // v0.1.9:このチェックが実際に何を見ているかの一覧(折り畳み)
+  const scopeTitle = isJa
+    ? "このチェックで確認していること"
+    : "What this check looks at";
+  type CheckItem = { name: string; desc: string };
+  // v0.1.10 スリム化:9 項目 → 5 項目。AI 主観判定や誤検知率高の項目を除外し、
+  //   実 grep / 実ファイル読みベースの高信頼度チェックに絞った。
+  const scopeItems: CheckItem[] = isJa
+    ? [
+        {
+          name: "秘密情報の直書き",
+          desc: "API キー・パスワード・トークンがコードに直接書かれていないか(正規表現でパターン検出)",
+        },
+        {
+          name: "テストフレームワーク",
+          desc: "Vitest / Jest / Pytest 等のテスト環境が導入されているか(package.json 等を実読)",
+        },
+        {
+          name: "テストファイル",
+          desc: "*.test.* / *.spec.* / __tests__/ 配下のファイルが存在するか",
+        },
+        {
+          name: "console.log の残り",
+          desc: "本番に出す前に消すべき console.log がコード中にどれくらい残っているか",
+        },
+        {
+          name: "TODO / FIXME コメント",
+          desc: "未対応の作業メモが放置されていないか",
+        },
+      ]
+    : [
+        {
+          name: "Hardcoded secrets",
+          desc: "API keys / passwords / tokens written directly in code (regex-based pattern detection)",
+        },
+        {
+          name: "Test framework",
+          desc: "Whether Vitest / Jest / Pytest etc. is installed (reads package.json etc. directly)",
+        },
+        {
+          name: "Test files",
+          desc: "Whether *.test.* / *.spec.* / __tests__/ files exist",
+        },
+        {
+          name: "Leftover console.log",
+          desc: "How many console.log statements remain that should be removed before shipping",
+        },
+        {
+          name: "TODO / FIXME comments",
+          desc: "Whether unfinished-work markers have been left in the code",
+        },
+      ];
 
   return (
     <div className="mb-6">
       {/* ヘッダー */}
       <div className="mb-4">
-        <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2 flex-wrap">
-          <ShieldIcon />
-          {heading}
-          {/* v0.1.8:サンプル表示中は amber バッジで明示(MapCanvas と統一) */}
-          {isSample && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <h1 className="text-2xl font-bold text-ink-strong flex items-center gap-2 flex-wrap">
+            <ShieldIcon />
+            {heading}
+            {/* v0.1.8:サンプル表示中は amber バッジで明示(MapCanvas と統一) */}
+            {isSample && (
+              <span
+                className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border"
+                style={{
+                  background: "rgba(212, 163, 115, 0.14)",
+                  color: "#8a5a2b",
+                  borderColor: "rgba(212, 163, 115, 0.55)",
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    display: "inline-block",
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: "#c98a3d",
+                  }}
+                />
+                {isJa ? "サンプル" : "Sample"}
+              </span>
+            )}
+          </h1>
+          {/* v0.1.10:手動更新ボタン。フォルダ選択済み時のみ表示、スキャン中は disable */}
+          {!isSample && (
+            <button
+              type="button"
+              onClick={scanNow}
+              disabled={scanning}
+              className={`ml-auto inline-flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-[10px] border transition-colors ${
+                scanning
+                  ? "text-ink-soft border-border-soft cursor-not-allowed opacity-60"
+                  : "text-ink-strong border-border-soft hover:bg-canvas cursor-pointer bg-paper"
+              }`}
+              title={
+                isJa
+                  ? "スキャン結果を今すぐ更新(Cursor で編集後に押すと最新化)"
+                  : "Re-run the scan now (press after editing in Cursor to refresh)"
+              }
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={`w-3.5 h-3.5 ${scanning ? "animate-spin" : ""}`}
+                aria-hidden="true"
+              >
+                <path d="M4 12 A8 8 0 0 1 20 8" />
+                <path d="M16 8 H20 V4" />
+                <path d="M20 12 A8 8 0 0 1 4 16" />
+                <path d="M8 16 H4 V20" />
+              </svg>
+              {isJa
+                ? scanning ? "更新中…" : "更新"
+                : scanning ? "Updating…" : "Refresh"}
+            </button>
+          )}
+        </div>
+        <p className="text-sm text-ink-soft mt-1">{intro}</p>
+
+        {/* v0.1.9:「このチェックで確認していること」の折り畳み。
+            ユーザーがスコープを把握できるようにするための説明。 */}
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setScopeOpen((v) => !v)}
+            aria-expanded={scopeOpen}
+            className="text-[12px] text-ink-soft hover:text-ink transition-colors inline-flex items-center gap-1 cursor-pointer"
+          >
             <span
-              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border"
+              aria-hidden="true"
               style={{
-                background: "rgba(212, 163, 115, 0.14)",
-                color: "#8a5a2b",
-                borderColor: "rgba(212, 163, 115, 0.55)",
+                display: "inline-block",
+                transform: scopeOpen ? "rotate(90deg)" : "rotate(0deg)",
+                transition: "transform 120ms",
+                fontSize: 10,
+                lineHeight: 1,
               }}
             >
-              <span
-                aria-hidden="true"
-                style={{
-                  display: "inline-block",
-                  width: 6,
-                  height: 6,
-                  borderRadius: "50%",
-                  background: "#c98a3d",
-                }}
-              />
-              {isJa ? "サンプル" : "Sample"}
+              ▶
             </span>
+            {scopeTitle}
+            <span className="opacity-60">({scopeItems.length} {isJa ? "項目" : "items"})</span>
+          </button>
+          {scopeOpen && (
+            <ul className="mt-2 rounded-[10px] border border-border-soft bg-paper px-4 py-3 space-y-1.5">
+              {scopeItems.map((item, i) => (
+                <li
+                  key={i}
+                  className="text-[12px] leading-relaxed flex gap-2"
+                >
+                  <span
+                    className="flex-shrink-0 w-5 h-5 rounded-full bg-feature-teal-soft text-feature-teal text-[10px] font-bold flex items-center justify-center mt-0.5"
+                    aria-hidden="true"
+                  >
+                    {i + 1}
+                  </span>
+                  <span className="flex-1">
+                    <span className="font-semibold text-ink-strong">
+                      {item.name}
+                    </span>
+                    <span className="text-ink-soft"> — {item.desc}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
-        </h1>
-        <p className="text-sm text-ink-soft mt-1">{intro}</p>
+        </div>
       </div>
 
       {/* スキャン状態 */}
@@ -209,7 +451,7 @@ function PreReleaseChecklist({
       )}
 
       {/* サマリー(件数バー)*/}
-      <div className="mb-4 flex flex-wrap gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <SummaryPill count={highs.length} severity="high" language={language} />
         <SummaryPill count={mids.length} severity="medium" language={language} />
         <SummaryPill count={lows.length} severity="low" language={language} />
@@ -229,17 +471,12 @@ function PreReleaseChecklist({
       ) : (
         <ul className="space-y-2">
           {findings.map((f) => (
-            <FindingCard
-              key={f.id}
-              finding={f}
-              language={language}
-              isSample={isSample}
-            />
+            <FindingCard key={f.id} finding={f} language={language} />
           ))}
         </ul>
       )}
 
-      {/* 全体評価パネル(サンプル表示中も表示するが、明確にサンプル扱いだと分かるようマーキング)*/}
+      {/* 全体評価パネル */}
       {!scanning && findings.length > 0 && (
         <AssessmentPanel
           assessment={assessment}
@@ -249,7 +486,7 @@ function PreReleaseChecklist({
         />
       )}
 
-      {/* v0.1.8:AI 修正プロンプト・モーダル */}
+      {/* v0.1.8:Cursor 用一括修正プロンプト・モーダル */}
       {promptOpen && (
         <AIFixPromptModal
           promptText={buildAIFixPrompt({
@@ -317,9 +554,10 @@ function AssessmentPanel({
   const s = VERDICT_STYLE[assessment.verdict];
   const headingLabel = isJa ? "全体評価" : "Overall assessment";
   const priorityLabel = isJa ? "まず対応すべき項目" : "Fix these first";
+  // v0.1.10 R4:「AI で深掘り」(per-finding 検証)と混同されないよう改名
   const aiButtonLabel = isJa
-    ? "AI に依頼するプロンプトを生成"
-    : "Generate an AI fix prompt";
+    ? "Cursor に貼る一括修正プロンプトを作成"
+    : "Build a batch-fix prompt for Cursor";
   const aiButtonHint = isJa
     ? "Cursor / Claude Code などに貼るだけで一括修正を依頼できます"
     : "Paste into Cursor / Claude Code to request a batch fix";
@@ -491,8 +729,8 @@ function AIFixPromptModal({
 
   const isJa = language === "ja";
   const title = isJa
-    ? "AI に依頼するプロンプト"
-    : "AI fix prompt";
+    ? "Cursor に貼る一括修正プロンプト"
+    : "Batch-fix prompt for Cursor";
   const description = isJa
     ? "このテキストをそのまま Cursor / Claude Code / ChatGPT などに貼り付けて、一括修正を依頼できます。編集も可能です。"
     : "Paste this into Cursor / Claude Code / ChatGPT to request a batch fix. You can also edit it before copying.";
@@ -735,11 +973,9 @@ function SummaryPill({
 function FindingCard({
   finding,
   language,
-  isSample = false,
 }: {
   finding: Finding;
   language: Language;
-  isSample?: boolean;
 }) {
   const s = SEVERITY_STYLE[finding.severity];
   const [open, setOpen] = useState(false);
@@ -767,19 +1003,6 @@ function FindingCard({
             >
               {s.label}
             </span>
-            {/* v0.1.8:サンプル表示中は各 finding にも「サンプル」チップを出す */}
-            {isSample && (
-              <span
-                className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border"
-                style={{
-                  background: "rgba(212, 163, 115, 0.14)",
-                  color: "#8a5a2b",
-                  borderColor: "rgba(212, 163, 115, 0.55)",
-                }}
-              >
-                {isJa ? "サンプル" : "Sample"}
-              </span>
-            )}
             <h3 className="text-sm font-bold text-ink-strong">
               {finding.title}
             </h3>
@@ -814,7 +1037,49 @@ function FindingCard({
             </div>
           )}
 
-          {hasExamples && (
+          {/* v0.1.10:examples が「file 名だけ」の場合は、トグルを出さず直接インライン表示。
+              line / snippet が実質的な内容として存在する時のみ従来通り折り畳みトグルにする。
+              リスク高画面や multi-entry のように「該当は画面名だけ」の finding で
+              『詳細を見る (1 件)』→ クリック → 画面名 1 個、という無駄なひと手間を省く。 */}
+          {hasExamples && (() => {
+            const anyDetailed = finding.examples!.some(
+              (ex) => ex.line !== undefined || (ex.snippet && ex.snippet.trim() !== ""),
+            );
+            if (!anyDetailed) {
+              const fileList = finding
+                .examples!.map((ex) => ex.file)
+                .filter(Boolean);
+              const moreCount =
+                finding.count !== undefined && finding.count > fileList.length
+                  ? finding.count - fileList.length
+                  : 0;
+              return (
+                <div className="mt-2 text-[11.5px] text-ink-soft leading-relaxed">
+                  <span className="font-semibold text-ink">
+                    {isJa ? "該当:" : "Affected:"}
+                  </span>{" "}
+                  {fileList.map((f, i) => (
+                    <span key={i}>
+                      <span className="font-mono text-ink-strong">{f}</span>
+                      {i < fileList.length - 1 && ", "}
+                    </span>
+                  ))}
+                  {moreCount > 0 && (
+                    <span className="italic">
+                      {isJa ? ` ... 他 ${moreCount} 件` : `... and ${moreCount} more`}
+                    </span>
+                  )}
+                </div>
+              );
+            }
+            return null;
+          })()}
+
+          {/* トグル版:line / snippet がある実質的な examples の時だけ */}
+          {hasExamples &&
+            finding.examples!.some(
+              (ex) => ex.line !== undefined || (ex.snippet && ex.snippet.trim() !== ""),
+            ) && (
             <button
               type="button"
               onClick={() => setOpen((v) => !v)}
@@ -855,11 +1120,13 @@ function FindingCard({
                 )}
             </ul>
           )}
+
         </div>
       </div>
     </li>
   );
 }
+
 
 function WrenchIcon() {
   return (

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ScreenMapResult } from "./claudeCli";
-import { pickLocalized, type Language } from "./i18n";
+import { type Language } from "./i18n";
 
 /**
  * v0.1.8 リリース前チェックリスト。
@@ -27,13 +27,25 @@ export type ScanHit = {
 export type PreReleaseScanResult = {
   secrets: ScanHit[];
   todos: ScanHit[];
-  console_logs: number;
+  /** v0.1.10(Codex Medium #4):件数だけでなく file:line も返す。
+   *  Cursor 修正時に「全体 grep で意図的な console.error まで消す」過剰修正を防ぐ。 */
+  console_logs: ScanHit[];
+  /** v0.1.10(Codex 二次指摘 Medium #4):truncate 前の総数。
+   *  UI/AI prompt での「N 箇所」表示はこの total を使う(secrets/todos/console_logs
+   *  はそれぞれ 20/50/50 で切られるため、length では過少報告になる)。 */
+  secrets_total: number;
+  todos_total: number;
+  console_logs_total: number;
   files_scanned: number;
   files_truncated: boolean;
   /** v0.1.8:AI 分析より新しいテストフレームワーク検出結果(null = 未検出)*/
   detected_test_framework: string | null;
   /** テストファイル(*.test.*, *.spec.*, __tests__/)の存在 */
   has_test_files: boolean;
+  /** v0.1.10(Codex Medium #5):.env / .env.local 等が存在するか */
+  env_files_present: boolean;
+  /** v0.1.10(Codex Medium #5):.gitignore が .env パターンを含むか */
+  env_covered_by_gitignore: boolean;
 };
 
 export async function runCodeScan(
@@ -50,9 +62,6 @@ export async function runCodeScan(
 export type Severity = "high" | "medium" | "low";
 export type Category =
   | "secrets"
-  | "entry-point"
-  | "risky-screens"
-  | "unanalyzed"
   | "testing"
   | "dev-leftovers";
 
@@ -165,15 +174,22 @@ export function buildAIFixPrompt({
     lines.push("");
   }
 
-  // ── 対応してほしい問題(優先度順)
-  lines.push(isJa ? "## 対応してほしい問題(優先度順)" : "## Issues to fix (priority order)");
+  // v0.1.10 スリム化後:findings は全てコード変更可能な項目のみ(risky-screens 等の
+  // 「手動確認」項目は buildFindings 段階で除外済み)。単純に列挙する。
+  lines.push(
+    isJa
+      ? "## 対応してほしい問題(優先度順)"
+      : "## Issues to fix (priority order)",
+  );
   lines.push("");
   findings.forEach((f, i) => {
     const num = i + 1;
     const sevLabel = f.severity.toUpperCase();
     lines.push(`### ${num}. [${sevLabel}] ${f.title}`);
     lines.push("");
-    lines.push(isJa ? `**なぜ問題か:** ${f.hint}` : `**Why it's a problem:** ${f.hint}`);
+    lines.push(
+      isJa ? `**なぜ問題か:** ${f.hint}` : `**Why it's a problem:** ${f.hint}`,
+    );
     lines.push("");
     if (f.fixSteps && f.fixSteps.length > 0) {
       lines.push(isJa ? "**対応手順:**" : "**Steps to fix:**");
@@ -265,12 +281,14 @@ export function buildFindings({
   const t = translations(language);
 
   // ── 1. シークレット(コードスキャン)
+  //   v0.1.10(Codex 二次指摘 Medium #4):count は truncate 前の総数(secrets_total)を使う。
   if (scan && scan.secrets.length > 0) {
+    const total = scan.secrets_total;
     findings.push({
       id: "secrets",
       severity: "high",
       category: "secrets",
-      title: t.secretsTitle(scan.secrets.length),
+      title: t.secretsTitle(total),
       hint: t.secretsHint,
       fixSteps: t.secretsFix,
       examples: scan.secrets.slice(0, 10).map((s) => ({
@@ -278,74 +296,35 @@ export function buildFindings({
         line: s.line,
         snippet: s.snippet,
       })),
-      count: scan.secrets.length,
+      count: total,
     });
   }
 
-  // ── 2. 入口画面(entry point)
-  const entries = screens.nodes.filter((n) => n.isEntryPoint);
-  if (entries.length === 0) {
+  // v0.1.10(Codex 指摘 Medium #5):.env ファイルが .gitignore で守られていない場合、
+  //   誤って git commit → push すると全公開になる。高い severity で先頭に出す。
+  if (scan && scan.env_files_present && !scan.env_covered_by_gitignore) {
     findings.push({
-      id: "no-entry",
+      id: "env-unprotected",
       severity: "high",
-      category: "entry-point",
-      title: t.noEntryTitle,
-      hint: t.noEntryHint,
-      fixSteps: t.noEntryFix,
-    });
-  } else if (entries.length > 1) {
-    findings.push({
-      id: "multi-entry",
-      severity: "medium",
-      category: "entry-point",
-      title: t.multiEntryTitle(entries.length),
-      hint: t.multiEntryHint,
-      fixSteps: t.multiEntryFix,
-      examples: entries.map((n) => ({
-        file: pickLocalized(n.userIntent ?? n.label, language),
-      })),
+      category: "secrets",
+      title: t.envUnprotectedTitle,
+      hint: t.envUnprotectedHint,
+      fixSteps: t.envUnprotectedFix,
     });
   }
 
-  // ── 3. リスク高判定の画面(changeHint.safety === "risky")
-  const riskyScreens = screens.nodes.filter(
-    (n) => n.detail.changeHint?.safety === "risky",
-  );
-  if (riskyScreens.length > 0) {
-    findings.push({
-      id: "risky-screens",
-      severity: "high",
-      category: "risky-screens",
-      title: t.riskyTitle(riskyScreens.length),
-      hint: t.riskyHint,
-      fixSteps: t.riskyFix,
-      examples: riskyScreens.slice(0, 10).map((n) => ({
-        file: pickLocalized(n.userIntent ?? n.label, language),
-      })),
-      count: riskyScreens.length,
-    });
-  }
+  // v0.1.10 スリム化:以下 4 項目を削除(価値疑問 or 誤検知多発のため)
+  //   - no-entry / multi-entry:マップから直接見える情報、finding として重複
+  //   - risky-screens:AI 主観判定、コード修正不能で価値薄
+  //   - unanalyzed:AI 分析の副産物、実害無し
+  //   - potential-errors:誤検知率高、Cursor に貼ると害の方が大きい
+  // 残しているのは信頼度の高い実 grep ベースの検出のみ:
+  //   - secrets(直書き秘密情報)
+  //   - console-logs(残り数え上げ)
+  //   - todos(残り数え上げ)
+  //   - no-test-framework / no-tests(実ファイル・実 package.json ベース)
 
-  // ── 4. 影響判定なし(AI が changeHint を出さなかった画面)
-  const unanalyzed = screens.nodes.filter((n) => !n.detail.changeHint);
-  if (unanalyzed.length > 0 && screens.nodes.length > 0) {
-    // ノード全部が未判定でも「AI が全部触れなかった」なので low レベルに(誤警告防止)
-    const ratio = unanalyzed.length / screens.nodes.length;
-    findings.push({
-      id: "unanalyzed",
-      severity: ratio > 0.5 ? "medium" : "low",
-      category: "unanalyzed",
-      title: t.unanalyzedTitle(unanalyzed.length),
-      hint: t.unanalyzedHint,
-      fixSteps: t.unanalyzedFix,
-      examples: unanalyzed.slice(0, 6).map((n) => ({
-        file: pickLocalized(n.userIntent ?? n.label, language),
-      })),
-      count: unanalyzed.length,
-    });
-  }
-
-  // ── 5. テスト整備
+  // ── テスト整備
   //     優先度:scan(リアルタイム、package.json 直読)> context.testing(AI 分析結果、古い可能性)
   const scanFramework = scan?.detected_test_framework ?? null;
   const scanHasTests = scan?.has_test_files ?? false;
@@ -363,9 +342,11 @@ export function buildFindings({
       fixSteps: t.noTestFrameworkFix,
     });
   } else if (hasTests === false) {
+    // v0.1.10 R3:framework が入っているだけ「準備は済んでいる」状態なので、
+    // 「framework すら無い」よりは 1 段軽い。severity を low に格下げ。
     findings.push({
       id: "no-tests",
-      severity: "medium",
+      severity: "low",
       category: "testing",
       title: t.noTestsTitle(framework),
       hint: t.noTestsHint,
@@ -374,22 +355,33 @@ export function buildFindings({
   }
 
   // ── 6. 開発中コードの残置(scan 依存)
-  if (scan && scan.console_logs > 0) {
+  //   v0.1.10(Codex 指摘 Medium #4):console_logs は count のみだったが Vec<ScanHit>
+  //   に変えたので、examples に file:line を載せて Cursor が全体 grep 過剰修正しないように。
+  //   v0.1.10 二次:count は truncate 前の総数(console_logs_total)を使う。
+  if (scan && scan.console_logs.length > 0) {
+    const total = scan.console_logs_total;
     findings.push({
       id: "console-logs",
-      severity: scan.console_logs > 20 ? "medium" : "low",
+      severity: total > 20 ? "medium" : "low",
       category: "dev-leftovers",
-      title: t.consoleLogsTitle(scan.console_logs),
+      title: t.consoleLogsTitle(total),
       hint: t.consoleLogsHint,
       fixSteps: t.consoleLogsFix,
+      examples: scan.console_logs.slice(0, 10).map((s) => ({
+        file: s.file,
+        line: s.line,
+        snippet: s.snippet,
+      })),
+      count: total,
     });
   }
   if (scan && scan.todos.length > 0) {
+    const total = scan.todos_total;
     findings.push({
       id: "todos",
       severity: "low",
       category: "dev-leftovers",
-      title: t.todosTitle(scan.todos.length),
+      title: t.todosTitle(total),
       hint: t.todosHint,
       fixSteps: t.todosFix,
       examples: scan.todos.slice(0, 8).map((h) => ({
@@ -397,7 +389,7 @@ export function buildFindings({
         line: h.line,
         snippet: h.snippet,
       })),
-      count: scan.todos.length,
+      count: total,
     });
   }
 
@@ -417,6 +409,10 @@ type Copy = {
   secretsTitle: (n: number) => string;
   secretsHint: string;
   secretsFix: string[];
+  // v0.1.10(Codex 指摘 Medium #5):.env が .gitignore で守られていないとき
+  envUnprotectedTitle: string;
+  envUnprotectedHint: string;
+  envUnprotectedFix: string[];
   noEntryTitle: string;
   noEntryHint: string;
   noEntryFix: string[];
@@ -441,6 +437,11 @@ type Copy = {
   todosTitle: (n: number) => string;
   todosHint: string;
   todosFix: string[];
+  // v0.1.9:予想エラー(静的検出、AI で深掘り可能)
+  potentialErrorsTitle: (n: number) => string;
+  potentialErrorsHint: string;
+  potentialErrorsFix: string[];
+  potentialErrorsDeepDive: string;
   // 全体評価
   verdictBlockLabel: string;
   verdictBlockSummary: (highs: number, meds: number) => string;
@@ -463,6 +464,17 @@ const JA: Copy = {
     "コード側は `process.env.API_KEY`(Node)/ `import.meta.env.VITE_API_KEY`(Vite)で参照するように書き換える",
     "既に GitHub 等に push 済みなら、そのキーは漏洩済み扱い。発行元のダッシュボードで **即ローテーション**(無効化 → 新規発行)",
     "本番デプロイ先(Vercel / Netlify / AWS 等)の環境変数設定にも同じ値を登録",
+  ],
+  envUnprotectedTitle:
+    ".env ファイルが `.gitignore` で守られていません",
+  envUnprotectedHint:
+    ".env(または .env.local など)がプロジェクト内にありますが、`.gitignore` に含まれていません。この状態で `git add .` すると秘密情報ごと公開リポジトリに上がる恐れがあります。",
+  envUnprotectedFix: [
+    "プロジェクト直下の `.gitignore` を開く(無ければ新規作成)",
+    "以下 3 行を追加:`.env` / `.env.local` / `.env.*.local`",
+    "`git status` で .env が「Untracked files」に表示されないことを確認(既に追跡中なら次のステップ)",
+    "既に追跡されている場合:`git rm --cached .env` で追跡から外し、変更をコミット",
+    "GitHub 等に既に push 済みなら .env 内の秘密情報は漏洩済み扱い。**すべての API キー・パスワードを即ローテーション**",
   ],
   noEntryTitle: "アプリの入口画面が定義されていません",
   noEntryHint:
@@ -526,7 +538,7 @@ const JA: Copy = {
   consoleLogsHint:
     "デバッグ用の出力が残ったままです。本番で個人情報や内部データを漏らす原因になります。",
   consoleLogsFix: [
-    "エディタで `console.log` を全文検索して、明らかにデバッグ用のものを 1 つずつ削除",
+    "各該当行を実際に確認する。**本番に不要と判断したデバッグ出力だけ**削除する。意図的な `console.error` / `console.warn` / 運用ログはそのまま残す",
     "本番でも残したいログは、ちゃんとしたロガー(`pino` / `winston` / `debug` 等)に置き換える",
     "Vite なら `vite-plugin-remove-console` を導入して本番ビルド時に自動除去(`npm i -D vite-plugin-remove-console`)",
     "ESLint 設定で `no-console` ルールを本番ビルド時のみ warn/error にすると、以降混入を防げる",
@@ -536,11 +548,24 @@ const JA: Copy = {
     "未完了の作業メモです。放置すると「いつか誰かがやる」でずっと残ります。",
   todosFix: [
     "1 つずつ判断:今リリース前に対応する / 後回しにする / 既に対応済みでコメントだけ残っている",
-    "対応するものは AI に「この TODO をやって」と依頼すれば具体的なコード変更を提案してくれる",
+    "対応するものは、その TODO が指す機能を実際にコード変更として実装(該当箇所を直接編集)",
     "後回しにするものは GitHub Issue に起票して、コメントを `TODO(#123): xxx` の形で Issue リンクだけ残す",
     "既に対応済みのコメントは削除",
     "以降は TODO を書くときに「担当者 or Issue 番号」を必ず添える運用にすると溜まりにくい",
   ],
+  // v0.1.9:予想エラー(静的パターン検出 + AI 深掘り可能)
+  potentialErrorsTitle: (n) =>
+    `実行時にエラーになりそうな箇所が ${n} 件見つかりました`,
+  potentialErrorsHint:
+    "コードのパターンだけを見て、当てはまる箇所を広めに列挙しています。周辺コードで問題にならないケースも含まれます。下の「AI で深掘り」を押すと、Claude が実コードを読んで本当に問題かを判定 + 修正方法を教えてくれます。",
+  potentialErrorsFix: [
+    "各該当箇所の周辺コードを実際に読み、既に安全処理が入っているか確認する(`?? fallback` / 直前の length チェック / `?.` optional chaining / try/catch / .catch)。安全処理が既にある箇所は**変更しない**(不要なノイズになる)",
+    "安全処理が無い場合のみ:`JSON.parse(...)` は try/catch で囲む、配列アクセス前に `.length` チェック、`fetch` は `.catch` または try/catch で失敗ハンドリング、DOM 要素は `?.` で null チェック",
+    "対応後、簡潔に「変更した箇所 / 判断で変更しなかった箇所」の一覧を報告してください",
+  ],
+  // v0.1.10:上記 fixSteps は Cursor / Claude Code 向け。AppMap 内での workflow
+  //   (「AI で深掘りボタン」)は UI 側の hint で案内する。
+  potentialErrorsDeepDive: "AI で深掘り",
   // 全体評価(JA)v0.1.8:「品質保証」に読める強い口調をやめ、抜け漏れチェックの実態に合わせる
   verdictBlockLabel: "出荷前に修正したい項目あり",
   verdictBlockSummary: (h, m) =>
@@ -567,6 +592,17 @@ const EN: Copy = {
     "In code, reference via `process.env.API_KEY` (Node) or `import.meta.env.VITE_API_KEY` (Vite) instead",
     "If already pushed to GitHub, treat the keys as leaked. **Rotate them immediately** in the provider's dashboard",
     "Add the same values to your production host's env-var settings (Vercel / Netlify / AWS, etc.)",
+  ],
+  envUnprotectedTitle:
+    ".env file exists but is not covered by `.gitignore`",
+  envUnprotectedHint:
+    "A .env (or .env.local) file exists in your project, but `.gitignore` doesn't cover it. `git add .` at this state would upload secrets to a public repo.",
+  envUnprotectedFix: [
+    "Open `.gitignore` at the project root (create it if it doesn't exist)",
+    "Add these 3 lines: `.env` / `.env.local` / `.env.*.local`",
+    "Run `git status` and confirm .env does NOT appear under 'Untracked files' (if it's already tracked, do the next step)",
+    "If already tracked: `git rm --cached .env` to untrack it, then commit",
+    "If already pushed to GitHub, treat everything in .env as leaked. **Rotate every API key / password immediately**",
   ],
   noEntryTitle: "No entry screen is defined",
   noEntryHint:
@@ -628,7 +664,7 @@ const EN: Copy = {
   consoleLogsHint:
     "Debug output can leak personal data or internal state in production.",
   consoleLogsFix: [
-    "Search-and-replace `console.log` in your editor and delete the obviously-debug ones one by one",
+    "Inspect each site. **Only delete the debug output you've judged unnecessary for production.** Keep intentional `console.error` / `console.warn` and operational logs.",
     "For logs you actually want in production, replace with a real logger (`pino` / `winston` / `debug`)",
     "For Vite, add `vite-plugin-remove-console` to strip them in production builds (`npm i -D vite-plugin-remove-console`)",
     "Enable the ESLint `no-console` rule to prevent new ones from creeping in",
@@ -638,11 +674,22 @@ const EN: Copy = {
     "Unfinished-work markers. Left alone, they linger forever as \"someday, somebody\".",
   todosFix: [
     "Triage each one: do it now, defer it, or realize it's already done and just needs deletion",
-    "For items to do now, ask your AI \"handle this TODO\" — it'll propose concrete changes",
+    "For items to do now, implement the referenced work as an actual code change (edit the site directly)",
     "For deferred items, file a GitHub Issue and replace the comment with a link like `TODO(#123): ...`",
     "Delete already-handled comments outright",
     "Going forward, always tag TODOs with an owner or Issue number to keep them from accumulating",
   ],
+  // v0.1.9: potential runtime errors (static detection + optional AI deep-dive)
+  potentialErrorsTitle: (n) =>
+    `${n} spot(s) that could crash at runtime`,
+  potentialErrorsHint:
+    "Detected purely from surface patterns and shown broadly — many of these will not actually cause problems in context. Click 'AI deep-dive' to have Claude read the source and tell you which are real and how to fix them.",
+  potentialErrorsFix: [
+    "For each location, read the surrounding code and check whether it is already guarded (`?? fallback` / preceding `.length` check / `?.` optional chaining / try/catch / .catch). If a safe pattern already exists, **do NOT modify** it (adds noise).",
+    "Only if unguarded: wrap `JSON.parse(...)` in try/catch, add a `.length` check before indexed access, use `.catch` or try/catch on `fetch`, use `?.` on DOM element access.",
+    "After the pass, briefly report which sites you changed vs which you left alone with reasoning.",
+  ],
+  potentialErrorsDeepDive: "AI deep-dive",
   // Overall assessment (EN) v0.1.8: softened to reflect the checklist's actual scope
   verdictBlockLabel: "Fix these before shipping",
   verdictBlockSummary: (h, m) =>

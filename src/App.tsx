@@ -3,6 +3,7 @@ import { ask, save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import Header from "./components/layout/Header";
 import Sidebar, { type NavKey } from "./components/layout/Sidebar";
+import GuidedTour, { type TourStep } from "./components/tour/GuidedTour";
 import TopBar from "./components/layout/TopBar";
 import MapCanvas from "./components/canvas/MapCanvas";
 import FeatureCardGrid from "./components/canvas/FeatureCardGrid";
@@ -25,11 +26,12 @@ import SpecDocModal from "./components/ui/SpecDocModal";
 import SettingsModal from "./components/ui/SettingsModal";
 import LocalLLMSetupWizard from "./components/ui/LocalLLMSetupWizard";
 import { getSampleScreens } from "./data/sampleScreens";
-import { pickFolderAndListFiles } from "./lib/folderPicker";
+import { pickFolderAndListFiles, relistFilesForPath } from "./lib/folderPicker";
 import {
   checkClaudeAvailable,
   checkNodeAvailable,
   normalizeAndSanitizeScreenMap,
+  runClaudeLogin,
   type ScreenMapResult,
 } from "./lib/claudeCli";
 import {
@@ -113,6 +115,16 @@ function App() {
   const [language, setLanguageState] = useState<Language>("ja");
   // v0.1.7 仕様書モーダルの開閉(マップから仕様書を生成 → コピー / PDF 化)
   const [specDocOpen, setSpecDocOpen] = useState<boolean>(false);
+  // v0.1.10 ガイド付きツアーの開閉(サイドバーのボタンから起動)
+  const [tourOpen, setTourOpen] = useState<boolean>(false);
+  // v0.1.10 Claude ログイン切れ復旧の状態
+  //   idle:未実行、progress:ブラウザ待ち、done:成功メッセージ表示、failed:エラー表示
+  const [authRecoveryState, setAuthRecoveryState] = useState<
+    "idle" | "progress" | "done" | "failed"
+  >("idle");
+  const [authRecoveryError, setAuthRecoveryError] = useState<string | null>(
+    null,
+  );
   // v0.1.7 AI エンジン(Claude / Local LLM)+ 設定モーダル開閉
   const [engine, setEngineState] = useState<Engine>("claude");
   // v0.1.8 外部エディタ(関連ファイルクリックで使う)
@@ -470,6 +482,7 @@ function App() {
 
   const handlePickFolder = async () => {
     setAnalysisError(null);
+    setAuthRecoveryState("idle");
     try {
       const result = await pickFolderAndListFiles(language);
       if (result === null) return;
@@ -538,6 +551,88 @@ function App() {
     setDragOffsetsX({}); // v0.1.2: サンプルに戻すときドラッグオフセットもリセット
     // 次回起動時もサンプルで起動するように current をクリア(履歴は残す)
     setCurrent(null);
+  };
+
+  /**
+   * v0.1.10:現在開いているフォルダを再分析する。
+   * folder ピッカーを開かず、既存の lastAnalyzedFolder パスを直接使う。
+   * 分析後は saveAnalysis 側で previous を退避 → 差分マップに自動反映される。
+   */
+  const handleReloadFolder = async () => {
+    if (!lastAnalyzedFolder) return;
+    setAnalysisError(null);
+    setAuthRecoveryState("idle");
+    try {
+      // コスト確認(再分析なので必ず出す。ユーザーが誤クリックした時の防波堤)
+      if (aiResult !== null && lastCostUsd !== null) {
+        const proceed = await ask(T.app.reAnalyzeConfirmBody(lastCostUsd), {
+          title: T.app.reAnalyzeConfirmTitle,
+          kind: "warning",
+        });
+        if (!proceed) return;
+      }
+      const relisted = await relistFilesForPath(lastAnalyzedFolder);
+      setFolderPath(relisted.folder);
+      setFileCount(relisted.fileCount);
+      setAnalysisStatus("loading");
+      const outcome = await analyzeFolder(relisted.folder, language, engine);
+      setAiResult(outcome.screens);
+      setLastCostUsd(outcome.costUsd);
+      setLastAnalyzedFolder(relisted.folder);
+      setAnalysisStatus("done");
+      setSelectedNodeId(null);
+      setDragOffsetsX({}); // ノード id が変わる可能性があるのでドラッグオフセットリセット
+      saveAnalysis({
+        folderPath: relisted.folder,
+        fileCount: relisted.fileCount,
+        screens: outcome.screens,
+        costUsd: outcome.costUsd,
+        durationMs: outcome.durationMs,
+        analyzedAt: Date.now(),
+        language,
+      });
+      refreshHistory();
+      openTabFor(relisted.folder);
+    } catch (err) {
+      console.error("Reload failed:", err);
+      setAnalysisStatus("error");
+      setAnalysisError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /**
+   * v0.1.10:analysisError が Claude 認証切れかを判定。
+   * JA/EN の代表的なメッセージ、Rust 側で埋め込まれる典型フレーズを含む。
+   */
+  const isAuthError = (msg: string | null): boolean => {
+    if (!msg) return false;
+    const lower = msg.toLowerCase();
+    return (
+      lower.includes("認証されていません") ||
+      lower.includes("claude auth login") ||
+      lower.includes("not authenticated") ||
+      lower.includes("please log in") ||
+      lower.includes("unauthorized") ||
+      lower.includes("token has expired") ||
+      lower.includes("invalid session")
+    );
+  };
+
+  /** v0.1.10:Claude ログイン復旧。runClaudeLogin を呼んでブラウザ OAuth を起動 */
+  const handleAuthRecovery = async () => {
+    setAuthRecoveryState("progress");
+    setAuthRecoveryError(null);
+    try {
+      await runClaudeLogin();
+      setAuthRecoveryState("done");
+      // 分析エラー表示は消す(ユーザーが次に押すのは「フォルダを選ぶ」or「再読込」)
+      setAnalysisError(null);
+      setAnalysisStatus("idle");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAuthRecoveryState("failed");
+      setAuthRecoveryError(msg);
+    }
   };
 
   /** 履歴から 1 件選んで、その分析結果を画面に復元する。 */
@@ -694,6 +789,12 @@ function App() {
         onSelectTab={handleSelectTab}
         onCloseTab={closeTab}
         language={language}
+        onStartTour={() => {
+          // ツアーはホーム画面(かんたんモード = マップ表示)基準で作ってあるので、
+          // 他のタブ(コードチェック等)にいる時は一旦ホームに戻してから開始
+          setActiveNav("intro");
+          setTourOpen(true);
+        }}
       />
 
       {/* 中央カラム */}
@@ -732,11 +833,29 @@ function App() {
 
             {/* ツールバー(v0.1.7 配置変更 + LIGHT 化) */}
             <div className="flex items-center gap-3 mb-5 flex-wrap">
-              <Button onClick={handlePickFolder} disabled={buttonDisabled}>
+              <Button
+                onClick={handlePickFolder}
+                disabled={buttonDisabled}
+                dataTour="folder-picker"
+              >
                 {analysisStatus === "loading"
                   ? T.app.analyzing
                   : T.app.pickFolder}
               </Button>
+
+              {/* v0.1.10:現フォルダ再読込。既に分析済みフォルダがある時だけ表示 */}
+              {lastAnalyzedFolder !== null && (
+                <Button
+                  variant="secondary"
+                  onClick={handleReloadFolder}
+                  disabled={buttonDisabled}
+                  dataTour="folder-reload"
+                >
+                  {analysisStatus === "loading"
+                    ? T.app.analyzing
+                    : T.app.reloadFolder}
+                </Button>
+              )}
 
               <HistoryDropdown
                 history={visibleHistory}
@@ -771,14 +890,91 @@ function App() {
               ) : null}
             </div>
 
-            {/* エラー本文(LIGHT 化、select-text で選択コピー可) */}
+            {/* エラー本文
+                v0.1.10:認証エラー時は原文の代わりにワンクリック復旧バナーを表示 */}
             {analysisStatus === "error" && analysisError ? (
-              <pre className="bg-paper border border-impact-high/30 rounded-[14px] p-4 mb-6 text-xs text-ink whitespace-pre-wrap select-text font-mono leading-relaxed overflow-x-auto">
-                <span className="text-impact-high font-semibold">
-                  {T.app.errorPrefix}
-                </span>{" "}
-                {analysisError}
-              </pre>
+              isAuthError(analysisError) ? (
+                <div
+                  className="mb-6 rounded-[14px] border p-4"
+                  style={{
+                    background: "#fef2f2",
+                    borderColor: "#fecaca",
+                  }}
+                >
+                  <div className="flex items-start gap-3">
+                    <div
+                      className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center font-black text-sm text-white"
+                      style={{ background: "#dc2626" }}
+                      aria-hidden="true"
+                    >
+                      !
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-sm font-bold mb-1" style={{ color: "#7f1d1d" }}>
+                        {T.app.authRecoveryTitle}
+                      </h3>
+                      <p className="text-[12.5px] leading-relaxed" style={{ color: "#7f1d1d" }}>
+                        {T.app.authRecoveryBody}
+                      </p>
+                      <div className="mt-3">
+                        {authRecoveryState === "idle" && (
+                          <button
+                            type="button"
+                            onClick={handleAuthRecovery}
+                            className="inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm font-semibold text-white cursor-pointer shadow-sm"
+                            style={{ background: "#dc2626" }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.background = "#b91c1c";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.background = "#dc2626";
+                            }}
+                          >
+                            {T.app.authRecoveryButton}
+                          </button>
+                        )}
+                        {authRecoveryState === "progress" && (
+                          <div className="flex items-center gap-2 text-[12.5px]" style={{ color: "#7f1d1d" }}>
+                            <span
+                              className="w-3 h-3 rounded-full border-2 animate-spin"
+                              style={{ borderColor: "#dc2626", borderTopColor: "transparent" }}
+                              aria-hidden="true"
+                            />
+                            {T.app.authRecoveryInProgress}
+                          </div>
+                        )}
+                        {authRecoveryState === "done" && (
+                          <div className="text-[12.5px] font-semibold" style={{ color: "#166534" }}>
+                            ✓ {T.app.authRecoveryDone}
+                          </div>
+                        )}
+                        {authRecoveryState === "failed" && (
+                          <div className="space-y-2">
+                            <div className="text-[12.5px]" style={{ color: "#7f1d1d" }}>
+                              {T.app.authRecoveryFailed(authRecoveryError ?? "")}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleAuthRecovery}
+                              className="inline-flex items-center gap-2 rounded-[10px] px-3 py-1.5 text-xs font-semibold text-white cursor-pointer"
+                              style={{ background: "#dc2626" }}
+                            >
+                              {T.app.authRecoveryButton}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <pre className="bg-paper border border-impact-high/30 rounded-[14px] p-4 mb-6 text-xs text-ink whitespace-pre-wrap select-text font-mono leading-relaxed overflow-x-auto">
+                  <span className="text-impact-high font-semibold">
+                    {T.app.errorPrefix}
+                  </span>{" "}
+                  {analysisError}
+                </pre>
+              )
             ) : null}
 
             {/* v0.1.7 サイドバーナビ:activeNav に応じてメイン白エリアを切替。
@@ -960,6 +1156,7 @@ function App() {
                 <div
                   className="mb-6 transition-opacity duration-200"
                   style={{ minHeight: "320px" }}
+                  data-tour="map-canvas"
                 >
                   <MapCanvas
                     nodes={screens.nodes}
@@ -1094,8 +1291,109 @@ function App() {
         preferredEditor={preferredEditor}
         onPreferredEditorChange={handlePreferredEditorChange}
       />
+
+      {/* v0.1.10:ガイド付きツアー(サイドバー「ガイド付きツアー」から起動)*/}
+      <GuidedTour
+        open={tourOpen}
+        onClose={() => setTourOpen(false)}
+        language={language}
+        steps={buildTourSteps(language)}
+      />
     </div>
   );
+}
+
+/** v0.1.10:ツアーステップ定義。data-tour 属性で対象を指定 */
+function buildTourSteps(language: Language): TourStep[] {
+  const isJa = language === "ja";
+  if (isJa) {
+    return [
+      {
+        title: "AppMap へようこそ",
+        body: "AI で作ったアプリの中身を、1 枚の地図で把握できるツールです。この案内では 6 個の主要機能を順に紹介します(所要 1〜2 分)。",
+        placement: "center",
+      },
+      {
+        target: "folder-picker",
+        title: "① 自分のアプリを読み込む",
+        body: "アプリのフォルダ(たとえば Cursor や Claude Code で開いているプロジェクトフォルダ)を選ぶと、AI がコードを読んで「どんな画面があって、どうつながっているか」を 1 枚のマップに描きます。今表示されているのは、機能を試してもらうためのサンプル(ダミー)です。",
+      },
+      {
+        target: "map-canvas",
+        title: "② マップで全体像を見る",
+        body: "アプリの画面が丸いカードで、画面同士のつながりが線で描かれます。カードをクリックすると右側にその画面の説明が開き、AI に「この画面は何をする?」などを質問できます。マップの外側をクリックしている間は固定モードで、マップを 1 回クリックすると拡大縮小・ドラッグ移動が有効になります(再度マップ外をクリックで固定に戻る)。",
+        placement: "center",
+      },
+      {
+        target: "mode-toggle",
+        title: "③ かんたん / 詳細モード切替",
+        body: "「かんたん」は日常の言葉で表示します(例:「ログイン画面」「ユーザー登録画面」)。「詳細」に切り替えると、エンジニアが使う技術名や、その画面が読み書きしているデータ(テーブル名など)も一緒に表示されます。",
+      },
+      {
+        target: "nav-checklist",
+        title: "④ コードチェック",
+        body: "アプリを公開する前に必ず確認したい「うっかり残し」を 5 種類チェックします:\n・APIキー / パスワードをコードに書いていないか(そのまま公開すると誰でも使えてしまう)\n・自動テストの仕組みが入っているか\n・テストコードが書かれているか\n・console.log(開発中のデバッグ表示)の消し忘れ\n・TODO(あとで直すメモ)の見落とし\nエディタでコードを保存すると自動で再スキャンされるので、開発中でも今の状態がすぐ分かります。",
+      },
+      {
+        target: "export",
+        title: "⑤ 仕様書 / 共有 HTML を出力",
+        body: "アプリの構造を 2 つの形式で書き出せます:\n・仕様書(PDF):クライアントや上司に渡せる正式ドキュメント\n・共有 HTML:相手が AppMap をインストールしなくても、ブラウザで開くだけでマップを見られる 1 つのファイル",
+      },
+      {
+        target: "engine-switch",
+        title: "⑥ AI エンジン切替",
+        body: "解析に使う AI を切り替えられます:\n・Claude(クラウド):高精度。Anthropic 社の API 利用料(従量制)がかかる\n・ローカル AI:あなたの PC 上で動く。完全無料・オフラインで使えるが、精度は Claude より劣る\n設定画面から表示言語(日本語 / 英語)や、コードを開くエディタ(VS Code / Cursor など)の選択もできます。",
+      },
+      {
+        title: "以上です",
+        body: "この案内はサイドバー左下の「ガイド付きツアー」からいつでも再表示できます。触って試してみてください。",
+        placement: "center",
+      },
+    ];
+  }
+  return [
+    {
+      title: "Welcome to AppMap",
+      body: "A tool to understand AI-generated apps as a single map. This tour walks you through 6 key features (1-2 minutes).",
+      placement: "center",
+    },
+    {
+      target: "folder-picker",
+      title: "1. Load your app",
+      body: "Pick the folder containing your app (e.g. a project folder you have open in Cursor or Claude Code). The AI reads the code and draws a map of what screens exist and how they connect. What you see now is sample data — a dummy so you can try the features.",
+    },
+    {
+      target: "map-canvas",
+      title: "2. See the whole picture",
+      body: "Each screen is a rounded card, and lines show how they connect. Click a card to open its details on the right, where you can also ask the AI questions like 'What does this screen do?'. The map is locked by default — click it once to enable pan and zoom (click outside to lock it again).",
+      placement: "center",
+    },
+    {
+      target: "mode-toggle",
+      title: "3. Easy / Detailed mode",
+      body: "'Easy' uses everyday labels (e.g. 'Login screen', 'Signup screen'). 'Detailed' switches to engineer-facing names and also shows the data (tables, fields) each screen reads or writes.",
+    },
+    {
+      target: "nav-checklist",
+      title: "4. Code check",
+      body: "Scans your code for 5 common leftovers you'll want to clean up before shipping:\n・API keys / passwords hardcoded in your code (anyone can use them if you publish)\n・Whether a test framework is set up\n・Whether any test code exists\n・Forgotten console.log debug prints\n・Unhandled TODO notes\nAuto-refreshes when you save in any editor, so you can check the state anytime during development — not just before shipping.",
+    },
+    {
+      target: "export",
+      title: "5. Export spec doc / share HTML",
+      body: "Export the app's structure in two formats:\n・Spec doc (PDF): a formal document you can hand to a client or manager\n・Share HTML: a single file recipients can open in a browser — no AppMap install needed",
+    },
+    {
+      target: "engine-switch",
+      title: "6. Switch AI engine",
+      body: "Switch the AI used for analysis:\n・Claude (cloud): high accuracy. Uses Anthropic's API (pay-per-use)\n・Local AI: runs on your PC — free and offline, but less accurate than Claude\nSettings also lets you change display language (English / Japanese) and which editor to open files in (VS Code / Cursor / etc.).",
+    },
+    {
+      title: "That's it",
+      body: "You can reopen this tour anytime from 'Guided tour' at the bottom of the sidebar. Now try clicking around.",
+      placement: "center",
+    },
+  ];
 }
 
 export default App;

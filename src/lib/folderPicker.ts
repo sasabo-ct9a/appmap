@@ -56,6 +56,18 @@ export async function pickFolderAndListFiles(
   return { folder, fileCount };
 }
 
+/**
+ * v0.1.10:「フォルダを再読込」用。既に選択済みの folder パスを再スキャンする。
+ * ダイアログを開かず、そのままファイル数を再カウントして返す。
+ * 削除された旧フォルダの場合はカウント 0 になる(呼び出し側で判断)。
+ */
+export async function relistFilesForPath(
+  folder: string,
+): Promise<FolderPickResult> {
+  const fileCount = await countFiles(folder);
+  return { folder, fileCount };
+}
+
 async function countFiles(path: string): Promise<number> {
   let count = 0;
 
