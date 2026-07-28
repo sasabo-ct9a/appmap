@@ -1152,11 +1152,12 @@ function App() {
                   </div>
                 )}
 
-                {/* マインドマップ + 下部セクション — 詳細モードでは各画面に「使うデータ」チップを追加 */}
+                {/* マインドマップ + 下部セクション — 詳細モードでは各画面に「使うデータ」チップを追加。
+                    v0.1.10:data-tour は MapCanvas 内部の「アプリの全体像」カード div に
+                    移動(この外側 wrapper だと下部セクションまで含んで広すぎるため)。*/}
                 <div
                   className="mb-6 transition-opacity duration-200"
                   style={{ minHeight: "320px" }}
-                  data-tour="map-canvas"
                 >
                   <MapCanvas
                     nodes={screens.nodes}

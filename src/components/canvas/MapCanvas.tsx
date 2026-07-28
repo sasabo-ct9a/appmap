@@ -608,7 +608,13 @@ function MapCanvas({
   void appSummary;
 
   return (
-    <div className="bg-paper rounded-[16px] border border-border-soft p-5">
+    // v0.1.10:ツアーのハイライト対象。「アプリの全体像」カードだけを囲みたいので
+    //   ここに data-tour を付ける(以前は App.tsx 側のより大きな wrapper に付いていて、
+    //   マップ以外の下部セクションまで一緒に光ってしまう不具合があった)。
+    <div
+      className="bg-paper rounded-[16px] border border-border-soft p-5"
+      data-tour="map-canvas"
+    >
       {/* ヘッダー */}
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">

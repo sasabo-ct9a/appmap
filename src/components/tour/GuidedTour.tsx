@@ -73,11 +73,16 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
     }
   }, [open]);
 
-  // v0.1.10:ステップが切り替わった瞬間に対象要素を画面内に強制表示 →
-  //   その後の座標を getBoundingClientRect で確定させる。
-  //   scroll 追従は狙わず、開いた瞬間の位置に固定する方が挙動が読める。
+  // v0.1.10:ステップが切り替わった瞬間に対象要素を画面内に強制表示 → 座標を確定。
   //   注意:App.tsx の <main> が overflow-auto で独自スクロールしているため、
   //   scrollIntoView({ block: "center" }) が親スクロールコンテナを勝手にたどってくれる。
+  //
+  //   v0.1.10 追加:ウィンドウリサイズ / スクロール / 対象要素のサイズ変化で
+  //   位置がずれるので、以下のイベントで rect を再測定する:
+  //     - window resize(ウィンドウ幅高さ変更 → layout reflow で target が動く)
+  //     - scroll(capture, ドキュメント全域 → App.tsx の <main> の内部スクロール含む)
+  //     - ResizeObserver(target + documentElement → 内部レイアウト変化に反応)
+  //   すべて rAF debounce することで、連続イベントでも 1 フレーム内に 1 回だけ測定。
   useEffect(() => {
     if (!open) return;
     const target = currentStep?.target;
@@ -90,31 +95,44 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
       setRect(null);
       return;
     }
-    // まず対象を画面内に持ってくる(親スクロールコンテナ含めて)
-    el.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
-    // スクロール完了直後の座標を測る。rAF 1 フレーム待つのが安全
-    const rafId = requestAnimationFrame(() => {
+
+    // 共通の測定関数(初回 + 再測定で使い回し)
+    let pendingRaf: number | null = null;
+    const measure = () => {
+      pendingRaf = null;
       const r = el.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) {
         setRect({ x: r.left, y: r.top, width: r.width, height: r.height });
       } else {
         setRect(null);
       }
-    });
-    return () => cancelAnimationFrame(rafId);
-  }, [open, currentStep]);
-
-  // resize:viewport(SVG 全体サイズ)の追従
-  useEffect(() => {
-    if (!open) return;
-    const onResize = () => {
+      // viewport も同時に更新(SVG 全体サイズ)。resize で乖離しないように。
       setViewport({ w: window.innerWidth, h: window.innerHeight });
     };
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("resize", onResize);
+    const scheduleMeasure = () => {
+      if (pendingRaf !== null) return; // 同フレーム内の重複を捨てる
+      pendingRaf = requestAnimationFrame(measure);
     };
-  }, [open]);
+
+    // 初回:対象を画面中央に持ってきてから 1 フレーム後に測定
+    el.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+    scheduleMeasure();
+
+    // 変化を監視する複数のソース
+    window.addEventListener("resize", scheduleMeasure);
+    // capture:true で App.tsx の <main> のような内部スクロールも拾える
+    window.addEventListener("scroll", scheduleMeasure, { capture: true, passive: true });
+    const resizeObserver = new ResizeObserver(scheduleMeasure);
+    resizeObserver.observe(el);
+    resizeObserver.observe(document.documentElement);
+
+    return () => {
+      if (pendingRaf !== null) cancelAnimationFrame(pendingRaf);
+      window.removeEventListener("resize", scheduleMeasure);
+      window.removeEventListener("scroll", scheduleMeasure, { capture: true });
+      resizeObserver.disconnect();
+    };
+  }, [open, currentStep]);
 
   // ESC で閉じる、← → で移動
   useEffect(() => {
