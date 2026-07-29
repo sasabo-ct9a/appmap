@@ -3713,7 +3713,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "futures-util",
  "notify",
@@ -3726,6 +3726,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
 ]
 

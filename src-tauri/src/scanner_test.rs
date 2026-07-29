@@ -116,6 +116,78 @@ fn plausible_secret_url_needs_at_sign() {
 }
 
 // ─── is_test_file_path ────────────────────────────────────────
+// ─── detect_project_meta(fixture ベース)──────────────────────
+// tempdir に実 FS を作って manifests 検出が意図通りかを確認する。
+// 前実装で subdir が Node/Rust しか拾わなかったバグ、root Cargo.toml と
+// src-tauri/Cargo.toml が重複追加されるバグを再発させないためのガード。
+#[test]
+fn detect_project_meta_tauri_layout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("package.json"), r#"{"scripts": {"build": "vite build", "test": "vitest"}}"#).unwrap();
+    std::fs::write(root.join("package-lock.json"), "{}").unwrap();
+    std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+    std::fs::create_dir_all(root.join("src-tauri")).unwrap();
+    std::fs::write(root.join("src-tauri/Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+
+    let meta = detect_project_meta(root);
+    let paths: Vec<&str> = meta.manifests.iter().map(|m| m.path.as_str()).collect();
+    assert!(paths.contains(&"package.json"), "node manifest missing: {paths:?}");
+    assert!(paths.contains(&"src-tauri/Cargo.toml"), "tauri rust manifest missing: {paths:?}");
+    // 重複しないこと
+    assert_eq!(paths.iter().filter(|p| **p == "src-tauri/Cargo.toml").count(), 1);
+    assert_eq!(paths.iter().filter(|p| **p == "package.json").count(), 1);
+}
+
+#[test]
+fn detect_project_meta_monorepo_full_types() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("package.json"), "{}").unwrap();
+    std::fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
+    // Node subdir(root lockfile 継承を確認)
+    std::fs::create_dir_all(root.join("apps/web")).unwrap();
+    std::fs::write(root.join("apps/web/package.json"), r#"{"scripts": {"build": "vite build"}}"#).unwrap();
+    // Python subdir(前実装で拾えなかった)
+    std::fs::create_dir_all(root.join("services/api")).unwrap();
+    std::fs::write(root.join("services/api/pyproject.toml"), "[project]\nname='x'").unwrap();
+    // PHP subdir(前実装で拾えなかった)
+    std::fs::create_dir_all(root.join("apps/admin")).unwrap();
+    std::fs::write(root.join("apps/admin/composer.json"), "{}").unwrap();
+    // Go subdir(前実装で拾えなかった)
+    std::fs::create_dir_all(root.join("services/worker")).unwrap();
+    std::fs::write(root.join("services/worker/go.mod"), "module x").unwrap();
+
+    let meta = detect_project_meta(root);
+    let paths: Vec<&str> = meta.manifests.iter().map(|m| m.path.as_str()).collect();
+    for expected in [
+        "package.json",
+        "apps/web/package.json",
+        "services/api/pyproject.toml",
+        "apps/admin/composer.json",
+        "services/worker/go.mod",
+    ] {
+        assert!(paths.contains(&expected), "missing {expected} in {paths:?}");
+    }
+
+    // apps/web は local lockfile 無し + root pnpm-lock.yaml あり → has_lockfile=true(root 継承)
+    let web = meta.manifests.iter().find(|m| m.path == "apps/web/package.json").unwrap();
+    assert!(web.has_lockfile, "root lockfile inheritance failed for apps/web");
+}
+
+#[test]
+fn detect_project_meta_vite_tsconfig_variants() {
+    // tsconfig.json 無し、tsconfig.app.json + tsconfig.node.json のみでも TS 判定される
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("package.json"), r#"{"devDependencies": {"typescript": "^5"}}"#).unwrap();
+    std::fs::write(root.join("tsconfig.app.json"), "{}").unwrap();
+    std::fs::write(root.join("tsconfig.node.json"), "{}").unwrap();
+    let meta = detect_project_meta(root);
+    let node = meta.manifests.iter().find(|m| m.manifest_type == "node").unwrap();
+    assert!(node.has_tsconfig, "tsconfig.app.json variant should mark node manifest as TS");
+}
+
 #[test]
 fn test_file_path_recognizes_language_patterns() {
     // JS/TS

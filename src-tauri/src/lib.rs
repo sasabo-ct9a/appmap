@@ -1517,14 +1517,19 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     .await
     .map_err(|e| format!("join error: {}", e))?;
 
-    // 打ち切り表示は「実際に content scan 対象になり得る非テストファイル」の数で判定する。
-    // test fixture が多いだけの repo(prod 80 件 + test 500 件など)を partial 扱いに
-    // してしまう問題を避ける。UI 表示・verdict も content 対象の実数と整合させる。
+    // 打ち切り表示の判定は 2 段:
+    //   (a) walk 自体が MAX_WALK_FILES=10k に到達した(超大型 repo で walk 途中打ち切り)
+    //   (b) 非テストファイル(content scan の実対象)が MAX_SCAN_FILES=200 を超えた
+    // どちらも「未走査部分あり」を意味するので partial verdict の根拠になる。
+    // (a) 抜けが最も痛い:file_list.len() 上限で候補列挙自体が停止 → その後の
+    //     content_candidate_count が 200 以下でも実は 200 以上の prod file が
+    //     未列挙のまま残っているケース。前実装はこれを検知できなかった。
+    let walk_hit_cap = file_list.len() >= MAX_WALK_FILES;
     let content_candidate_count = file_list
         .iter()
         .filter(|p| !is_test_file_path(p))
         .count();
-    if content_candidate_count > MAX_SCAN_FILES {
+    if walk_hit_cap || content_candidate_count > MAX_SCAN_FILES {
         files_truncated = true;
     }
 
@@ -1676,14 +1681,22 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                 //      関数呼び出し(`(` を含む)、object literal(`{`)、配列(`[`)、
                 //      式(`.` を含むメソッドチェイン)は「動的な値」なので除外。
                 let lower_line = raw_line.to_lowercase();
+                // 設定系ファイル(env/yaml/toml/json/ini/properties)は「:」区切りを許容し、
+                // JSON `{"apiKey": "..."}` や TOML `"api_key" = "..."` の quoted key も扱う。
+                // bare 値の許容文字集合も配置系はコード系より広くする(`.` `:` `%` `/` などが実値に登場)。
                 let colon_ok = matches!(
                     ext.as_str(),
                     "env" | "yaml" | "yml" | "toml" | "json" | "ini" | "properties"
                 );
                 for name in secret_var_names {
                     let lower_name = name.to_lowercase();
+                    if lower_name.is_empty() { continue; }
                     let Some(idx) = lower_line.find(&lower_name) else { continue };
-                    let after = &raw_line[idx + name.len()..];
+                    let mut after = &raw_line[idx + name.len()..];
+                    // 設定系ファイルのみ:key 直後の閉じ quote(`{"apiKey":` の `"`)をスキップ
+                    if colon_ok {
+                        after = after.strip_prefix('"').or_else(|| after.strip_prefix('\'')).unwrap_or(after);
+                    }
                     let after_trim = after.trim_start();
                     let sep_ok = after_trim.starts_with('=') || (colon_ok && after_trim.starts_with(':'));
                     if !sep_ok { continue; }
@@ -1703,8 +1716,17 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                         // quoted:引用符を閉じるまでの長さ
                         let quote_char = rest.chars().next().unwrap();
                         rest[1..].chars().take_while(|c| *c != quote_char).count()
+                    } else if colon_ok {
+                        // 設定系の bare 値:空白 / セミコロン / コメント / 構造区切りだけで止める。
+                        //   例:.env の `API_KEY=abc.def/ghi:jkl%mnop` を全部長さに算入したい。
+                        rest.chars()
+                            .take_while(|c| {
+                                !c.is_whitespace()
+                                    && !matches!(c, '#' | ';' | '`' | ',' | ']' | '}' | ')')
+                            })
+                            .count()
                     } else {
-                        // bare:secret っぽい文字集合(英数字 + 記号一部)だけを長さに算入。
+                        // コード系の bare 値:secret っぽい文字集合(英数字 + 記号一部)だけを長さに算入。
                         //   `.` `(` `{` `[` `,` `<` 等は「式」の目印なので take_while で即打ち切り。
                         //   これで `z.string().min(16)` や `getStore()` は length 0 で 16 未満扱い。
                         rest.chars()
@@ -1880,7 +1902,11 @@ fn collect_manifests_at(dir: &Path, project_root: &Path, rel_prefix: &str, out: 
     let prefix = if rel_prefix.is_empty() { String::new() } else { format!("{}/", rel_prefix) };
 
     if has("package.json") {
-        out.push(build_node_manifest(dir, &format!("{}package.json", prefix)));
+        out.push(build_node_manifest(
+            dir,
+            project_root,
+            &format!("{}package.json", prefix),
+        ));
     }
     if has("Cargo.toml") {
         // Cargo.lock は同ディレクトリを優先。workspace member の場合は project root の Cargo.lock を参照。
@@ -1915,10 +1941,13 @@ fn collect_manifests_at(dir: &Path, project_root: &Path, rel_prefix: &str, out: 
 /// package.json を `serde_json` で正式にパースし、scripts のキー有無を判定する。
 /// 手 depth カウント方式は `node -e "{...}"` のような script 値の brace で
 /// 壊れていた(false negative)ため。
-fn build_node_manifest(dir: &Path, path: &str) -> ManifestInfo {
-    let (has_build, has_test, has_typecheck) = std::fs::read_to_string(dir.join("package.json"))
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+fn build_node_manifest(dir: &Path, project_root: &Path, path: &str) -> ManifestInfo {
+    let package_json = std::fs::read_to_string(dir.join("package.json")).ok();
+    let parsed = package_json
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
+    let (has_build, has_test, has_typecheck) = parsed
+        .as_ref()
         .map(|v| {
             let scripts = v.get("scripts").and_then(|s| s.as_object());
             let has_key = |k: &str| scripts.map_or(false, |m| m.contains_key(k));
@@ -1929,18 +1958,52 @@ fn build_node_manifest(dir: &Path, path: &str) -> ManifestInfo {
             )
         })
         .unwrap_or((false, false, false));
-    let has_lockfile = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
+    // devDependencies に typescript が入っていれば「実質 TS プロジェクト」扱いにする。
+    // tsconfig*.json が存在する monorepo/sub package でも同様に判定する。
+    let has_ts_dep = parsed.as_ref().map_or(false, |v| {
+        let dev = v.get("devDependencies").and_then(|s| s.as_object());
+        let prod = v.get("dependencies").and_then(|s| s.as_object());
+        dev.map_or(false, |m| m.contains_key("typescript"))
+            || prod.map_or(false, |m| m.contains_key("typescript"))
+    });
+    let has_any_tsconfig = dir_has_tsconfig(dir);
+    let has_tsconfig = has_any_tsconfig || has_ts_dep;
+    // Node monorepo は root pnpm-lock.yaml / package-lock.json / yarn.lock で
+    // 依存を一括固定する運用が普通。sub package 直下に無くても root にあれば OK。
+    let local_lock = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
         .iter()
         .any(|f| dir.join(f).exists());
+    let root_lock = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
+        .iter()
+        .any(|f| project_root.join(f).exists());
     ManifestInfo {
         manifest_type: "node".to_string(),
         path: path.to_string(),
         has_build,
         has_test,
         has_typecheck,
-        has_lockfile,
-        has_tsconfig: dir.join("tsconfig.json").exists(),
+        has_lockfile: local_lock || root_lock,
+        has_tsconfig,
     }
+}
+
+/// dir 直下に `tsconfig.json` or `tsconfig*.json` が 1 つでもあれば真。
+/// Vite 系の `tsconfig.app.json` / `tsconfig.node.json` 構成を拾えるようにする。
+/// `*.tsbuildinfo` は除外。
+fn dir_has_tsconfig(dir: &Path) -> bool {
+    if dir.join("tsconfig.json").exists() { return true; }
+    let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        if name_str.starts_with("tsconfig.")
+            && name_str.ends_with(".json")
+            && !name_str.ends_with(".tsbuildinfo")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn build_rust_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
