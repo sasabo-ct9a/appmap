@@ -75,28 +75,19 @@ function PreReleaseChecklist({
   // v0.1.9:「このチェックで確認していること」の折り畳み開閉
   const [scopeOpen, setScopeOpen] = useState<boolean>(false);
 
-  // v0.1.10(Codex 指摘 Low #8 対応):scan の進行状態を ref でも持つ。
-  //   file-changed イベントハンドラの中で「今 scan 中?」を判定するため。
-  //   state だと stale closure になり、debounce 直後に scan が重なる可能性がある。
-  //   同時に、scan 中にイベントが来た場合は「pending」フラグを立てて、
-  //   scan 完了直後に 1 度だけ追いスキャン → backlog を防ぐ。
-  //
-  //   v0.1.10 追加(Codex 二次指摘 Medium #3 対応):folderPath 変更時に
-  //   pending を必ずクリアする + scanNow 内で「実行時点の folderPath」を
-  //   snapshot して比較。これで folder 切替直後の flush が古いフォルダで
-  //   走って setScan する事故を防ぐ。
+  // scan の状態管理:
+  //   - scanningRef:進行中フラグ。イベントハンドラから「今 scan 中?」を判定するのに
+  //     state だと stale closure になるため ref も持つ。
+  //   - pendingRescanRef:scan 中に来たイベントを 1 件だけ保存(coalescing)。
+  //     scan 完了直後に flush → 短時間に複数の folder-changed が来ても scan は
+  //     多くて 1 段しか重ならない。
+  //   - folderPathRef / scanNowRef:latest-ref パターン。scan 完了時に「まだ同じ
+  //     フォルダを見ているか」の確認と、pending flush 時に最新の scanNow を使う。
+  //     どちらも render body で同期する(useEffect の passive 実行を待つと commit
+  //     直後に古い ref を参照する race がある)。
   const scanningRef = useRef(false);
   const pendingRescanRef = useRef(false);
   const scanNowRef = useRef<() => void>(() => {});
-  // v0.1.10(Codex 三次指摘 Medium #1 対応):現在の folderPath を ref でも保持。
-  //   scan 完了時に「まだ同じ folder を見ているか」を確認して setScan するため。
-  //   folderPath 変更中に古い scan が完走しても、B の画面に A の結果が
-  //   一時表示される事故を防ぐ。
-  //
-  //   v0.1.10 追加(Codex 四次指摘 Low #2 対応):ref 更新は useEffect(passive)
-  //   ではなく render body で同期。commit と useEffect の間に scan promise が
-  //   resolve すると ref が古いままの race を潰す。ref の mutation は React の
-  //   render-purity 制約に触れない(state 更新と違って再 render 誘発しない)。
   const folderPathRef = useRef(folderPath);
   folderPathRef.current = folderPath;
 
@@ -141,10 +132,7 @@ function PreReleaseChecklist({
       });
   }, [folderPath]);
 
-  // scanNowRef は常に最新の scanNow を指す(microtask flush から使う)
-  // v0.1.10(Codex 五次指摘 Low #1 対応):useEffect(passive)ではなく render body で同期。
-  //   folderPathRef と同じ理由:folder 切替直後に旧 scanNow が flush 経由で
-  //   走ると、古いフォルダの scan が余計に走って新フォルダの反映が遅れる。
+  // 常に最新の scanNow を指す(microtask flush から使うため render body で同期)
   scanNowRef.current = scanNow;
 
   // folderPath が変わったら、古いフォルダに対する pending は捨てる
@@ -157,15 +145,13 @@ function PreReleaseChecklist({
     scanNow();
   }, [scanNow]);
 
-  // v0.1.10:ファイル監視で自動再スキャン。
-  //   Rust の notify-debouncer-mini(500ms デバウンス済み)がフォルダを常時監視。
-  //   Cursor / VS Code / vim / どのエディタで保存しても、CLI で書き換えても検知。
+  // ファイル監視で自動再スキャン。Rust の notify-debouncer-mini(500ms デバウンス済み)が
+  // フォルダを常時監視し、Cursor / VS Code / CLI どれで保存しても検知する。
   //
-  //   Codex 指摘 High #1・#2 対応:
-  //     - watcher の start は id(u64)を返す。stop は id 一致時のみクリアする。
-  //     - deps から scanning を外し、scanningRef 経由で参照。
-  //       (scanning を deps に入れていると scan 開始/終了ごとに watcher が
-  //        張り直され、古い stop が新 watcher を殺す race が起きる。)
+  // watcher race を避けるため:
+  //   - start は id (u64) を返す。stop は id 一致時のみクリア。
+  //   - deps に scanning を入れない(scanningRef 経由)。入れると scan 開始/終了
+  //     ごとに watcher が張り直され、古い stop が新 watcher を殺す。
   useEffect(() => {
     if (!folderPath) return;
     let cancelled = false;
@@ -200,10 +186,32 @@ function PreReleaseChecklist({
   const highs = findings.filter((f) => f.severity === "high");
   const mids = findings.filter((f) => f.severity === "medium");
   const lows = findings.filter((f) => f.severity === "low");
-  const assessment = computeOverallAssessment(findings, language);
 
   const isJa = language === "ja";
   const isSample = folderPath === null;
+  // スキャン状態:失敗 or 未実行なら "Ready" と結論しない(誤った安心を与えないため)。
+  //   ok:      scan 完了(finding から verdict 算出)
+  //   sample:  サンプルモード(実データではない)
+  //   failed:  scanError あり(Rust 側で例外)
+  //   unavailable: 実フォルダ選択済みだが scan がまだ null(初回 or 再取得中)
+  const scanState: "ok" | "sample" | "failed" | "unavailable" = isSample
+    ? "sample"
+    : scanError
+      ? "failed"
+      : scan
+        ? "ok"
+        : "unavailable";
+  const isPartialCoverage = scanState === "ok" && !!scan?.files_truncated;
+  const assessment = computeOverallAssessment(
+    findings,
+    language,
+    scanState,
+    isPartialCoverage,
+  );
+  // 「Ready」表示が確実に実データに基づいたものだけになるよう、scanState=ok の時のみ
+  //   AI 修正プロンプト送信を許可する(unknown 状態で「修正依頼」を出させない)。
+  const promptButtonEnabled = scanState === "ok" && findings.length > 0;
+
   const heading = isJa ? "コードチェック" : "Code check";
   const intro = isJa
     ? "スキャンしたコードを、危険度の高い順に並べています。"
@@ -211,6 +219,9 @@ function PreReleaseChecklist({
   const emptyState = isJa
     ? "重大な問題は見つかりませんでした。出荷準備が整っています!"
     : "No serious issues found. You're ready to ship!";
+  const unknownState = isJa
+    ? "コード検査が完了していないため、判定を出せません。フォルダのアクセス権を確認するか、再度スキャンを実行してください。"
+    : "The code check has not completed, so no verdict can be given. Check folder access or run the scan again.";
   const scanningText = isJa
     ? "コード全体をスキャン中…"
     : "Scanning the codebase…";
@@ -459,15 +470,29 @@ function PreReleaseChecklist({
 
       {/* Findings */}
       {findings.length === 0 && !scanning ? (
-        <div
-          className="text-sm text-ink-strong px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
-          style={{ borderColor: "#a7f3d0", background: "#ecfdf5", color: "#065f46" }}
-        >
-          <div className="text-2xl mb-1">
-            <CheckCircleIcon />
+        scanState === "failed" || scanState === "unavailable" ? (
+          // スキャン未完了/失敗:「安全」ではなく「不明」を明示する
+          <div
+            className="text-sm px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
+            style={{
+              borderColor: "#e5e7eb",
+              background: "#f9fafb",
+              color: "#374151",
+            }}
+          >
+            {unknownState}
           </div>
-          {emptyState}
-        </div>
+        ) : (
+          <div
+            className="text-sm text-ink-strong px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
+            style={{ borderColor: "#a7f3d0", background: "#ecfdf5", color: "#065f46" }}
+          >
+            <div className="text-2xl mb-1">
+              <CheckCircleIcon />
+            </div>
+            {emptyState}
+          </div>
+        )
       ) : (
         <ul className="space-y-2">
           {findings.map((f) => (
@@ -476,12 +501,12 @@ function PreReleaseChecklist({
         </ul>
       )}
 
-      {/* 全体評価パネル */}
-      {!scanning && findings.length > 0 && (
+      {/* 全体評価パネル。findings が無くても scan 未完了(unknown)状態は表示する。 */}
+      {!scanning && (findings.length > 0 || scanState === "failed" || scanState === "unavailable") && (
         <AssessmentPanel
           assessment={assessment}
           language={language}
-          onOpenAIPrompt={() => setPromptOpen(true)}
+          onOpenAIPrompt={promptButtonEnabled ? () => setPromptOpen(true) : undefined}
           isSample={isSample}
         />
       )}
@@ -536,6 +561,14 @@ const VERDICT_STYLE: Record<
     text: "#064e3b",
     accent: "#059669",
     scoreBg: "#d1fae5",
+  },
+  unknown: {
+    // 中間色。緑(安心)と赤(危険)どちらとも紛らわしくないニュートラルグレー。
+    bg: "#f9fafb",
+    border: "#e5e7eb",
+    text: "#374151",
+    accent: "#6b7280",
+    scoreBg: "#f3f4f6",
   },
 };
 

@@ -27,25 +27,38 @@ export type ScanHit = {
 export type PreReleaseScanResult = {
   secrets: ScanHit[];
   todos: ScanHit[];
-  /** v0.1.10(Codex Medium #4):件数だけでなく file:line も返す。
-   *  Cursor 修正時に「全体 grep で意図的な console.error まで消す」過剰修正を防ぐ。 */
+  /** file:line 付き。件数のみだと Cursor が全体 grep で意図的な console.error まで
+   *  消す過剰修正の温床になるので、位置情報を必ず返す。 */
   console_logs: ScanHit[];
-  /** v0.1.10(Codex 二次指摘 Medium #4):truncate 前の総数。
-   *  UI/AI prompt での「N 箇所」表示はこの total を使う(secrets/todos/console_logs
-   *  はそれぞれ 20/50/50 で切られるため、length では過少報告になる)。 */
+  /** truncate 前の総数。UI/AI prompt での「N 箇所」表示はこの total を使う
+   *  (secrets/todos/console_logs はそれぞれ 20/50/50 で切られるため、length では過少報告になる)。 */
   secrets_total: number;
   todos_total: number;
   console_logs_total: number;
   files_scanned: number;
   files_truncated: boolean;
-  /** v0.1.8:AI 分析より新しいテストフレームワーク検出結果(null = 未検出)*/
+  /** AI 分析より新しいテストフレームワーク検出結果(null = 未検出)*/
   detected_test_framework: string | null;
-  /** テストファイル(*.test.*, *.spec.*, __tests__/)の存在 */
+  /** 実テストファイル(言語別マーカーで判定)の存在 */
   has_test_files: boolean;
-  /** v0.1.10(Codex Medium #5):.env / .env.local 等が存在するか */
+  /** .env / .env.local 等が実在するか(全階層を走査) */
   env_files_present: boolean;
-  /** v0.1.10(Codex Medium #5):.gitignore が .env パターンを含むか */
+  /** 全ての実在 env が .gitignore で保護されているか */
   env_covered_by_gitignore: boolean;
+  /** 運用インフラ有無(build/test scripts / CI / lockfile / tsconfig) */
+  project_meta: ProjectMeta;
+};
+
+/** #8 実運用 gates:TODO 件数より重要な「本番前にあるべきもの」の欠落を検出する。 */
+export type ProjectMeta = {
+  project_type: string | null;
+  has_build_script: boolean;
+  has_test_script: boolean;
+  has_typecheck_script: boolean;
+  has_lockfile: boolean;
+  has_tsconfig: boolean;
+  is_typescript_project: boolean;
+  has_ci_workflow: boolean;
 };
 
 export async function runCodeScan(
@@ -57,13 +70,39 @@ export async function runCodeScan(
 }
 
 // ────────────────────────────────────────────────────────────────
+// スタックヒント(fixSteps の推奨コマンドを分岐させるため)
+// ────────────────────────────────────────────────────────────────
+export type StackHint = "node" | "python" | "rust" | "go" | "ruby" | "php" | "unknown";
+
+/** screens.context.techStack から stack を推定する。判定不能なら "unknown"。 */
+function inferStackHint(techStack: {
+  frontend?: string | null;
+  backend?: string | null;
+  db?: string | null;
+} | null | undefined): StackHint {
+  const joined = [techStack?.frontend, techStack?.backend]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (!joined) return "unknown";
+  if (/\b(react|vue|svelte|next|nuxt|angular|node|express|nest|fastify|typescript|javascript|remix)\b/.test(joined)) return "node";
+  if (/\b(python|django|fastapi|flask|pyramid|starlette|tornado)\b/.test(joined)) return "python";
+  if (/\b(rust|actix|axum|rocket|tauri)\b/.test(joined)) return "rust";
+  if (/\b(go\b|golang|gin|echo|fiber|chi)\b/.test(joined)) return "go";
+  if (/\b(ruby|rails|sinatra|hanami)\b/.test(joined)) return "ruby";
+  if (/\b(php|laravel|symfony|codeigniter)\b/.test(joined)) return "php";
+  return "unknown";
+}
+
+// ────────────────────────────────────────────────────────────────
 // 統合フィンディング型
 // ────────────────────────────────────────────────────────────────
 export type Severity = "high" | "medium" | "low";
 export type Category =
   | "secrets"
   | "testing"
-  | "dev-leftovers";
+  | "dev-leftovers"
+  | "release-gates";
 
 export type Finding = {
   id: string;
@@ -93,7 +132,7 @@ export type CheckInputs = {
 // ────────────────────────────────────────────────────────────────
 // 全体評価(スコア + 判定)
 // ────────────────────────────────────────────────────────────────
-export type Verdict = "ready" | "caution" | "block";
+export type Verdict = "ready" | "caution" | "block" | "unknown";
 
 export type OverallAssessment = {
   verdict: Verdict;
@@ -104,9 +143,9 @@ export type OverallAssessment = {
   /** 優先アクション(重大度順に最大 3 件のタイトル抜粋)*/
   priorityTitles: string[];
 };
-// v0.1.8:calcScore(100 減点式)は撤去。数字の権威性がユーザーに
-//         「品質保証」と誤読される害の方が実利用より大きかった。
-//         verdict(block/caution/ready)+ 件数だけで意思決定させる。
+// calcScore(100 減点式)は撤去。数字の権威性がユーザーに
+// 「品質保証」と誤読される害の方が実利用より大きかった。
+// verdict(block/caution/ready/unknown)+ 件数だけで意思決定させる。
 
 function calcVerdict(findings: Finding[]): Verdict {
   const highs = findings.filter((f) => f.severity === "high").length;
@@ -234,30 +273,63 @@ export function buildAIFixPrompt({
   return lines.join("\n");
 }
 
+/**
+ * 全体評価を計算する。
+ * scanState:
+ *   - "ok":スキャン完了(finding からそのまま verdict 算出)
+ *   - "sample":サンプル表示中(実データではないので Ready 断定はしない)
+ *   - "failed":スキャン失敗(unknown 判定 → 誤った安心を与えない)
+ *   - "unavailable":scan 未取得(まだ実行してない / 対象フォルダ無し)
+ * isPartialCoverage:
+ *   - true の時、実際は 200 ファイルで打ち切られている(monorepo 等)。
+ *     finding 0 でも「全部見てないから Ready と言えない」→ unknown 扱いに落とす。
+ */
 export function computeOverallAssessment(
   findings: Finding[],
   language: Language,
+  scanState: "ok" | "sample" | "failed" | "unavailable" = "ok",
+  isPartialCoverage: boolean = false,
 ): OverallAssessment {
-  const verdict = calcVerdict(findings);
   const t = translations(language);
   const highs = findings.filter((f) => f.severity === "high").length;
   const meds = findings.filter((f) => f.severity === "medium").length;
   const lows = findings.filter((f) => f.severity === "low").length;
 
+  // スキャンが完了していないなら、いくら finding が空でも Ready と結論しない。
+  // 「重大なものは見つからなかった」という表示は、実際にスキャンが走った時のみ。
+  let verdict: Verdict;
   let label: string;
   let summary: string;
-  if (verdict === "block") {
-    label = t.verdictBlockLabel;
-    summary = t.verdictBlockSummary(highs, meds);
-  } else if (verdict === "caution") {
-    label = t.verdictCautionLabel;
-    summary = t.verdictCautionSummary(meds, lows);
-  } else if (findings.length === 0) {
-    label = t.verdictReadyLabel;
-    summary = t.verdictReadyPerfectSummary;
+  if (scanState === "failed" || scanState === "unavailable") {
+    verdict = "unknown";
+    label = t.verdictUnknownLabel;
+    summary =
+      scanState === "failed"
+        ? t.verdictUnknownFailedSummary
+        : t.verdictUnknownUnavailableSummary;
   } else {
-    label = t.verdictReadyLabel;
-    summary = t.verdictReadyWithLowSummary(lows);
+    verdict = calcVerdict(findings);
+    if (verdict === "block") {
+      label = t.verdictBlockLabel;
+      summary = t.verdictBlockSummary(highs, meds);
+    } else if (verdict === "caution") {
+      label = t.verdictCautionLabel;
+      summary = t.verdictCautionSummary(meds, lows);
+    } else if (findings.length === 0) {
+      // 打ち切りが起きているのに「何も見つからなかった」と言うのは誤解を招く。
+      // 実際には見ていない部分がある → unknown/partial に落とす。
+      if (isPartialCoverage) {
+        verdict = "unknown";
+        label = t.verdictUnknownLabel;
+        summary = t.verdictUnknownPartialSummary;
+      } else {
+        label = t.verdictReadyLabel;
+        summary = t.verdictReadyPerfectSummary;
+      }
+    } else {
+      label = t.verdictReadyLabel;
+      summary = t.verdictReadyWithLowSummary(lows);
+    }
   }
 
   const priorityTitles = findings
@@ -281,7 +353,8 @@ export function buildFindings({
   const t = translations(language);
 
   // ── 1. シークレット(コードスキャン)
-  //   v0.1.10(Codex 二次指摘 Medium #4):count は truncate 前の総数(secrets_total)を使う。
+  // count は truncate 前の総数(secrets_total)を使う。scan.secrets.length は
+  // 表示用に切詰められた件数で、実件数を過少報告してしまうため。
   if (scan && scan.secrets.length > 0) {
     const total = scan.secrets_total;
     findings.push({
@@ -300,8 +373,8 @@ export function buildFindings({
     });
   }
 
-  // v0.1.10(Codex 指摘 Medium #5):.env ファイルが .gitignore で守られていない場合、
-  //   誤って git commit → push すると全公開になる。高い severity で先頭に出す。
+  // .env が実在するが .gitignore で守られていない場合:git commit → push で秘密情報
+  //   まるごと公開される事故のリスク。severity high で他の finding より優先表示。
   if (scan && scan.env_files_present && !scan.env_covered_by_gitignore) {
     findings.push({
       id: "env-unprotected",
@@ -310,6 +383,64 @@ export function buildFindings({
       title: t.envUnprotectedTitle,
       hint: t.envUnprotectedHint,
       fixSteps: t.envUnprotectedFix,
+    });
+  }
+
+  // ── 運用 gates(#8):TODO 件数より重要な「本番前にあるべきインフラ」の欠落。
+  //   対象プロジェクトの種別に応じて finding を発火する(Rust/Go では build/test は
+  //   常に走るので Node 特化の check を出さない、など)。
+  if (scan?.project_meta.project_type === "node") {
+    if (!scan.project_meta.has_build_script) {
+      findings.push({
+        id: "no-build-script",
+        severity: "medium",
+        category: "release-gates",
+        title: t.noBuildScriptTitle,
+        hint: t.noBuildScriptHint,
+        fixSteps: t.noBuildScriptFix,
+      });
+    }
+    if (!scan.project_meta.has_test_script) {
+      findings.push({
+        id: "no-test-script",
+        severity: "medium",
+        category: "release-gates",
+        title: t.noTestScriptTitle,
+        hint: t.noTestScriptHint,
+        fixSteps: t.noTestScriptFix,
+      });
+    }
+    if (scan.project_meta.is_typescript_project && !scan.project_meta.has_typecheck_script) {
+      findings.push({
+        id: "no-typecheck-script",
+        severity: "low",
+        category: "release-gates",
+        title: t.noTypecheckScriptTitle,
+        hint: t.noTypecheckScriptHint,
+        fixSteps: t.noTypecheckScriptFix,
+      });
+    }
+  }
+  // lockfile はほぼ全言語で推奨(実運用で最も再現性事故を招く)
+  if (scan?.project_meta.project_type && !scan.project_meta.has_lockfile) {
+    findings.push({
+      id: "no-lockfile",
+      severity: "medium",
+      category: "release-gates",
+      title: t.noLockfileTitle,
+      hint: t.noLockfileHint,
+      fixSteps: t.noLockfileFix,
+    });
+  }
+  // CI 未整備は low(個人開発では許容範囲、ただし共同開発では要)
+  if (scan?.project_meta.project_type && !scan.project_meta.has_ci_workflow) {
+    findings.push({
+      id: "no-ci-workflow",
+      severity: "low",
+      category: "release-gates",
+      title: t.noCiWorkflowTitle,
+      hint: t.noCiWorkflowHint,
+      fixSteps: t.noCiWorkflowFix,
     });
   }
 
@@ -332,6 +463,7 @@ export function buildFindings({
   const framework = scanFramework ?? ctxTesting?.framework ?? null;
   const hasTests = scan ? scanHasTests : ctxTesting?.hasTests;
 
+  const stackHint = inferStackHint(screens.context?.techStack);
   if (!framework) {
     findings.push({
       id: "no-test-framework",
@@ -339,25 +471,24 @@ export function buildFindings({
       category: "testing",
       title: t.noTestFrameworkTitle,
       hint: t.noTestFrameworkHint,
-      fixSteps: t.noTestFrameworkFix,
+      fixSteps: t.noTestFrameworkFix(stackHint),
     });
   } else if (hasTests === false) {
-    // v0.1.10 R3:framework が入っているだけ「準備は済んでいる」状態なので、
-    // 「framework すら無い」よりは 1 段軽い。severity を low に格下げ。
+    // framework が入っているだけ「準備は済んでいる」状態なので、「framework すら無い」よりは
+    // 1 段軽い扱い(severity を low に格下げ)。
     findings.push({
       id: "no-tests",
       severity: "low",
       category: "testing",
       title: t.noTestsTitle(framework),
       hint: t.noTestsHint,
-      fixSteps: t.noTestsFix,
+      fixSteps: t.noTestsFix(stackHint),
     });
   }
 
   // ── 6. 開発中コードの残置(scan 依存)
-  //   v0.1.10(Codex 指摘 Medium #4):console_logs は count のみだったが Vec<ScanHit>
-  //   に変えたので、examples に file:line を載せて Cursor が全体 grep 過剰修正しないように。
-  //   v0.1.10 二次:count は truncate 前の総数(console_logs_total)を使う。
+  // console_logs は file:line を持つので、examples に載せて Cursor に該当箇所だけ
+  //   修正させる(全体 grep での過剰修正を防ぐ)。count は truncate 前の総数を使う。
   if (scan && scan.console_logs.length > 0) {
     const total = scan.console_logs_total;
     findings.push({
@@ -409,39 +540,40 @@ type Copy = {
   secretsTitle: (n: number) => string;
   secretsHint: string;
   secretsFix: string[];
-  // v0.1.10(Codex 指摘 Medium #5):.env が .gitignore で守られていないとき
+  // .env が .gitignore で守られていないときの hotfix 指示
   envUnprotectedTitle: string;
   envUnprotectedHint: string;
   envUnprotectedFix: string[];
-  noEntryTitle: string;
-  noEntryHint: string;
-  noEntryFix: string[];
-  multiEntryTitle: (n: number) => string;
-  multiEntryHint: string;
-  multiEntryFix: string[];
-  riskyTitle: (n: number) => string;
-  riskyHint: string;
-  riskyFix: string[];
-  unanalyzedTitle: (n: number) => string;
-  unanalyzedHint: string;
-  unanalyzedFix: string[];
+  // 運用 gates(#8)
+  noBuildScriptTitle: string;
+  noBuildScriptHint: string;
+  noBuildScriptFix: string[];
+  noTestScriptTitle: string;
+  noTestScriptHint: string;
+  noTestScriptFix: string[];
+  noTypecheckScriptTitle: string;
+  noTypecheckScriptHint: string;
+  noTypecheckScriptFix: string[];
+  noLockfileTitle: string;
+  noLockfileHint: string;
+  noLockfileFix: string[];
+  noCiWorkflowTitle: string;
+  noCiWorkflowHint: string;
+  noCiWorkflowFix: string[];
   noTestFrameworkTitle: string;
   noTestFrameworkHint: string;
-  noTestFrameworkFix: string[];
+  /** stack ヒント(node/python/rust/go/ruby/php/unknown)から適切な導入手順を返す。
+   *  Node 前提の `npm install vitest` を Rust/Python プロジェクトに出す事故を防ぐ。 */
+  noTestFrameworkFix: (stack: StackHint) => string[];
   noTestsTitle: (framework: string) => string;
   noTestsHint: string;
-  noTestsFix: string[];
+  noTestsFix: (stack: StackHint) => string[];
   consoleLogsTitle: (n: number) => string;
   consoleLogsHint: string;
   consoleLogsFix: string[];
   todosTitle: (n: number) => string;
   todosHint: string;
   todosFix: string[];
-  // v0.1.9:予想エラー(静的検出、AI で深掘り可能)
-  potentialErrorsTitle: (n: number) => string;
-  potentialErrorsHint: string;
-  potentialErrorsFix: string[];
-  potentialErrorsDeepDive: string;
   // 全体評価
   verdictBlockLabel: string;
   verdictBlockSummary: (highs: number, meds: number) => string;
@@ -450,6 +582,10 @@ type Copy = {
   verdictReadyLabel: string;
   verdictReadyPerfectSummary: string;
   verdictReadyWithLowSummary: (lows: number) => string;
+  verdictUnknownLabel: string;
+  verdictUnknownFailedSummary: string;
+  verdictUnknownUnavailableSummary: string;
+  verdictUnknownPartialSummary: string;
   overallHeading: string;
   priorityHeading: string;
 };
@@ -465,8 +601,7 @@ const JA: Copy = {
     "既に GitHub 等に push 済みなら、そのキーは漏洩済み扱い。発行元のダッシュボードで **即ローテーション**(無効化 → 新規発行)",
     "本番デプロイ先(Vercel / Netlify / AWS 等)の環境変数設定にも同じ値を登録",
   ],
-  envUnprotectedTitle:
-    ".env ファイルが `.gitignore` で守られていません",
+  envUnprotectedTitle: ".env ファイルが `.gitignore` で守られていません",
   envUnprotectedHint:
     ".env(または .env.local など)がプロジェクト内にありますが、`.gitignore` に含まれていません。この状態で `git add .` すると秘密情報ごと公開リポジトリに上がる恐れがあります。",
   envUnprotectedFix: [
@@ -476,64 +611,116 @@ const JA: Copy = {
     "既に追跡されている場合:`git rm --cached .env` で追跡から外し、変更をコミット",
     "GitHub 等に既に push 済みなら .env 内の秘密情報は漏洩済み扱い。**すべての API キー・パスワードを即ローテーション**",
   ],
-  noEntryTitle: "アプリの入口画面が定義されていません",
-  noEntryHint:
-    "起動時にどの画面から始まるかが不明です。動線設計が成立しません。",
-  noEntryFix: [
-    "起動時にユーザーが最初に見る画面を 1 つ決める(例:ログイン画面、トップページ)",
-    "AI コーディングツールに「◯◯画面を起動時のエントリーポイントに設定して」と指示、または該当ファイルに ` isEntryPoint: true` 相当の目印を付ける",
-    "AppMap で再分析して緑の「はじまり」バッジが該当画面に付くことを確認",
+  noBuildScriptTitle: "`build` スクリプトが定義されていません",
+  noBuildScriptHint:
+    "`package.json` に `scripts.build` が無いため、本番用ビルドをコマンド一発で作れない状態です。デプロイ時に「どうやってビルドするんだっけ?」で毎回悩みます。",
+  noBuildScriptFix: [
+    "`package.json` の `scripts` に、実際にビルドを走らせるコマンドを追加(Vite なら `\"build\": \"vite build\"`、Next.js なら `\"build\": \"next build\"` など)",
+    "`npm run build` を実行してエラーなく完了することを確認",
+    "CI(GitHub Actions 等)がある場合は build step が通ることも確認",
   ],
-  multiEntryTitle: (n) => `入口画面が ${n} つあります(通常は 1 つ)`,
-  multiEntryHint:
-    "複数の起点があるとユーザー動線が予測不能になり、仕様書も曖昧になります。",
-  multiEntryFix: [
-    "本当の意味の入口(未認証ユーザーが最初に見る画面)を 1 つに絞る",
-    "認証済みユーザー用のダッシュボード等を「入口」と混同していないか確認",
-    "意図的に複数入口が必要な場合(例:管理画面と一般画面)は仕様書 §2.2 ユースケースに明記",
-    "余分な入口フラグをコードから外して再分析",
+  noTestScriptTitle: "`test` スクリプトが定義されていません",
+  noTestScriptHint:
+    "`package.json` に `scripts.test` が無いため、テストがあってもワンコマンドで走らせられません。CI 側でも一貫した呼び出し方ができなくなります。",
+  noTestScriptFix: [
+    "`package.json` の `scripts` に `\"test\": \"vitest\"`(または `jest` 等)を追加",
+    "`npm test` で全テストが走ることを確認",
   ],
-  riskyTitle: (n) =>
-    `${n} つの画面が「変更するとリスク高い」と判定されています`,
-  riskyHint:
-    "他画面への影響が大きい画面です。意図せず壊れると復旧に時間がかかります。",
-  riskyFix: [
-    "該当画面を実際に触って主要操作が動くか手で確認",
-    "その画面から遷移する全ての画面も一通り触ってみる(連鎖破壊がないか)",
-    "エラー発生時の挙動を意図的に試す(ネット切断・不正入力・権限外)",
-    "変更履歴(Git ログ)で直近何が変わったかを確認",
-    "可能ならステージング環境で 1 日運用してから本番に出す",
+  noTypecheckScriptTitle: "`typecheck` スクリプトが未定義(TS プロジェクト)",
+  noTypecheckScriptHint:
+    "TypeScript プロジェクトなのに `scripts.typecheck`(または `tsc` 呼び出し)が無いため、CI や pre-commit で型エラーを機械的に検出できません。",
+  noTypecheckScriptFix: [
+    "`package.json` の `scripts` に `\"typecheck\": \"tsc --noEmit\"` を追加",
+    "`npm run typecheck` で型エラー 0 を確認",
+    "以降 CI で `npm run typecheck` を必ず走らせる",
   ],
-  unanalyzedTitle: (n) => `${n} つの画面が AI の影響判定を受けていません`,
-  unanalyzedHint:
-    "AI が「変更したらどうなる?」を判断できなかった画面です。仕様書出力時に空欄になります。",
-  unanalyzedFix: [
-    "**設定** → **Detail level** を「Detailed」に切替",
-    "対象フォルダを再分析(履歴の同じフォルダを選ぶか、Pick folder から再選択)",
-    "それでも埋まらない画面は、コードに JSDoc / コメントで役割を明記してから再分析",
-    "AI に頼らずインスペクター右パネルの「メモ」に自分で補足を書くのも有効",
+  noLockfileTitle: "lockfile がありません",
+  noLockfileHint:
+    "`package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` の何かが必要です。無いと環境ごとに違う依存バージョンが入り「私の環境では動く」問題の温床になります。",
+  noLockfileFix: [
+    "`npm install`(または yarn / pnpm)を実行して lockfile を生成",
+    "生成された lockfile を **git に必ずコミット**(`.gitignore` に入れていないか確認)",
+    "本番デプロイ時は `npm ci`(lockfile 通りにインストール)を使う運用に切替",
+  ],
+  noCiWorkflowTitle: "CI ワークフローがありません",
+  noCiWorkflowHint:
+    "`.github/workflows/` 等の CI 設定が見つかりません。push のたびに自動でビルド/テストが走らない状態は、リリース前チェックを人力に依存させます。",
+  noCiWorkflowFix: [
+    "`.github/workflows/ci.yml` を作成(AI に「Node/GitHub Actions 用の CI を作って」と依頼するとテンプレを書いてくれる)",
+    "最低限:push 時に `npm ci` → `npm run build` → `npm test` を走らせる",
+    "型があるなら `npm run typecheck` も追加",
+    "PR で failing check がマージブロックになるよう設定",
   ],
   noTestFrameworkTitle: "テストフレームワークが検出できませんでした",
   noTestFrameworkHint:
     "Jest / Vitest / Pytest などのテスト環境が見つかりません。本番運用するなら最低限、主要画面遷移を検証するテストを 1 つ用意することを強く推奨します。",
-  noTestFrameworkFix: [
-    "Node.js プロジェクトなら:`npm install --save-dev vitest @testing-library/react @testing-library/jest-dom jsdom` を実行(Vitest 推奨)",
-    "`vitest.config.ts` を作成(AI に「Vitest 用の設定ファイルを作って」と依頼すれば書いてくれる)",
-    "`package.json` の scripts に `\"test\": \"vitest\"` を追加",
-    "`src/__tests__/smoke.test.ts` を作り、`expect(true).toBe(true)` の疎通テストを書いて `npm test` で走ることを確認",
-    "以降は「この画面の◯◯機能のテスト書いて」と AI に頼めば自動生成できる",
-  ],
+  noTestFrameworkFix: (stack) => {
+    switch (stack) {
+      case "node":
+        return [
+          "`npm install --save-dev vitest @testing-library/react @testing-library/jest-dom jsdom` を実行(Vitest 推奨)",
+          "`vitest.config.ts` を作成(AI に「Vitest 用の設定ファイルを作って」と依頼)",
+          "`package.json` の scripts に `\"test\": \"vitest\"` を追加",
+          "`src/__tests__/smoke.test.ts` を作り、`expect(true).toBe(true)` の疎通テストを書いて `npm test` で走ることを確認",
+        ];
+      case "python":
+        return [
+          "`pip install pytest`(または `pip install -r requirements-dev.txt` に pytest 追加)",
+          "プロジェクトルートに `tests/` フォルダと `tests/test_smoke.py` を作成、`def test_smoke(): assert True` を書く",
+          "`pytest` を実行して 1 件 PASSED になることを確認",
+        ];
+      case "rust":
+        return [
+          "既にある lib.rs / main.rs の末尾に `#[cfg(test)] mod tests { #[test] fn smoke() { assert!(true); } }` を追加",
+          "`cargo test` で 1 件 ok になることを確認",
+          "integration test を書くなら `tests/` フォルダを作って `.rs` ファイルを置く",
+        ];
+      case "go":
+        return [
+          "`main_test.go`(または該当パッケージ内の `xxx_test.go`)を作り、`func TestSmoke(t *testing.T) { t.Log(\"ok\") }` を書く",
+          "`go test ./...` で 1 件 PASS を確認",
+        ];
+      case "ruby":
+        return [
+          "`bundle add rspec --group development`(or `gem 'rspec'` を Gemfile に追加)",
+          "`bundle exec rspec --init` で初期化、`spec/smoke_spec.rb` に `RSpec.describe 'smoke' do it { expect(true).to be true } end` を書く",
+          "`bundle exec rspec` で 1 件 pass を確認",
+        ];
+      case "php":
+        return [
+          "`composer require --dev phpunit/phpunit`",
+          "`phpunit.xml` を作成(Laravel なら標準で入っているはず)",
+          "`tests/SmokeTest.php` に `public function test_smoke() { $this->assertTrue(true); }` を書く",
+          "`vendor/bin/phpunit` で 1 件 OK を確認",
+        ];
+      default:
+        return [
+          "プロジェクトの言語/フレームワークに合ったテストランナーを選ぶ(Node → Vitest/Jest、Python → pytest、Rust → cargo test、Go → go test、Ruby → RSpec、PHP → PHPUnit など)",
+          "1 件だけの疎通テスト(assert true 相当)を書き、コマンドで PASS することを確認する",
+          "AI コーディングツールに「このプロジェクトに最小のテスト環境を導入して、疎通テストを 1 件書いて」と依頼するのが最も早い",
+        ];
+    }
+  },
   noTestsTitle: (fw) =>
     `${fw} は導入されていますが、テストが 1 つも書かれていません`,
   noTestsHint:
     "テストゼロで本番に出すと「動くはずが動かない」が発覚するまで気づけません。",
-  noTestsFix: [
-    "まずは Happy Path(正常系)を 1 つ:入口画面から主要機能まで動くか検証するテスト",
-    "AI コーディングツールに「◯◯画面の happy path テストを書いて」と依頼",
-    "生成されたテストを `npm test` で実行、Green になることを確認",
-    "同じ要領で「変更したときリスク高い」画面(§ 上記)にもテストを追加",
-    "CI(GitHub Actions 等)で自動実行するように `.github/workflows/test.yml` を設定",
-  ],
+  noTestsFix: (stack) => {
+    const runCmd =
+      stack === "python" ? "pytest"
+        : stack === "rust" ? "cargo test"
+        : stack === "go" ? "go test ./..."
+        : stack === "ruby" ? "bundle exec rspec"
+        : stack === "php" ? "vendor/bin/phpunit"
+        : "npm test"; // node or unknown
+    return [
+      "まずは Happy Path(正常系)を 1 つ:入口画面から主要機能まで動くか検証するテスト",
+      "AI コーディングツールに「◯◯画面の happy path テストを書いて」と依頼",
+      `生成されたテストを \`${runCmd}\` で実行、Green になることを確認`,
+      "同じ要領で他の重要フローにもテストを追加",
+      "CI(GitHub Actions 等)で自動実行するように workflow を設定",
+    ];
+  },
   consoleLogsTitle: (n) => `console.log が ${n} 箇所残っています`,
   consoleLogsHint:
     "デバッグ用の出力が残ったままです。本番で個人情報や内部データを漏らす原因になります。",
@@ -553,20 +740,6 @@ const JA: Copy = {
     "既に対応済みのコメントは削除",
     "以降は TODO を書くときに「担当者 or Issue 番号」を必ず添える運用にすると溜まりにくい",
   ],
-  // v0.1.9:予想エラー(静的パターン検出 + AI 深掘り可能)
-  potentialErrorsTitle: (n) =>
-    `実行時にエラーになりそうな箇所が ${n} 件見つかりました`,
-  potentialErrorsHint:
-    "コードのパターンだけを見て、当てはまる箇所を広めに列挙しています。周辺コードで問題にならないケースも含まれます。下の「AI で深掘り」を押すと、Claude が実コードを読んで本当に問題かを判定 + 修正方法を教えてくれます。",
-  potentialErrorsFix: [
-    "各該当箇所の周辺コードを実際に読み、既に安全処理が入っているか確認する(`?? fallback` / 直前の length チェック / `?.` optional chaining / try/catch / .catch)。安全処理が既にある箇所は**変更しない**(不要なノイズになる)",
-    "安全処理が無い場合のみ:`JSON.parse(...)` は try/catch で囲む、配列アクセス前に `.length` チェック、`fetch` は `.catch` または try/catch で失敗ハンドリング、DOM 要素は `?.` で null チェック",
-    "対応後、簡潔に「変更した箇所 / 判断で変更しなかった箇所」の一覧を報告してください",
-  ],
-  // v0.1.10:上記 fixSteps は Cursor / Claude Code 向け。AppMap 内での workflow
-  //   (「AI で深掘りボタン」)は UI 側の hint で案内する。
-  potentialErrorsDeepDive: "AI で深掘り",
-  // 全体評価(JA)v0.1.8:「品質保証」に読める強い口調をやめ、抜け漏れチェックの実態に合わせる
   verdictBlockLabel: "出荷前に修正したい項目あり",
   verdictBlockSummary: (h, m) =>
     `重大レベルの抜けが ${h} 件${m > 0 ? `、中レベルが ${m} 件` : ""}見つかりました。まず重大(赤)を潰してから出荷するのが安全です。放置すると個人情報漏洩・不正利用・データ破損につながる可能性のある項目が含まれます。`,
@@ -578,6 +751,13 @@ const JA: Copy = {
     "このチェックが見る範囲では、重大・中・軽微いずれの抜けも検出されませんでした。ただし本チェックはバグ・セキュリティ・実際の動作までは確認していません。出荷前に手動での動作確認を必ず行ってください。",
   verdictReadyWithLowSummary: (l) =>
     `重大レベルの抜けはありません。軽微が ${l} 件ありますが、リリースをブロックする理由にはなりません。時間ができたら潰しておくと以降が楽になります。`,
+  verdictUnknownLabel: "コード検査は完了していません",
+  verdictUnknownFailedSummary:
+    "コードスキャンが失敗したため、抜けの有無を確認できていません。フォルダのアクセス権や再度スキャンボタンでの再実行を試してください。",
+  verdictUnknownUnavailableSummary:
+    "コードスキャンがまだ実行されていません。フォルダを選ぶとスキャンが自動的に走ります。",
+  verdictUnknownPartialSummary:
+    "対象ファイルが多すぎて 200 件で打ち切りました。優先度の高いディレクトリは先にスキャンしていますが、残りの部分は見れていません。「明らかな抜けなし」とは断定できない状態です。",
   overallHeading: "全体評価",
   priorityHeading: "まず対応すべき項目",
 };
@@ -604,62 +784,115 @@ const EN: Copy = {
     "If already tracked: `git rm --cached .env` to untrack it, then commit",
     "If already pushed to GitHub, treat everything in .env as leaked. **Rotate every API key / password immediately**",
   ],
-  noEntryTitle: "No entry screen is defined",
-  noEntryHint:
-    "It's unclear which screen the user sees first. The user flow can't be established.",
-  noEntryFix: [
-    "Decide which single screen the user sees first (e.g. login, top page)",
-    "Tell your AI coding tool to \"set screen X as the entry point\", or mark the file with an `isEntryPoint: true`-equivalent flag",
-    "Re-analyze in AppMap and check the green \"START\" badge appears on that screen",
+  noBuildScriptTitle: "No `build` script defined",
+  noBuildScriptHint:
+    "`package.json` has no `scripts.build`, so there's no one-command way to produce a production build. Deploys will require re-figuring out the build command every time.",
+  noBuildScriptFix: [
+    "Add a build command to `scripts` in `package.json` (e.g. `\"build\": \"vite build\"` for Vite, `\"build\": \"next build\"` for Next.js)",
+    "Run `npm run build` and confirm it completes without errors",
+    "If you have CI, verify the build step passes there too",
   ],
-  multiEntryTitle: (n) => `${n} entry screens defined (usually should be 1)`,
-  multiEntryHint:
-    "Multiple starting points make the user flow unpredictable and the spec ambiguous.",
-  multiEntryFix: [
-    "Pick one real entry point (the screen unauthenticated users see first)",
-    "Check you're not confusing an authenticated dashboard with the entry point",
-    "If multiple entries are intentional (e.g. admin vs. user), document them in spec §2.2 Use Cases",
-    "Remove the extra entry-point flags in code and re-analyze",
+  noTestScriptTitle: "No `test` script defined",
+  noTestScriptHint:
+    "`package.json` has no `scripts.test`, so tests (if any exist) can't be run consistently. CI can't call a stable entry point either.",
+  noTestScriptFix: [
+    "Add `\"test\": \"vitest\"` (or `jest`, etc.) to `scripts` in `package.json`",
+    "Confirm `npm test` runs all tests",
   ],
-  riskyTitle: (n) => `${n} screens flagged as high-risk to change`,
-  riskyHint:
-    "These screens have large downstream impact. Unintended breakage takes long to recover from.",
-  riskyFix: [
-    "Manually walk through the main operations on each screen",
-    "Also touch the screens these lead to (check for chain breakage)",
-    "Deliberately trigger error conditions (network drop, invalid input, unauthorized access)",
-    "Check git log for recent changes to these screens",
-    "If possible, deploy to staging and use it for a day before production",
+  noTypecheckScriptTitle: "No `typecheck` script (TypeScript project)",
+  noTypecheckScriptHint:
+    "This is a TypeScript project but no `scripts.typecheck` (or `tsc` invocation) exists, so type errors can't be caught mechanically in CI or pre-commit.",
+  noTypecheckScriptFix: [
+    "Add `\"typecheck\": \"tsc --noEmit\"` to `scripts` in `package.json`",
+    "Run `npm run typecheck` and confirm zero errors",
+    "Then wire this into CI so type errors block merges",
   ],
-  unanalyzedTitle: (n) => `${n} screens have no risk analysis`,
-  unanalyzedHint:
-    "The AI couldn't judge the change impact for these screens. They'll show as blanks in the spec doc.",
-  unanalyzedFix: [
-    "Go to **Settings** → **Detail level** and switch to \"Detailed\"",
-    "Re-analyze the target folder (either from history or Pick folder)",
-    "For screens still not covered, add JSDoc / comments describing their purpose then re-analyze",
-    "Alternatively, write your own note in the Inspector panel's Notes section",
+  noLockfileTitle: "No lockfile",
+  noLockfileHint:
+    "One of `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` should exist. Without it, different environments get different dependency versions — the \"works on my machine\" problem.",
+  noLockfileFix: [
+    "Run `npm install` (or yarn / pnpm) to generate the lockfile",
+    "**Commit the lockfile to git** (make sure it's not in `.gitignore`)",
+    "Use `npm ci` (installs exactly per lockfile) in production/CI deploys",
+  ],
+  noCiWorkflowTitle: "No CI workflow",
+  noCiWorkflowHint:
+    "No `.github/workflows/` (or equivalent CI config) was found. Without automatic build/test on every push, release checks depend on humans remembering to run them.",
+  noCiWorkflowFix: [
+    "Create `.github/workflows/ci.yml` (ask your AI \"make a Node/GitHub Actions CI\" for a template)",
+    "Minimum: on push, run `npm ci` → `npm run build` → `npm test`",
+    "If you have types, add `npm run typecheck` too",
+    "Configure PRs so failing checks block merge",
   ],
   noTestFrameworkTitle: "No test framework detected",
   noTestFrameworkHint:
     "No Jest / Vitest / Pytest was found. We strongly recommend at least one integration test that covers the main user flow before production.",
-  noTestFrameworkFix: [
-    "For Node.js projects: run `npm install --save-dev vitest @testing-library/react @testing-library/jest-dom jsdom` (Vitest recommended)",
-    "Create `vitest.config.ts` (ask your AI \"make a Vitest config\" and it'll write it)",
-    "Add `\"test\": \"vitest\"` to the `scripts` block of `package.json`",
-    "Create `src/__tests__/smoke.test.ts` with a trivial `expect(true).toBe(true)` and run `npm test` to confirm it works",
-    "From then on, ask the AI \"write tests for feature X on screen Y\" to generate them",
-  ],
+  noTestFrameworkFix: (stack) => {
+    switch (stack) {
+      case "node":
+        return [
+          "Run `npm install --save-dev vitest @testing-library/react @testing-library/jest-dom jsdom` (Vitest recommended)",
+          "Create `vitest.config.ts` (ask your AI \"make a Vitest config\")",
+          "Add `\"test\": \"vitest\"` to the `scripts` block of `package.json`",
+          "Create `src/__tests__/smoke.test.ts` with a trivial `expect(true).toBe(true)` and run `npm test` to confirm",
+        ];
+      case "python":
+        return [
+          "Run `pip install pytest` (or add pytest to `requirements-dev.txt`)",
+          "Create `tests/` folder + `tests/test_smoke.py` with `def test_smoke(): assert True`",
+          "Run `pytest` and confirm 1 test PASSED",
+        ];
+      case "rust":
+        return [
+          "Add `#[cfg(test)] mod tests { #[test] fn smoke() { assert!(true); } }` to lib.rs / main.rs",
+          "Run `cargo test` and confirm 1 test ok",
+          "For integration tests, create a `tests/` folder and put `.rs` files there",
+        ];
+      case "go":
+        return [
+          "Create `main_test.go` (or `xxx_test.go` in the relevant package) with `func TestSmoke(t *testing.T) { t.Log(\"ok\") }`",
+          "Run `go test ./...` and confirm 1 PASS",
+        ];
+      case "ruby":
+        return [
+          "Run `bundle add rspec --group development` (or add `gem 'rspec'` to Gemfile)",
+          "Init with `bundle exec rspec --init`, then write `spec/smoke_spec.rb` with `RSpec.describe 'smoke' do it { expect(true).to be true } end`",
+          "Run `bundle exec rspec` and confirm 1 pass",
+        ];
+      case "php":
+        return [
+          "Run `composer require --dev phpunit/phpunit`",
+          "Create `phpunit.xml` (Laravel ships this already)",
+          "Write `tests/SmokeTest.php` with `public function test_smoke() { $this->assertTrue(true); }`",
+          "Run `vendor/bin/phpunit` and confirm 1 OK",
+        ];
+      default:
+        return [
+          "Pick a test runner matching your language/framework (Node → Vitest/Jest, Python → pytest, Rust → cargo test, Go → go test, Ruby → RSpec, PHP → PHPUnit)",
+          "Write a single smoke test (assert true equivalent) and run the appropriate command to confirm PASS",
+          "The fastest path: ask your AI coding tool to \"set up the minimal test environment for this project and write one smoke test\"",
+        ];
+    }
+  },
   noTestsTitle: (fw) => `${fw} is installed but no tests were written`,
   noTestsHint:
     "Shipping with zero tests means \"it worked in dev\" is your only guarantee.",
-  noTestsFix: [
-    "Start with a Happy Path test: does the flow from entry point to main feature work?",
-    "Ask your AI coding tool: \"write a happy-path test for screen X\"",
-    "Run `npm test` and confirm it goes green",
-    "Add tests for the high-risk screens (see above) next",
-    "Wire it into CI (GitHub Actions etc.) with `.github/workflows/test.yml` for auto-execution",
-  ],
+  noTestsFix: (stack) => {
+    const runCmd =
+      stack === "python" ? "pytest"
+        : stack === "rust" ? "cargo test"
+        : stack === "go" ? "go test ./..."
+        : stack === "ruby" ? "bundle exec rspec"
+        : stack === "php" ? "vendor/bin/phpunit"
+        : "npm test";
+    return [
+      "Start with a Happy Path test: does the flow from entry point to main feature work?",
+      "Ask your AI coding tool: \"write a happy-path test for screen X\"",
+      `Run \`${runCmd}\` and confirm it goes green`,
+      "Add tests for other critical flows next",
+      "Wire it into CI (GitHub Actions etc.) for auto-execution",
+    ];
+  },
   consoleLogsTitle: (n) => `${n} console.log calls left in code`,
   consoleLogsHint:
     "Debug output can leak personal data or internal state in production.",
@@ -679,18 +912,6 @@ const EN: Copy = {
     "Delete already-handled comments outright",
     "Going forward, always tag TODOs with an owner or Issue number to keep them from accumulating",
   ],
-  // v0.1.9: potential runtime errors (static detection + optional AI deep-dive)
-  potentialErrorsTitle: (n) =>
-    `${n} spot(s) that could crash at runtime`,
-  potentialErrorsHint:
-    "Detected purely from surface patterns and shown broadly — many of these will not actually cause problems in context. Click 'AI deep-dive' to have Claude read the source and tell you which are real and how to fix them.",
-  potentialErrorsFix: [
-    "For each location, read the surrounding code and check whether it is already guarded (`?? fallback` / preceding `.length` check / `?.` optional chaining / try/catch / .catch). If a safe pattern already exists, **do NOT modify** it (adds noise).",
-    "Only if unguarded: wrap `JSON.parse(...)` in try/catch, add a `.length` check before indexed access, use `.catch` or try/catch on `fetch`, use `?.` on DOM element access.",
-    "After the pass, briefly report which sites you changed vs which you left alone with reasoning.",
-  ],
-  potentialErrorsDeepDive: "AI deep-dive",
-  // Overall assessment (EN) v0.1.8: softened to reflect the checklist's actual scope
   verdictBlockLabel: "Fix these before shipping",
   verdictBlockSummary: (h, m) =>
     `${h} high-severity gap(s)${m > 0 ? ` and ${m} medium` : ""} were found. Resolving the red items before shipping is safer — some can lead to data leaks, unauthorized access, or corruption.`,
@@ -702,6 +923,13 @@ const EN: Copy = {
     "Within this checklist's scope, no high, medium, or low-severity gaps were detected. Note: this check does NOT cover bugs, security, or actual runtime behavior. Manually verify the main user flow before shipping.",
   verdictReadyWithLowSummary: (l) =>
     `No high-severity gaps. ${l} low item(s) remain but do not block release. Handle them when convenient to make future work easier.`,
+  verdictUnknownLabel: "Code check did not complete",
+  verdictUnknownFailedSummary:
+    "The code scan failed, so no verdict can be given. Check folder access permissions or press the Rescan button.",
+  verdictUnknownUnavailableSummary:
+    "The code scan has not run yet. Pick a folder and the scan will start automatically.",
+  verdictUnknownPartialSummary:
+    "Too many files — scan was truncated at 200. Priority directories were scanned first, but the rest was skipped. Cannot conclude \"no gaps found\".",
   overallHeading: "Overall assessment",
   priorityHeading: "Fix these first",
 };

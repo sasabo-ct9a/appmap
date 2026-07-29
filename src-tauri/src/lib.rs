@@ -1221,18 +1221,19 @@ async fn read_files_for_qa(
 struct PreReleaseScanResult {
     secrets: Vec<ScanHit>,
     todos: Vec<ScanHit>,
-    // v0.1.10(Codex 指摘 Medium #4 対応):件数だけでなく file:line も返す。
-    //   count だけだと Cursor に「XX 箇所削除して」と依頼した時に全体 grep で
-    //   意図的な console.error まで巻き込む過剰修正リスクがあった。
+    /// file:line 付き。件数のみだと Cursor が全体 grep で意図的な console.error まで
+    /// 消す過剰修正の温床になる。
     console_logs: Vec<ScanHit>,
-    // v0.1.10(Codex 二次指摘 Medium #4 対応):truncate 前の総数。
-    //   secrets/todos/console_logs は payload を軽くするため truncate しているが、
-    //   UI/AI prompt での count 表示は truncate 後ではなく総数を使う必要がある。
+    /// truncate 前の総数(secrets/todos/console_logs はそれぞれ 20/50/50 で切詰め)。
+    /// UI 表示・AI prompt の「N 箇所」はこの total を使う。
     secrets_total: usize,
     todos_total: usize,
     console_logs_total: usize,
     files_scanned: usize,
     files_truncated: bool,
+    /// 運用 gates:package.json / lockfile / CI workflow / tsconfig などの存在。
+    /// TODO/console 件数より重要な「本番前にあるべきインフラ」の欠落を検出する。
+    project_meta: ProjectMeta,
     /// v0.1.8:設定ファイル+package.json を実物 grep してリアルタイム検出。
     /// AI 分析の context.testing が古い時、こちらを優先する。
     /// 検出できなかった時は None。
@@ -1245,6 +1246,29 @@ struct PreReleaseScanResult {
     /// 両者から「秘密情報を Git に上げる危険な状態か」を判定する。
     env_files_present: bool,
     env_covered_by_gitignore: bool,
+}
+
+/// 運用 gates(#8 対応):TODO や console.log よりリリース前に効く実運用チェック。
+/// 各 flag は「該当プロジェクトタイプでの推奨インフラが存在するか」の boolean。
+/// TS 側は project_type と組み合わせて「該当するプロジェクトなら欠落を finding 化」する。
+#[derive(serde::Serialize)]
+struct ProjectMeta {
+    /// package.json / pyproject.toml / Cargo.toml / go.mod / Gemfile / composer.json の何か
+    project_type: Option<String>,
+    /// Node の scripts.build / Rust cargo build / Python setup.py 等が呼べる状態か
+    has_build_script: bool,
+    /// scripts.test / cargo test / pytest 等が定義済みか
+    has_test_script: bool,
+    /// scripts.typecheck / tsc 相当が用意されているか(Node/TS のみ判定)
+    has_typecheck_script: bool,
+    /// package-lock.json / yarn.lock / pnpm-lock.yaml / Cargo.lock / poetry.lock 等
+    has_lockfile: bool,
+    /// tsconfig.json が存在(Node/TS プロジェクトのみ意味あり)
+    has_tsconfig: bool,
+    /// TypeScript プロジェクトか(tsconfig.json + .ts/.tsx 検出)
+    is_typescript_project: bool,
+    /// .github/workflows / .gitlab-ci.yml / azure-pipelines.yml / .circleci/config.yml 等
+    has_ci_workflow: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1354,23 +1378,22 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     let mut detected_test_framework: Option<String> = None;
     let mut has_test_files: bool = false;
 
-    // v0.1.8 セキュリティ:.env の存在 + .gitignore カバー状況を独立に判定
-    // (この 2 つの and で「危険な状態」を確定させる。ファイル読み取りだけ、依存なし)
+    // .env の存在 + .gitignore カバー状況を独立に判定する。
+    // 「.env が実在するが .gitignore で守られていない」→ 秘密情報 git push 事故のリスクとして
+    // 高優先度 finding を発火。
     //
-    // v0.1.10(Codex 二次指摘 High #2 対応):
-    //   従来は「.env / .env* / ...」の完全一致だけを見ていたため、`.env.local` に
-    //   `.env.local` パターンで保護してあっても covered 扱いにならず誤って
-    //   env-unprotected finding が出ていた。実存する env file 名 1 つずつを
-    //   小さな glob matcher で判定する形に置き換える。
-    let env_names = &[
-        ".env", ".env.local", ".env.development", ".env.production",
-        ".env.dev", ".env.prod", ".env.staging",
-    ];
-    let existing_env_files: Vec<&str> = env_names
-        .iter()
-        .filter(|n| folder_path.join(n).exists())
-        .copied()
-        .collect();
+    // v0.1.10 で全階層収集に変更(monorepo の apps/*/.env.local や
+    // packages/admin/.env が root 固定検出だと落ちていた問題への対応)。
+    // 対象ごとに、そのファイルからの相対パスを見て root/.gitignore で評価する。
+    // .env.example / .env.sample は「意図的に共有される非秘密ファイル」なので除外。
+    let env_walk_start = folder_path.clone();
+    let existing_env_files: Vec<String> = tauri::async_runtime::spawn_blocking(move || {
+        let mut out: Vec<String> = Vec::new();
+        collect_env_files(&env_walk_start, &env_walk_start, &mut out, 512);
+        out
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?;
     let env_files_present = !existing_env_files.is_empty();
     let env_covered_by_gitignore = if !env_files_present {
         // 対象ファイルが無ければ「守るものが無い」→ true 扱いで finding は発火しない
@@ -1379,13 +1402,9 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         let gi_path = folder_path.join(".gitignore");
         match std::fs::read_to_string(&gi_path) {
             Ok(content) => {
-                // v0.1.10(Codex 四次指摘 Medium #1 対応):
-                //   Git のルール評価は「上から順、最後に一致したルールが勝ち」。
-                //   前の実装(positive/negation を集合として扱う)は
-                //     `!.env.production` → `.env*` の順で Git は ignore するのに
-                //     未保護扱いにする、といった順序依存を落とすバグがあった。
-                //   ここでは (pattern, is_negation) のタプルで順序保存し、
-                //   ファイルごとに上から評価して最後の match 結果を採用する。
+                // Git のルール評価は「上から順、最後に一致したルールが勝ち」。
+                // (pattern, is_negation) のタプルで順序保存し、ファイルごとに上から
+                // 評価して最後の match 結果を採用する。
                 let rules: Vec<(&str, bool)> = content
                     .lines()
                     .filter_map(|line| {
@@ -1401,13 +1420,19 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                         }
                     })
                     .collect();
-                existing_env_files.iter().all(|f| {
-                    // Git 挙動:マッチしたルールがなければ ignored=false、
-                    //           あれば「最後にマッチしたルール」の種類で決定。
+                existing_env_files.iter().all(|rel_path| {
+                    // rel_path はプロジェクトルートからの相対パス(例: "apps/web/.env.local")
+                    // gitignore パターンは filename マッチ + フルパスマッチの両方を試す
+                    let file_name = std::path::Path::new(rel_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(rel_path.as_str());
                     let mut ignored = false;
                     for (pattern, is_negation) in &rules {
-                        if gitignore_pattern_matches(pattern, f) {
-                            ignored = !is_negation; // positive で ignore、negation で un-ignore
+                        if gitignore_pattern_matches(pattern, file_name)
+                            || gitignore_pattern_matches(pattern, rel_path)
+                        {
+                            ignored = !is_negation;
                         }
                     }
                     ignored
@@ -1445,9 +1470,31 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     }
 
     let folder_owned = folder_path.clone();
+    let folder_for_sort = folder_path.clone();
     let file_list: Vec<PathBuf> = tauri::async_runtime::spawn_blocking(move || {
         let mut list = Vec::new();
         walk(&folder_owned, &folder_owned, SKIP_DIRS, INCLUDE_EXTS, &mut list, MAX_WALK_FILES);
+        // 優先順位付き並び替え:
+        //   MAX_SCAN_FILES=200 で content 読み込みが打ち切られる時、重要ファイルが
+        //   後方に残ると誤検知(見つからなかった=安全)を招く。
+        //   src/app/pages/routes/api/server/handlers/lib を先頭寄せる。
+        list.sort_by_key(|p| {
+            let rel = p.strip_prefix(&folder_for_sort).unwrap_or(p).to_string_lossy().replace('\\', "/");
+            let lower = rel.to_lowercase();
+            // 優先度:小さいほど先。「重要ディレクトリを含む」+「浅い」を優先。
+            let priority: u8 = if lower.starts_with("src/") || lower.starts_with("app/")
+                || lower.starts_with("pages/") || lower.starts_with("routes/")
+                || lower.starts_with("api/") || lower.starts_with("server/")
+                || lower.starts_with("handlers/") || lower.starts_with("lib/")
+                || lower.contains("/src/") || lower.contains("/app/")
+                || lower.contains("/pages/") || lower.contains("/api/")
+                || lower.contains("/server/") { 0 }
+            else if lower.starts_with("config/") || lower.contains("/config/")
+                || !lower.contains('/') { 1 } // ルート直下 config 系
+            else { 2 };
+            let depth = rel.matches('/').count() as u32;
+            (priority, depth, rel)
+        });
         list
     })
     .await
@@ -1489,11 +1536,37 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         }
         if !has_test_files {
             let n_lower = name.to_lowercase();
-            let path_str = path.to_string_lossy().replace('\\', "/");
-            if n_lower.contains(".test.") || n_lower.contains(".spec.")
-                || path_str.contains("/__tests__/")
-                || path_str.contains("/tests/")
-                || path_str.contains("/test/") {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            // 言語別に「実テストファイルらしさ」を判定する。
+            //   単に /tests/ パスに居るだけでは fixture / 画像 / README でも true になっていた。
+            //   JS/TS:*.test.* / *.spec.*
+            //   Python:test_*.py / *_test.py
+            //   Rust:  tests/*.rs (integration test の慣例)
+            //   Go:    *_test.go
+            //   Ruby:  *_spec.rb / *_test.rb
+            //   Java/Kotlin/Scala:*Test.{java,kt,scala}
+            let js_like = matches!(ext.as_str(), "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs");
+            let is_test = if js_like {
+                n_lower.contains(".test.") || n_lower.contains(".spec.")
+            } else if ext == "py" {
+                n_lower.starts_with("test_") || n_lower.ends_with("_test.py")
+            } else if ext == "rs" {
+                let path_str = path.to_string_lossy().replace('\\', "/");
+                path_str.contains("/tests/")
+                    && n_lower.ends_with(".rs")
+                    && !path_str.contains("/target/")
+            } else if ext == "go" {
+                n_lower.ends_with("_test.go")
+            } else if ext == "rb" {
+                n_lower.ends_with("_spec.rb") || n_lower.ends_with("_test.rb")
+            } else if ext == "java" || ext == "kt" || ext == "scala" {
+                // ファイル名末尾が "Test" or "Tests"(拡張子より前)
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                stem.ends_with("Test") || stem.ends_with("Tests") || stem.ends_with("Spec")
+            } else {
+                false
+            };
+            if is_test {
                 has_test_files = true;
             }
         }
@@ -1654,7 +1727,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         }
     }
 
-    // v0.1.10(Codex 二次指摘 Medium #4):truncate 前に総数を保存。
+    // truncate 前に総数を保存(UI/AI prompt での「N 箇所」表示に使う)。
     let secrets_total = secrets.len();
     let todos_total = todos.len();
     let console_logs_total = console_logs.len();
@@ -1663,6 +1736,8 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     secrets.truncate(20);
     todos.truncate(50);
     console_logs.truncate(50);
+
+    let project_meta = detect_project_meta(&folder_path);
 
     Ok(PreReleaseScanResult {
         secrets,
@@ -1677,14 +1752,161 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         has_test_files,
         env_files_present,
         env_covered_by_gitignore,
+        project_meta,
     })
+}
+
+/// プロジェクト種別と運用インフラ有無を静的に検出する。
+///   - project_type:root で見つかった manifest から推定(node/rust/python/go/ruby/php)
+///   - has_*_script:Node なら package.json の scripts を parse(単純 substring 検索)
+///   - has_lockfile / has_tsconfig / has_ci_workflow:ファイル存在チェック
+///   - is_typescript_project:tsconfig.json + 実 .ts/.tsx ファイルの両方があれば真
+fn detect_project_meta(folder: &Path) -> ProjectMeta {
+    let has = |p: &str| folder.join(p).exists();
+
+    // project_type 推定(複数当てはまる場合は代表を返す)
+    let project_type = if has("package.json") {
+        Some("node".to_string())
+    } else if has("Cargo.toml") {
+        Some("rust".to_string())
+    } else if has("pyproject.toml") || has("requirements.txt") || has("setup.py") {
+        Some("python".to_string())
+    } else if has("go.mod") {
+        Some("go".to_string())
+    } else if has("Gemfile") {
+        Some("ruby".to_string())
+    } else if has("composer.json") {
+        Some("php".to_string())
+    } else {
+        None
+    };
+
+    // has_lockfile:代表的な lockfile
+    let has_lockfile = has("package-lock.json") || has("yarn.lock") || has("pnpm-lock.yaml")
+        || has("Cargo.lock") || has("poetry.lock") || has("Pipfile.lock")
+        || has("Gemfile.lock") || has("composer.lock") || has("go.sum");
+
+    // has_tsconfig
+    let has_tsconfig = has("tsconfig.json");
+
+    // is_typescript_project:tsconfig + .ts/.tsx が実在するか
+    // ここでは detect_project_meta が folder-only の引数なので、tsconfig のみで判断。
+    // 「Node プロジェクトかつ tsconfig あり」なら TS プロジェクト扱いに寄せる。
+    let is_typescript_project = has_tsconfig
+        && project_type.as_deref() == Some("node");
+
+    // CI workflow の存在
+    let has_ci_workflow = has(".github/workflows")
+        || has(".gitlab-ci.yml")
+        || has("azure-pipelines.yml")
+        || has(".circleci/config.yml")
+        || has("bitbucket-pipelines.yml")
+        || has(".drone.yml");
+
+    // scripts 系(Node) / build/test の慣例(他言語)
+    let (mut has_build, mut has_test, mut has_typecheck) = (false, false, false);
+    if project_type.as_deref() == Some("node") {
+        if let Ok(content) = std::fs::read_to_string(folder.join("package.json")) {
+            // 簡易 parse:"scripts" ブロック内で "build" / "test" / "typecheck" キーの存在を substring 検索。
+            // 完全な JSON parser は依存増を嫌って回避。scripts が最上位キーであれば十分効く。
+            if let Some(scripts_start) = content.find("\"scripts\"") {
+                let scripts_slice = &content[scripts_start..];
+                // 対応するブロック { } を大雑把に取る:最初の { から対応 } まで
+                if let Some(open) = scripts_slice.find('{') {
+                    let after_open = &scripts_slice[open..];
+                    let mut depth = 0usize;
+                    let mut end = 0usize;
+                    for (i, ch) in after_open.char_indices() {
+                        if ch == '{' { depth += 1; }
+                        else if ch == '}' {
+                            depth -= 1;
+                            if depth == 0 { end = i; break; }
+                        }
+                    }
+                    let block = &after_open[..=end];
+                    has_build = block.contains("\"build\"");
+                    has_test = block.contains("\"test\"");
+                    has_typecheck = block.contains("\"typecheck\"")
+                        || block.contains("\"type-check\"")
+                        || block.contains("\"tsc\"");
+                }
+            }
+        }
+    } else if project_type.as_deref() == Some("rust") {
+        // Rust は cargo build / cargo test が常に使えるので実質常に true
+        has_build = true;
+        has_test = true;
+        // Rust には typecheck 概念(build と等価)なので true 扱い
+        has_typecheck = true;
+    } else if project_type.as_deref() == Some("go") {
+        has_build = true; // go build
+        has_test = true;  // go test
+        has_typecheck = true; // 型はコンパイル時に検査される
+    } else if project_type.as_deref() == Some("python") {
+        // Python は pytest / build が慣例依存。存在チェックは限定的にする。
+        has_test = has("pytest.ini") || has("conftest.py")
+            || std::fs::read_to_string(folder.join("pyproject.toml"))
+                .map(|c| c.contains("pytest"))
+                .unwrap_or(false);
+        // Python の build は setuptools / poetry / build 等ばらつき大 → 判定しない
+        has_build = false;
+        // Python の typecheck は mypy 等ばらつき大 → 判定しない
+        has_typecheck = false;
+    }
+
+    ProjectMeta {
+        project_type,
+        has_build_script: has_build,
+        has_test_script: has_test,
+        has_typecheck_script: has_typecheck,
+        has_lockfile,
+        has_tsconfig,
+        is_typescript_project,
+        has_ci_workflow,
+    }
 }
 
 // v0.1.10:detect_potential_error は誤検知率が高すぎて実害の方が大きく、削除。
 // リリース前チェックは信頼度の高い実 grep ベース検出のみに絞った。
 
-/// v0.1.10(Codex 二次指摘 High #2 対応):.gitignore のパターン 1 行が、
-/// 指定のファイル名にマッチするかを判定する(最小 glob 実装)。
+/// プロジェクト内の `.env*` ファイルを再帰的に収集する。
+///   - `.env.example` `.env.sample` `.env.template` は意図的に共有される非秘密なので除外
+///   - node_modules / .git / target / dist / build 等はスキップ
+///   - out には base からの相対パス(POSIX 区切り)を入れる
+fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize) {
+    if out.len() >= max { return; }
+    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    for entry in entries.flatten() {
+        if out.len() >= max { return; }
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let skip = matches!(
+                name,
+                "node_modules" | ".git" | "target" | "dist" | "build"
+                    | ".next" | ".turbo" | ".vite" | ".cache" | ".idea" | ".vscode"
+                    | "venv" | ".venv" | "__pycache__"
+            );
+            if !skip {
+                collect_env_files(&path, base, out, max);
+            }
+        } else if path.is_file() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_env = name == ".env" || name.starts_with(".env.");
+            let is_example = name.ends_with(".example")
+                || name.ends_with(".sample")
+                || name.ends_with(".template")
+                || name.ends_with(".dist");
+            if is_env && !is_example {
+                let rel = path.strip_prefix(base).unwrap_or(&path)
+                    .to_string_lossy().replace('\\', "/");
+                out.push(rel);
+            }
+        }
+    }
+}
+
+/// .gitignore のパターン 1 行が、指定のファイル名にマッチするかを判定する(最小 glob 実装)。
 ///
 /// サポート:
 ///   - `*` ワイルドカード(任意文字列にマッチ、`/` も含む・シンプル)
@@ -1955,6 +2177,14 @@ fn is_inside_string_literal(line: &str, idx: usize) -> bool {
 /// 値そのものを晒さないための伏せ字化。
 /// クオート内の 8 字以上の値は "..." に置換する。
 fn mask_snippet(line: &str) -> String {
+    let quoted_masked = mask_quoted_values(line);
+    let url_masked = mask_url_credentials(&quoted_masked);
+    let bare_masked = mask_bare_assignments(&url_masked);
+    bare_masked.chars().take(200).collect()
+}
+
+/// クオート内(`"..."` / `'...'`)の 8 文字以上の値を伏せ字化する。
+fn mask_quoted_values(line: &str) -> String {
     let mut out = String::new();
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1968,7 +2198,7 @@ fn mask_snippet(line: &str) -> String {
                 chars.next();
             }
             if inner.len() >= 8 {
-                out.push_str("*** (伏字) ***");
+                out.push_str(MASK);
             } else {
                 out.push_str(&inner);
             }
@@ -1979,7 +2209,145 @@ fn mask_snippet(line: &str) -> String {
             out.push(c);
         }
     }
-    out.chars().take(200).collect()
+    out
+}
+
+/// URL のクレデンシャル部分(`scheme://user:pass@host`)を伏せ字化する。
+/// `postgres://alice:s3cret@db.host/app` → `postgres://***:***@db.host/app`
+fn mask_url_credentials(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(scheme_end) = find_scheme_at(line, i) {
+            // scheme + "://" までコピー
+            out.push_str(&line[i..scheme_end + 3]);
+            let after_scheme = scheme_end + 3;
+            // user[:pass]@ を探す(空白/quote/セミコロン/バッククォート/`<`/`>`で URL 終端)
+            let end = line[after_scheme..]
+                .find(|c: char| {
+                    c.is_whitespace() || c == '"' || c == '\'' || c == ';' || c == '`' || c == '<' || c == '>'
+                })
+                .map(|p| after_scheme + p)
+                .unwrap_or(bytes.len());
+            let url_body = &line[after_scheme..end];
+            if let Some(at_pos) = url_body.find('@') {
+                let cred = &url_body[..at_pos];
+                let host_and_rest = &url_body[at_pos..]; // '@...' 部分
+                if cred.contains(':') {
+                    out.push_str("***:***");
+                } else if !cred.is_empty() {
+                    out.push_str("***");
+                }
+                out.push_str(host_and_rest);
+            } else {
+                out.push_str(url_body);
+            }
+            i = end;
+        } else {
+            let ch = line[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// `KEY=value` / `KEY: value` 形式(クオートなし)の 8 文字以上の値を伏せ字化する。
+/// .env や export 行、YAML 単純値をカバー。値が `${VAR}` や既に伏せ字マーカーなら触らない。
+fn mask_bare_assignments(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // KEY=... か KEY: ... の位置を探す(単純ステートマシン)
+        // KEY は [A-Z_][A-Z0-9_]{1,} 相当
+        let key_start = i;
+        let mut key_end = i;
+        while key_end < bytes.len() {
+            let b = bytes[key_end];
+            if (b as char).is_ascii_alphanumeric() || b == b'_' {
+                key_end += 1;
+            } else {
+                break;
+            }
+        }
+        if key_end == key_start {
+            // ここには KEY 候補が無い。1 バイト送って続行
+            let ch = line[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        let key = &line[key_start..key_end];
+        // '=' または ':' が続くか
+        let sep_char = bytes.get(key_end).copied();
+        let is_env_key = key.chars().any(|c| c.is_ascii_uppercase() || c == '_');
+        let looks_secretly_named = ["KEY", "SECRET", "TOKEN", "PASSWORD", "PWD", "PASS", "URL", "URI", "DSN", "AUTH"]
+            .iter()
+            .any(|kw| key.contains(kw));
+        if !(is_env_key && looks_secretly_named) || sep_char != Some(b'=') && sep_char != Some(b':') {
+            // KEY らしくない or セパレータ違い → そのまま流す
+            out.push_str(key);
+            i = key_end;
+            continue;
+        }
+        out.push_str(key);
+        out.push(sep_char.unwrap() as char);
+        let mut j = key_end + 1;
+        // セパレータ後の空白を保持
+        while j < bytes.len() && bytes[j] == b' ' {
+            out.push(' ');
+            j += 1;
+        }
+        // 値の終端:空白/セミコロン/クオート/バッククォート
+        let value_start = j;
+        while j < bytes.len() {
+            let b = bytes[j];
+            if b == b' ' || b == b'\t' || b == b';' || b == b'"' || b == b'\'' || b == b'`' {
+                break;
+            }
+            j += 1;
+        }
+        let value = &line[value_start..j];
+        // env 参照や既に伏せ字ならスルー
+        let is_env_ref = value.starts_with("${")
+            || value.starts_with("$")
+            || value.starts_with("process.env")
+            || value.starts_with("import.meta.env")
+            || value.contains(MASK);
+        if value.len() >= 8 && !is_env_ref {
+            out.push_str(MASK);
+        } else {
+            out.push_str(value);
+        }
+        i = j;
+    }
+    out
+}
+
+const MASK: &str = "*** (伏字) ***";
+
+/// `line[start..]` の位置に scheme(小文字 + 数字 + `+`)+ `://` があれば、scheme 末尾を返す。
+fn find_scheme_at(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut end = start;
+    while end < bytes.len() {
+        let b = bytes[end];
+        if b.is_ascii_alphabetic() || (end > start && (b.is_ascii_digit() || b == b'+' || b == b'-' || b == b'.')) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if end == start {
+        return None;
+    }
+    if end + 2 < bytes.len() && bytes[end] == b':' && bytes[end + 1] == b'/' && bytes[end + 2] == b'/' {
+        Some(end)
+    } else {
+        None
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════
