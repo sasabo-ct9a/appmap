@@ -46,6 +46,7 @@ function cleanScan(overrides: Partial<PreReleaseScanResult> = {}): PreReleaseSca
           has_test: true,
           has_typecheck: true,
           has_lockfile: true,
+          has_tsconfig: true,
         },
       ],
     },
@@ -144,6 +145,7 @@ describe("buildFindings", () => {
               has_test: false,
               has_typecheck: false,
               has_lockfile: false,
+              has_tsconfig: true,
             },
           ],
         },
@@ -180,6 +182,7 @@ describe("buildFindings", () => {
               has_test: true,
               has_typecheck: true,
               has_lockfile: true,
+              has_tsconfig: false,
             },
           ],
         },
@@ -213,6 +216,7 @@ describe("buildFindings", () => {
               has_test: false, // <— missing on node side
               has_typecheck: true,
               has_lockfile: true,
+              has_tsconfig: true,
             },
             {
               manifest_type: "rust",
@@ -221,6 +225,7 @@ describe("buildFindings", () => {
               has_test: true,
               has_typecheck: true,
               has_lockfile: false, // <— missing Cargo.lock
+              has_tsconfig: false,
             },
           ],
         },

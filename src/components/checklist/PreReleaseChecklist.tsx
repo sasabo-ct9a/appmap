@@ -208,9 +208,11 @@ function PreReleaseChecklist({
     scanState,
     isPartialCoverage,
   );
-  // 「Ready」表示が確実に実データに基づいたものだけになるよう、scanState=ok の時のみ
-  //   AI 修正プロンプト送信を許可する(unknown 状態で「修正依頼」を出させない)。
-  const promptButtonEnabled = scanState === "ok" && findings.length > 0;
+  // AI 修正プロンプトは「unknown ではない」+ finding あり の時だけ許可する。
+  //   partial coverage(200 打ち切り)は verdict が unknown に落ちるため、ここで自動的に
+  //   ボタンも無効化される。前回の scanState==='ok' 単体条件では unknown を含んでしまっていた。
+  const promptButtonEnabled =
+    assessment.verdict !== "unknown" && findings.length > 0;
 
   const heading = isJa ? "コードチェック" : "Code check";
   const intro = isJa

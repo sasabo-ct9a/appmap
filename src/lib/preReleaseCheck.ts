@@ -73,6 +73,7 @@ export type ManifestInfo = {
   has_test: boolean;
   has_typecheck: boolean;
   has_lockfile: boolean;
+  has_tsconfig: boolean;
 };
 
 /**
@@ -102,6 +103,7 @@ const ManifestInfoSchema = z
     has_test: z.boolean(),
     has_typecheck: z.boolean(),
     has_lockfile: z.boolean(),
+    has_tsconfig: z.boolean(),
   })
   .strict();
 
@@ -519,7 +521,13 @@ export function buildFindings({
         count: missingTest.length,
       });
     }
-    if (meta.is_typescript_project && !meta.has_typecheck_script) {
+    // typecheck script は per-manifest 判定にする(root だけの has_typecheck_script を見ると
+    //   root は OK、apps/web が欠落、のような monorepo 事情を落とす)。
+    //   TypeScript project の目印は per-manifest の has_tsconfig を採用。
+    const tsManifestsMissingTypecheck = nodeManifests
+      .filter((m) => m.has_tsconfig && !m.has_typecheck)
+      .map((m) => m.path);
+    if (tsManifestsMissingTypecheck.length > 0) {
       findings.push({
         id: "no-typecheck-script",
         severity: "low",
@@ -527,6 +535,8 @@ export function buildFindings({
         title: t.noTypecheckScriptTitle,
         hint: t.noTypecheckScriptHint,
         fixSteps: t.noTypecheckScriptFix,
+        examples: tsManifestsMissingTypecheck.map((path) => ({ file: path })),
+        count: tsManifestsMissingTypecheck.length,
       });
     }
     if (missingLock.length > 0) {
