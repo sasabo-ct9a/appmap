@@ -30,6 +30,7 @@ function cleanScan(overrides: Partial<PreReleaseScanResult> = {}): PreReleaseSca
     env_covered_by_gitignore: true,
     project_meta: {
       project_type: "node",
+      project_types: ["node"],
       has_build_script: true,
       has_test_script: true,
       has_typecheck_script: true,
@@ -37,6 +38,16 @@ function cleanScan(overrides: Partial<PreReleaseScanResult> = {}): PreReleaseSca
       has_tsconfig: true,
       is_typescript_project: true,
       has_ci_workflow: true,
+      manifests: [
+        {
+          manifest_type: "node",
+          path: "package.json",
+          has_build: true,
+          has_test: true,
+          has_typecheck: true,
+          has_lockfile: true,
+        },
+      ],
     },
     ...overrides,
   };
@@ -117,6 +128,7 @@ describe("buildFindings", () => {
       scan: cleanScan({
         project_meta: {
           project_type: "node",
+          project_types: ["node"],
           has_build_script: false,
           has_test_script: false,
           has_typecheck_script: false,
@@ -124,6 +136,16 @@ describe("buildFindings", () => {
           has_tsconfig: true,
           is_typescript_project: true,
           has_ci_workflow: false,
+          manifests: [
+            {
+              manifest_type: "node",
+              path: "package.json",
+              has_build: false,
+              has_test: false,
+              has_typecheck: false,
+              has_lockfile: false,
+            },
+          ],
         },
       }),
       language: "ja",
@@ -142,6 +164,7 @@ describe("buildFindings", () => {
       scan: cleanScan({
         project_meta: {
           project_type: "rust",
+          project_types: ["rust"],
           has_build_script: true,
           has_test_script: true,
           has_typecheck_script: true,
@@ -149,6 +172,16 @@ describe("buildFindings", () => {
           has_tsconfig: false,
           is_typescript_project: false,
           has_ci_workflow: true,
+          manifests: [
+            {
+              manifest_type: "rust",
+              path: "Cargo.toml",
+              has_build: true,
+              has_test: true,
+              has_typecheck: true,
+              has_lockfile: true,
+            },
+          ],
         },
       }),
       language: "ja",
@@ -156,6 +189,49 @@ describe("buildFindings", () => {
     const ids = findings.map((f) => f.id);
     expect(ids).not.toContain("no-build-script");
     expect(ids).not.toContain("no-typecheck-script");
+  });
+
+  it("Tauri layout (root package.json + src-tauri/Cargo.toml) emits gates for both", () => {
+    const findings = buildFindings({
+      screens: EMPTY_SCREENS,
+      scan: cleanScan({
+        project_meta: {
+          project_type: "node",
+          project_types: ["node", "rust"],
+          has_build_script: true,
+          has_test_script: true,
+          has_typecheck_script: true,
+          has_lockfile: true,
+          has_tsconfig: true,
+          is_typescript_project: true,
+          has_ci_workflow: true,
+          manifests: [
+            {
+              manifest_type: "node",
+              path: "package.json",
+              has_build: true,
+              has_test: false, // <— missing on node side
+              has_typecheck: true,
+              has_lockfile: true,
+            },
+            {
+              manifest_type: "rust",
+              path: "src-tauri/Cargo.toml",
+              has_build: true,
+              has_test: true,
+              has_typecheck: true,
+              has_lockfile: false, // <— missing Cargo.lock
+            },
+          ],
+        },
+      }),
+      language: "ja",
+    });
+    // node の test 欠落 + rust の lockfile 欠落、両方拾える
+    const missingTest = findings.find((f) => f.id === "no-test-script");
+    expect(missingTest?.examples?.[0].file).toBe("package.json");
+    const missingLock = findings.find((f) => f.id === "no-lockfile");
+    expect(missingLock?.examples?.[0].file).toBe("src-tauri/Cargo.toml");
   });
 });
 

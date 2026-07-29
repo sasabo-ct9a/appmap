@@ -1248,27 +1248,40 @@ struct PreReleaseScanResult {
     env_covered_by_gitignore: bool,
 }
 
-/// 運用 gates(#8 対応):TODO や console.log よりリリース前に効く実運用チェック。
-/// 各 flag は「該当プロジェクトタイプでの推奨インフラが存在するか」の boolean。
-/// TS 側は project_type と組み合わせて「該当するプロジェクトなら欠落を finding 化」する。
+/// 運用 gates:TODO や console.log よりリリース前に効く実運用チェック。
+/// project_type は「代表的なタイプ」(単一値)。manifests は「全部の manifest」(monorepo/Tauri 対応)。
 #[derive(serde::Serialize)]
 struct ProjectMeta {
-    /// package.json / pyproject.toml / Cargo.toml / go.mod / Gemfile / composer.json の何か
+    /// 代表 project_type。単一プロジェクトなら唯一の manifest から、複数なら root 優先で決める。
     project_type: Option<String>,
-    /// Node の scripts.build / Rust cargo build / Python setup.py 等が呼べる状態か
+    /// 検出された全ての manifest タイプ(重複除去済み)。UI/gates は主にこれを見る。
+    project_types: Vec<String>,
+    /// 代表 manifest の scripts 有無(単一 project 時の後方互換用)
     has_build_script: bool,
-    /// scripts.test / cargo test / pytest 等が定義済みか
     has_test_script: bool,
-    /// scripts.typecheck / tsc 相当が用意されているか(Node/TS のみ判定)
     has_typecheck_script: bool,
-    /// package-lock.json / yarn.lock / pnpm-lock.yaml / Cargo.lock / poetry.lock 等
+    /// root で見つかる lockfile の有無(package-lock.json 等)
     has_lockfile: bool,
-    /// tsconfig.json が存在(Node/TS プロジェクトのみ意味あり)
     has_tsconfig: bool,
-    /// TypeScript プロジェクトか(tsconfig.json + .ts/.tsx 検出)
     is_typescript_project: bool,
-    /// .github/workflows / .gitlab-ci.yml / azure-pipelines.yml / .circleci/config.yml 等
     has_ci_workflow: bool,
+    /// 検出された全 manifest の詳細(gates finding はこれを iterate)
+    manifests: Vec<ManifestInfo>,
+}
+
+/// 個々の manifest ファイル情報(gates finding を per-manifest に出すため)。
+#[derive(serde::Serialize, Clone)]
+struct ManifestInfo {
+    /// "node" / "rust" / "python" / "go" / "ruby" / "php"
+    manifest_type: String,
+    /// プロジェクトルートからの相対パス。root なら "package.json" / "Cargo.toml"、
+    /// monorepo なら "apps/web/package.json" のような形。
+    path: String,
+    has_build: bool,
+    has_test: bool,
+    has_typecheck: bool,
+    /// この manifest 直近の lockfile(package.json → package-lock.json 等)
+    has_lockfile: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1534,41 +1547,10 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                 detected_test_framework = Some("PHPUnit".to_string());
             }
         }
-        if !has_test_files {
-            let n_lower = name.to_lowercase();
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-            // 言語別に「実テストファイルらしさ」を判定する。
-            //   単に /tests/ パスに居るだけでは fixture / 画像 / README でも true になっていた。
-            //   JS/TS:*.test.* / *.spec.*
-            //   Python:test_*.py / *_test.py
-            //   Rust:  tests/*.rs (integration test の慣例)
-            //   Go:    *_test.go
-            //   Ruby:  *_spec.rb / *_test.rb
-            //   Java/Kotlin/Scala:*Test.{java,kt,scala}
-            let js_like = matches!(ext.as_str(), "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs");
-            let is_test = if js_like {
-                n_lower.contains(".test.") || n_lower.contains(".spec.")
-            } else if ext == "py" {
-                n_lower.starts_with("test_") || n_lower.ends_with("_test.py")
-            } else if ext == "rs" {
-                let path_str = path.to_string_lossy().replace('\\', "/");
-                path_str.contains("/tests/")
-                    && n_lower.ends_with(".rs")
-                    && !path_str.contains("/target/")
-            } else if ext == "go" {
-                n_lower.ends_with("_test.go")
-            } else if ext == "rb" {
-                n_lower.ends_with("_spec.rb") || n_lower.ends_with("_test.rb")
-            } else if ext == "java" || ext == "kt" || ext == "scala" {
-                // ファイル名末尾が "Test" or "Tests"(拡張子より前)
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                stem.ends_with("Test") || stem.ends_with("Tests") || stem.ends_with("Spec")
-            } else {
-                false
-            };
-            if is_test {
-                has_test_files = true;
-            }
+        // has_test_files の判定は is_test_file_path と同じロジックを使う。
+        // 2 実装があると片方の見落とし(__tests__/ など)を招くので必ず helper 経由。
+        if !has_test_files && is_test_file_path(path) {
+            has_test_files = true;
         }
     }
 
@@ -1628,17 +1610,20 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     // v0.1.10(Codex 指摘 Medium #6):content 読み込みは MAX_SCAN_FILES で打ち切る。
     //   file_list 自体は上流で MAX_WALK_FILES(10k)までを許容してあり、
     //   test framework/test file 検出のループは既にそちらを消化済み。
-    for path in file_list.into_iter().take(MAX_SCAN_FILES) {
+    // テストファイルは fixture として fake secret を含むのが普通なので content スキャンから除外。
+    //   trufflehog / detect-secrets / bandit 等の業界標準ツールも同じ挙動。
+    //   filter → take の順にする(take → filter の順だと cap 内でテストが多い時に
+    //   実プロダクションが読まれずに終わる誤検知源になる)。
+    let content_targets: Vec<PathBuf> = file_list
+        .into_iter()
+        .filter(|p| !is_test_file_path(p))
+        .take(MAX_SCAN_FILES)
+        .collect();
+    for path in content_targets {
         let Ok(content) = std::fs::read_to_string(&path) else { continue };
         files_scanned += 1;
         let rel = path.strip_prefix(&folder_path).unwrap_or(&path)
             .to_string_lossy().replace('\\', "/");
-        // テストファイルは fixture として fake secret / test 用 console.log / TODO を
-        // 含むのが普通なので content スキャンから除外(has_test_files 判定は既に完了済み)。
-        // trufflehog / detect-secrets / bandit 等の業界標準ツールも同じ挙動。
-        if is_test_file_path(&path) {
-            continue;
-        }
 
         for (line_idx, raw_line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
@@ -1663,30 +1648,39 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                 }
             }
 
-            // 2) 変数名 = "非空" パターン(引用符内の実値が 16 字以上でないと本物とみなさない)
+            // 2) 変数名 = 値 パターン。quoted / bare 両方に対応する。
+            //   quoted:  API_KEY = "abcdef..."      (中身 16+ 文字)
+            //   bare:    API_KEY=abcdef...          (.env / export 慣例、値 16+ 文字)
+            //   env 参照(process.env.X, ${VAR} 等)は除外。
             if !is_commentish {
                 for name in secret_var_names {
                     if let Some(idx) = raw_line.to_lowercase().find(name) {
-                        // 変数名の直後に = or : があり、その後に quote と 16 字以上の値
                         let after = &raw_line[idx + name.len()..];
                         let after_trim = after.trim_start();
                         if !(after_trim.starts_with('=') || after_trim.starts_with(':')) { continue; }
                         let rest = after_trim.trim_start_matches(['=', ':']).trim_start();
-                        // 空 / 参照(env.XXX や process.env) は除外
-                        if rest.starts_with("process.env") || rest.starts_with("env.")
-                            || rest.starts_with("import.meta.env") || rest.starts_with("Deno.env")
-                            || rest.starts_with("Deno.env.get")
-                            || rest.starts_with("System.getenv") {
+                        // env 参照 / 空 / template 変数は除外
+                        if rest.is_empty()
+                            || rest.starts_with("process.env")
+                            || rest.starts_with("env.")
+                            || rest.starts_with("import.meta.env")
+                            || rest.starts_with("Deno.env")
+                            || rest.starts_with("System.getenv")
+                            || rest.starts_with("${")
+                            || rest.starts_with('$')
+                        {
                             continue;
                         }
-                        // 引用符 + 中身 16 字以上を要求
-                        let quote_char = if rest.starts_with('"') { '"' }
-                            else if rest.starts_with('\'') { '\'' }
-                            else { continue };
-                        let inside = &rest[1..];
-                        let inner_len = inside.chars()
-                            .take_while(|c| *c != quote_char)
-                            .count();
+                        // quoted 判定:先頭が `"` `'` なら quote 内の実値長を測る
+                        let inner_len = if rest.starts_with('"') || rest.starts_with('\'') {
+                            let quote_char = rest.chars().next().unwrap();
+                            rest[1..].chars().take_while(|c| *c != quote_char).count()
+                        } else {
+                            // bare:空白 / セミコロン / バッククォート までを値と見なして長さを測る
+                            rest.chars()
+                                .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '`' && *c != ',')
+                                .count()
+                        };
                         if inner_len >= 16 {
                             secrets.push(ScanHit {
                                 file: rel.clone(),
@@ -1762,46 +1756,101 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     })
 }
 
-/// プロジェクト種別と運用インフラ有無を静的に検出する。
-///   - project_type:root で見つかった manifest から推定(node/rust/python/go/ruby/php)
-///   - has_*_script:Node なら package.json の scripts を parse(単純 substring 検索)
-///   - has_lockfile / has_tsconfig / has_ci_workflow:ファイル存在チェック
-///   - is_typescript_project:tsconfig.json + 実 .ts/.tsx ファイルの両方があれば真
+/// プロジェクトの manifest を全部集めて運用 gates 検出用の情報を返す。
+///
+/// **monorepo / Tauri 対応**:
+///   root/package.json だけでなく apps/*/package.json、packages/*/package.json、
+///   services/*/package.json、src-tauri/Cargo.toml なども見る。root に Cargo.toml と
+///   frontend/package.json が両立する構成でも両方 gates 対象になる。
+///
+/// **script parse**:
+///   `serde_json` で package.json を正式にパースする。以前の手 depth 計算は
+///   `node -e "{...}"` のような script 値に含まれる brace で壊れていた。
 fn detect_project_meta(folder: &Path) -> ProjectMeta {
     let has = |p: &str| folder.join(p).exists();
 
-    // project_type 推定(複数当てはまる場合は代表を返す)
-    let project_type = if has("package.json") {
-        Some("node".to_string())
-    } else if has("Cargo.toml") {
-        Some("rust".to_string())
-    } else if has("pyproject.toml") || has("requirements.txt") || has("setup.py") {
-        Some("python".to_string())
-    } else if has("go.mod") {
-        Some("go".to_string())
-    } else if has("Gemfile") {
-        Some("ruby".to_string())
-    } else if has("composer.json") {
-        Some("php".to_string())
-    } else {
-        None
-    };
+    // ── 1. manifest 収集(root + 慣例的 monorepo dirs + src-tauri)
+    let mut manifests: Vec<ManifestInfo> = Vec::new();
 
-    // has_lockfile:代表的な lockfile
-    let has_lockfile = has("package-lock.json") || has("yarn.lock") || has("pnpm-lock.yaml")
+    // root の各 manifest
+    if has("package.json") {
+        manifests.push(build_node_manifest(folder, "package.json"));
+    }
+    if has("Cargo.toml") {
+        manifests.push(build_rust_manifest("Cargo.toml".to_string(), has("Cargo.lock")));
+    }
+    if has("pyproject.toml") || has("requirements.txt") || has("setup.py") {
+        let path = if has("pyproject.toml") { "pyproject.toml" }
+            else if has("requirements.txt") { "requirements.txt" }
+            else { "setup.py" };
+        manifests.push(build_python_manifest(
+            folder,
+            path.to_string(),
+            has("poetry.lock") || has("Pipfile.lock"),
+        ));
+    }
+    if has("go.mod") {
+        manifests.push(build_go_manifest("go.mod".to_string(), has("go.sum")));
+    }
+    if has("Gemfile") {
+        manifests.push(build_ruby_manifest("Gemfile".to_string(), has("Gemfile.lock")));
+    }
+    if has("composer.json") {
+        manifests.push(build_php_manifest("composer.json".to_string(), has("composer.lock")));
+    }
+
+    // monorepo 慣例ディレクトリ配下の package.json / Cargo.toml
+    for mono_dir in ["apps", "packages", "services"] {
+        let base = folder.join(mono_dir);
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let sub = entry.path();
+                if !sub.is_dir() { continue; }
+                let sub_name = sub.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if sub_name.starts_with('.') { continue; }
+                let rel_prefix = format!("{}/{}", mono_dir, sub_name);
+                let pkg = sub.join("package.json");
+                if pkg.exists() {
+                    manifests.push(build_node_manifest(&sub, &format!("{}/package.json", rel_prefix)));
+                }
+                let cargo = sub.join("Cargo.toml");
+                if cargo.exists() {
+                    let lock = sub.join("Cargo.lock").exists() || has("Cargo.lock");
+                    manifests.push(build_rust_manifest(format!("{}/Cargo.toml", rel_prefix), lock));
+                }
+            }
+        }
+    }
+
+    // Tauri 慣例:src-tauri/Cargo.toml
+    let tauri_cargo = folder.join("src-tauri/Cargo.toml");
+    if tauri_cargo.exists()
+        && !manifests.iter().any(|m| m.path == "src-tauri/Cargo.toml")
+    {
+        let lock = folder.join("src-tauri/Cargo.lock").exists();
+        manifests.push(build_rust_manifest("src-tauri/Cargo.toml".to_string(), lock));
+    }
+
+    // ── 2. 代表 project_type / project_types(monorepo で複数ある時のため)
+    let mut project_types: Vec<String> = manifests.iter().map(|m| m.manifest_type.clone()).collect();
+    project_types.sort();
+    project_types.dedup();
+    let project_type = manifests.first().map(|m| m.manifest_type.clone());
+
+    // ── 3. 単一プロジェクト後方互換のための代表 script フラグ
+    let (has_build, has_test, has_typecheck) = manifests
+        .first()
+        .map(|m| (m.has_build, m.has_test, m.has_typecheck))
+        .unwrap_or((false, false, false));
+
+    // ── 4. project ワイドの情報
+    let has_lockfile = manifests.iter().any(|m| m.has_lockfile)
+        || has("package-lock.json") || has("yarn.lock") || has("pnpm-lock.yaml")
         || has("Cargo.lock") || has("poetry.lock") || has("Pipfile.lock")
         || has("Gemfile.lock") || has("composer.lock") || has("go.sum");
-
-    // has_tsconfig
     let has_tsconfig = has("tsconfig.json");
-
-    // is_typescript_project:tsconfig + .ts/.tsx が実在するか
-    // ここでは detect_project_meta が folder-only の引数なので、tsconfig のみで判断。
-    // 「Node プロジェクトかつ tsconfig あり」なら TS プロジェクト扱いに寄せる。
     let is_typescript_project = has_tsconfig
-        && project_type.as_deref() == Some("node");
-
-    // CI workflow の存在
+        && project_types.iter().any(|t| t == "node");
     let has_ci_workflow = has(".github/workflows")
         || has(".gitlab-ci.yml")
         || has("azure-pipelines.yml")
@@ -1809,59 +1858,9 @@ fn detect_project_meta(folder: &Path) -> ProjectMeta {
         || has("bitbucket-pipelines.yml")
         || has(".drone.yml");
 
-    // scripts 系(Node) / build/test の慣例(他言語)
-    let (mut has_build, mut has_test, mut has_typecheck) = (false, false, false);
-    if project_type.as_deref() == Some("node") {
-        if let Ok(content) = std::fs::read_to_string(folder.join("package.json")) {
-            // 簡易 parse:"scripts" ブロック内で "build" / "test" / "typecheck" キーの存在を substring 検索。
-            // 完全な JSON parser は依存増を嫌って回避。scripts が最上位キーであれば十分効く。
-            if let Some(scripts_start) = content.find("\"scripts\"") {
-                let scripts_slice = &content[scripts_start..];
-                // 対応するブロック { } を大雑把に取る:最初の { から対応 } まで
-                if let Some(open) = scripts_slice.find('{') {
-                    let after_open = &scripts_slice[open..];
-                    let mut depth = 0usize;
-                    let mut end = 0usize;
-                    for (i, ch) in after_open.char_indices() {
-                        if ch == '{' { depth += 1; }
-                        else if ch == '}' {
-                            depth -= 1;
-                            if depth == 0 { end = i; break; }
-                        }
-                    }
-                    let block = &after_open[..=end];
-                    has_build = block.contains("\"build\"");
-                    has_test = block.contains("\"test\"");
-                    has_typecheck = block.contains("\"typecheck\"")
-                        || block.contains("\"type-check\"")
-                        || block.contains("\"tsc\"");
-                }
-            }
-        }
-    } else if project_type.as_deref() == Some("rust") {
-        // Rust は cargo build / cargo test が常に使えるので実質常に true
-        has_build = true;
-        has_test = true;
-        // Rust には typecheck 概念(build と等価)なので true 扱い
-        has_typecheck = true;
-    } else if project_type.as_deref() == Some("go") {
-        has_build = true; // go build
-        has_test = true;  // go test
-        has_typecheck = true; // 型はコンパイル時に検査される
-    } else if project_type.as_deref() == Some("python") {
-        // Python は pytest / build が慣例依存。存在チェックは限定的にする。
-        has_test = has("pytest.ini") || has("conftest.py")
-            || std::fs::read_to_string(folder.join("pyproject.toml"))
-                .map(|c| c.contains("pytest"))
-                .unwrap_or(false);
-        // Python の build は setuptools / poetry / build 等ばらつき大 → 判定しない
-        has_build = false;
-        // Python の typecheck は mypy 等ばらつき大 → 判定しない
-        has_typecheck = false;
-    }
-
     ProjectMeta {
         project_type,
+        project_types,
         has_build_script: has_build,
         has_test_script: has_test,
         has_typecheck_script: has_typecheck,
@@ -1869,6 +1868,100 @@ fn detect_project_meta(folder: &Path) -> ProjectMeta {
         has_tsconfig,
         is_typescript_project,
         has_ci_workflow,
+        manifests,
+    }
+}
+
+/// package.json を `serde_json` で正式にパースし、scripts のキー有無を判定する。
+/// 手 depth カウント方式は `node -e "{...}"` のような script 値の brace で
+/// 壊れていた(false negative)ため。
+fn build_node_manifest(dir: &Path, path: &str) -> ManifestInfo {
+    let (has_build, has_test, has_typecheck) = std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .map(|v| {
+            let scripts = v.get("scripts").and_then(|s| s.as_object());
+            let has_key = |k: &str| scripts.map_or(false, |m| m.contains_key(k));
+            (
+                has_key("build"),
+                has_key("test"),
+                has_key("typecheck") || has_key("type-check") || has_key("tsc"),
+            )
+        })
+        .unwrap_or((false, false, false));
+    let has_lockfile = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
+        .iter()
+        .any(|f| dir.join(f).exists());
+    ManifestInfo {
+        manifest_type: "node".to_string(),
+        path: path.to_string(),
+        has_build,
+        has_test,
+        has_typecheck,
+        has_lockfile,
+    }
+}
+
+fn build_rust_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
+    // Rust は cargo build / test / check がツールチェイン標準なので常に true
+    ManifestInfo {
+        manifest_type: "rust".to_string(),
+        path,
+        has_build: true,
+        has_test: true,
+        has_typecheck: true,
+        has_lockfile,
+    }
+}
+
+fn build_python_manifest(dir: &Path, path: String, has_lockfile: bool) -> ManifestInfo {
+    let has_test = dir.join("pytest.ini").exists()
+        || dir.join("conftest.py").exists()
+        || std::fs::read_to_string(dir.join("pyproject.toml"))
+            .map(|c| c.contains("pytest"))
+            .unwrap_or(false);
+    // Python は build/typecheck は慣例次第で判定しない(false と扱って gates を出さない)
+    ManifestInfo {
+        manifest_type: "python".to_string(),
+        path,
+        has_build: true,  // false にすると Python に対して常に no-build-script が出るのを避ける
+        has_test,
+        has_typecheck: true,
+        has_lockfile,
+    }
+}
+
+fn build_go_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
+    ManifestInfo {
+        manifest_type: "go".to_string(),
+        path,
+        has_build: true,
+        has_test: true,
+        has_typecheck: true,
+        has_lockfile,
+    }
+}
+
+fn build_ruby_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
+    // Ruby の build / test は慣例依存が強いので有り扱い(不確実な no-* finding を避ける)
+    ManifestInfo {
+        manifest_type: "ruby".to_string(),
+        path,
+        has_build: true,
+        has_test: true,
+        has_typecheck: true,
+        has_lockfile,
+    }
+}
+
+fn build_php_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
+    ManifestInfo {
+        manifest_type: "php".to_string(),
+        path,
+        has_build: true,
+        has_test: true,
+        has_typecheck: true,
+        has_lockfile,
     }
 }
 
@@ -1889,8 +1982,9 @@ fn is_test_file_path(path: &Path) -> bool {
     let full = path.to_string_lossy().replace('\\', "/");
     let full_lower = full.to_lowercase();
 
-    // 汎用:__tests__ / __test__ ディレクトリ配下
-    if full.contains("/__tests__/") || full.contains("/__test__/") {
+    // 汎用:__tests__ / __test__ ディレクトリ配下(先頭 or 途中どちらでも)
+    if full.contains("/__tests__/") || full.contains("/__test__/")
+        || full.starts_with("__tests__/") || full.starts_with("__test__/") {
         return true;
     }
 

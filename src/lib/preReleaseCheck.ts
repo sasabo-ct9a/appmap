@@ -50,9 +50,12 @@ export type PreReleaseScanResult = {
   project_meta: ProjectMeta;
 };
 
-/** #8 実運用 gates:TODO 件数より重要な「本番前にあるべきもの」の欠落を検出する。 */
+/** 実運用 gates:TODO 件数より重要な「本番前にあるべきもの」の欠落を検出する。
+ *  monorepo / Tauri 対応で manifests 配列を持つ(root だけでなく apps/*、
+ *  packages/*、src-tauri など複数 manifest を per-manifest で扱う)。 */
 export type ProjectMeta = {
   project_type: string | null;
+  project_types: string[];
   has_build_script: boolean;
   has_test_script: boolean;
   has_typecheck_script: boolean;
@@ -60,6 +63,16 @@ export type ProjectMeta = {
   has_tsconfig: boolean;
   is_typescript_project: boolean;
   has_ci_workflow: boolean;
+  manifests: ManifestInfo[];
+};
+
+export type ManifestInfo = {
+  manifest_type: string;
+  path: string;
+  has_build: boolean;
+  has_test: boolean;
+  has_typecheck: boolean;
+  has_lockfile: boolean;
 };
 
 /**
@@ -69,39 +82,61 @@ export type ProjectMeta = {
  *
  * schema が失敗した場合は詳細エラーを throw する(呼び出し側で scanError に載る)。
  */
-const ScanHitSchema = z.object({
-  file: z.string(),
-  line: z.number().int().nonnegative(),
-  snippet: z.string(),
-  kind: z.string(),
-});
+// スキーマは全て .strict() を付ける。Rust 側にフィールドを追加したのに TS 側で
+// 反映してない場合、silently 落ちて UI が古い形を見続ける事故を防ぐ。
+// (Rust 側で削除・rename しても即 error で気づく。)
+const ScanHitSchema = z
+  .object({
+    file: z.string(),
+    line: z.number().int().nonnegative(),
+    snippet: z.string(),
+    kind: z.string(),
+  })
+  .strict();
 
-const ProjectMetaSchema = z.object({
-  project_type: z.string().nullable(),
-  has_build_script: z.boolean(),
-  has_test_script: z.boolean(),
-  has_typecheck_script: z.boolean(),
-  has_lockfile: z.boolean(),
-  has_tsconfig: z.boolean(),
-  is_typescript_project: z.boolean(),
-  has_ci_workflow: z.boolean(),
-});
+const ManifestInfoSchema = z
+  .object({
+    manifest_type: z.string(),
+    path: z.string(),
+    has_build: z.boolean(),
+    has_test: z.boolean(),
+    has_typecheck: z.boolean(),
+    has_lockfile: z.boolean(),
+  })
+  .strict();
 
-const PreReleaseScanResultSchema = z.object({
-  secrets: z.array(ScanHitSchema),
-  todos: z.array(ScanHitSchema),
-  console_logs: z.array(ScanHitSchema),
-  secrets_total: z.number().int().nonnegative(),
-  todos_total: z.number().int().nonnegative(),
-  console_logs_total: z.number().int().nonnegative(),
-  files_scanned: z.number().int().nonnegative(),
-  files_truncated: z.boolean(),
-  detected_test_framework: z.string().nullable(),
-  has_test_files: z.boolean(),
-  env_files_present: z.boolean(),
-  env_covered_by_gitignore: z.boolean(),
-  project_meta: ProjectMetaSchema,
-});
+const ProjectMetaSchema = z
+  .object({
+    project_type: z.string().nullable(),
+    project_types: z.array(z.string()),
+    has_build_script: z.boolean(),
+    has_test_script: z.boolean(),
+    has_typecheck_script: z.boolean(),
+    has_lockfile: z.boolean(),
+    has_tsconfig: z.boolean(),
+    is_typescript_project: z.boolean(),
+    has_ci_workflow: z.boolean(),
+    manifests: z.array(ManifestInfoSchema),
+  })
+  .strict();
+
+const PreReleaseScanResultSchema = z
+  .object({
+    secrets: z.array(ScanHitSchema),
+    todos: z.array(ScanHitSchema),
+    console_logs: z.array(ScanHitSchema),
+    secrets_total: z.number().int().nonnegative(),
+    todos_total: z.number().int().nonnegative(),
+    console_logs_total: z.number().int().nonnegative(),
+    files_scanned: z.number().int().nonnegative(),
+    files_truncated: z.boolean(),
+    detected_test_framework: z.string().nullable(),
+    has_test_files: z.boolean(),
+    env_files_present: z.boolean(),
+    env_covered_by_gitignore: z.boolean(),
+    project_meta: ProjectMetaSchema,
+  })
+  .strict();
 
 export async function runCodeScan(
   folderPath: string,
@@ -344,38 +379,50 @@ export function computeOverallAssessment(
   const meds = findings.filter((f) => f.severity === "medium").length;
   const lows = findings.filter((f) => f.severity === "low").length;
 
-  // スキャンが完了していないなら、いくら finding が空でも Ready と結論しない。
-  // 「重大なものは見つからなかった」という表示は、実際にスキャンが走った時のみ。
+  // Ready と結論するのは「scan が完了 かつ 全ファイルを走査 かつ サンプルではない」時だけ。
+  //   sample / failed / unavailable / partial coverage いずれも Ready 断定させない。
+  //   ただし、既に High(重大)findings があるなら、その事実は覆されないので block を優先する。
   let verdict: Verdict;
   let label: string;
   let summary: string;
-  if (scanState === "failed" || scanState === "unavailable") {
+  if (scanState === "failed") {
     verdict = "unknown";
     label = t.verdictUnknownLabel;
-    summary =
-      scanState === "failed"
-        ? t.verdictUnknownFailedSummary
-        : t.verdictUnknownUnavailableSummary;
+    summary = t.verdictUnknownFailedSummary;
+  } else if (scanState === "unavailable") {
+    verdict = "unknown";
+    label = t.verdictUnknownLabel;
+    summary = t.verdictUnknownUnavailableSummary;
+  } else if (scanState === "sample") {
+    // サンプル表示中は実データではないので Ready と結論しない。
+    // High/Medium finding があってもそれは「サンプル上」の話。verdict は unknown で統一。
+    verdict = "unknown";
+    label = t.verdictUnknownLabel;
+    summary = t.verdictUnknownSampleSummary;
   } else {
-    verdict = calcVerdict(findings);
-    if (verdict === "block") {
+    // scanState === "ok"
+    const rawVerdict = calcVerdict(findings);
+    if (rawVerdict === "block") {
+      // 既知の重大問題は打ち切りに関係なく確定事実として block を出す
+      verdict = "block";
       label = t.verdictBlockLabel;
       summary = t.verdictBlockSummary(highs, meds);
-    } else if (verdict === "caution") {
+    } else if (isPartialCoverage) {
+      // caution / ready を Ready ではなく unknown にする(未スキャン部分に高 severity が
+      // 潜んでる可能性を消せない)
+      verdict = "unknown";
+      label = t.verdictUnknownLabel;
+      summary = t.verdictUnknownPartialSummary;
+    } else if (rawVerdict === "caution") {
+      verdict = "caution";
       label = t.verdictCautionLabel;
       summary = t.verdictCautionSummary(meds, lows);
     } else if (findings.length === 0) {
-      // 打ち切りが起きているのに「何も見つからなかった」と言うのは誤解を招く。
-      // 実際には見ていない部分がある → unknown/partial に落とす。
-      if (isPartialCoverage) {
-        verdict = "unknown";
-        label = t.verdictUnknownLabel;
-        summary = t.verdictUnknownPartialSummary;
-      } else {
-        label = t.verdictReadyLabel;
-        summary = t.verdictReadyPerfectSummary;
-      }
+      verdict = "ready";
+      label = t.verdictReadyLabel;
+      summary = t.verdictReadyPerfectSummary;
     } else {
+      verdict = "ready";
       label = t.verdictReadyLabel;
       summary = t.verdictReadyWithLowSummary(lows);
     }
@@ -435,11 +482,20 @@ export function buildFindings({
     });
   }
 
-  // ── 運用 gates(#8):TODO 件数より重要な「本番前にあるべきインフラ」の欠落。
-  //   対象プロジェクトの種別に応じて finding を発火する(Rust/Go では build/test は
-  //   常に走るので Node 特化の check を出さない、など)。
-  if (scan?.project_meta.project_type === "node") {
-    if (!scan.project_meta.has_build_script) {
+  // ── 運用 gates:TODO 件数より重要な「本番前にあるべきインフラ」の欠落。
+  //   manifest 単位で見る(monorepo / Tauri 対応):
+  //     - Node manifest ごとに build/test script を確認
+  //     - lockfile は manifest 単位で確認(親 package.json に子 lockfile あり など)
+  //     - CI ワークフローと tsconfig はプロジェクト全体で 1 回だけ判定
+  //   同種の finding が複数 manifest で出る場合は 1 件にまとめ、影響 path を列挙する。
+  const meta = scan?.project_meta;
+  if (meta) {
+    const nodeManifests = meta.manifests.filter((m) => m.manifest_type === "node");
+    const missingBuild = nodeManifests.filter((m) => !m.has_build).map((m) => m.path);
+    const missingTest = nodeManifests.filter((m) => !m.has_test).map((m) => m.path);
+    const missingLock = meta.manifests.filter((m) => !m.has_lockfile).map((m) => m.path);
+
+    if (missingBuild.length > 0) {
       findings.push({
         id: "no-build-script",
         severity: "medium",
@@ -447,9 +503,11 @@ export function buildFindings({
         title: t.noBuildScriptTitle,
         hint: t.noBuildScriptHint,
         fixSteps: t.noBuildScriptFix,
+        examples: missingBuild.map((path) => ({ file: path })),
+        count: missingBuild.length,
       });
     }
-    if (!scan.project_meta.has_test_script) {
+    if (missingTest.length > 0) {
       findings.push({
         id: "no-test-script",
         severity: "medium",
@@ -457,9 +515,11 @@ export function buildFindings({
         title: t.noTestScriptTitle,
         hint: t.noTestScriptHint,
         fixSteps: t.noTestScriptFix,
+        examples: missingTest.map((path) => ({ file: path })),
+        count: missingTest.length,
       });
     }
-    if (scan.project_meta.is_typescript_project && !scan.project_meta.has_typecheck_script) {
+    if (meta.is_typescript_project && !meta.has_typecheck_script) {
       findings.push({
         id: "no-typecheck-script",
         severity: "low",
@@ -469,28 +529,28 @@ export function buildFindings({
         fixSteps: t.noTypecheckScriptFix,
       });
     }
-  }
-  // lockfile はほぼ全言語で推奨(実運用で最も再現性事故を招く)
-  if (scan?.project_meta.project_type && !scan.project_meta.has_lockfile) {
-    findings.push({
-      id: "no-lockfile",
-      severity: "medium",
-      category: "release-gates",
-      title: t.noLockfileTitle,
-      hint: t.noLockfileHint,
-      fixSteps: t.noLockfileFix,
-    });
-  }
-  // CI 未整備は low(個人開発では許容範囲、ただし共同開発では要)
-  if (scan?.project_meta.project_type && !scan.project_meta.has_ci_workflow) {
-    findings.push({
-      id: "no-ci-workflow",
-      severity: "low",
-      category: "release-gates",
-      title: t.noCiWorkflowTitle,
-      hint: t.noCiWorkflowHint,
-      fixSteps: t.noCiWorkflowFix,
-    });
+    if (missingLock.length > 0) {
+      findings.push({
+        id: "no-lockfile",
+        severity: "medium",
+        category: "release-gates",
+        title: t.noLockfileTitle,
+        hint: t.noLockfileHint,
+        fixSteps: t.noLockfileFix,
+        examples: missingLock.map((path) => ({ file: path })),
+        count: missingLock.length,
+      });
+    }
+    if (meta.manifests.length > 0 && !meta.has_ci_workflow) {
+      findings.push({
+        id: "no-ci-workflow",
+        severity: "low",
+        category: "release-gates",
+        title: t.noCiWorkflowTitle,
+        hint: t.noCiWorkflowHint,
+        fixSteps: t.noCiWorkflowFix,
+      });
+    }
   }
 
   // v0.1.10 スリム化:以下 4 項目を削除(価値疑問 or 誤検知多発のため)
@@ -506,11 +566,15 @@ export function buildFindings({
 
   // ── テスト整備
   //     優先度:scan(リアルタイム、package.json 直読)> context.testing(AI 分析結果、古い可能性)
-  const scanFramework = scan?.detected_test_framework ?? null;
-  const scanHasTests = scan?.has_test_files ?? false;
+  // scan がある(実フォルダを直近でスキャン済み)なら scan を単独ソースにする。
+  //   AI context の framework は分析当時の情報で、その後 package.json から削除しても
+  //   残り続けてしまうため、scan 完了後に fallback すると「実在しない framework が
+  //   検出されてる」誤情報になる。scan==null(サンプル or 未実行)の時だけ AI context を使う。
   const ctxTesting = screens.context?.testing;
-  const framework = scanFramework ?? ctxTesting?.framework ?? null;
-  const hasTests = scan ? scanHasTests : ctxTesting?.hasTests;
+  const framework = scan
+    ? scan.detected_test_framework
+    : ctxTesting?.framework ?? null;
+  const hasTests = scan ? scan.has_test_files : ctxTesting?.hasTests;
 
   const stackHint = inferStackHint(screens.context?.techStack);
   if (!framework) {
@@ -635,6 +699,7 @@ type Copy = {
   verdictUnknownFailedSummary: string;
   verdictUnknownUnavailableSummary: string;
   verdictUnknownPartialSummary: string;
+  verdictUnknownSampleSummary: string;
   overallHeading: string;
   priorityHeading: string;
 };
@@ -807,6 +872,8 @@ const JA: Copy = {
     "コードスキャンがまだ実行されていません。フォルダを選ぶとスキャンが自動的に走ります。",
   verdictUnknownPartialSummary:
     "対象ファイルが多すぎて 200 件で打ち切りました。優先度の高いディレクトリは先にスキャンしていますが、残りの部分は見れていません。「明らかな抜けなし」とは断定できない状態です。",
+  verdictUnknownSampleSummary:
+    "サンプルデータを表示中です。実際のフォルダをまだスキャンしていないので、結論(準備 OK / 修正必要)は出せません。フォルダを選ぶと本番診断が走ります。",
   overallHeading: "全体評価",
   priorityHeading: "まず対応すべき項目",
 };
@@ -979,6 +1046,8 @@ const EN: Copy = {
     "The code scan has not run yet. Pick a folder and the scan will start automatically.",
   verdictUnknownPartialSummary:
     "Too many files — scan was truncated at 200. Priority directories were scanned first, but the rest was skipped. Cannot conclude \"no gaps found\".",
+  verdictUnknownSampleSummary:
+    "Showing sample data. No real folder has been scanned yet, so no verdict (ready / issues to fix) can be given. Pick a folder to run the real diagnosis.",
   overallHeading: "Overall assessment",
   priorityHeading: "Fix these first",
 };

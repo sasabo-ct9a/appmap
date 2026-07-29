@@ -470,8 +470,19 @@ function PreReleaseChecklist({
 
       {/* Findings */}
       {findings.length === 0 && !scanning ? (
-        scanState === "failed" || scanState === "unavailable" ? (
-          // スキャン未完了/失敗:「安全」ではなく「不明」を明示する
+        // 「重大なもの無し(緑バナー)」は scan 完了 かつ 全ファイル走査 かつ 実データ のときだけ。
+        // sample / failed / unavailable / partial coverage はすべて「不明」表示に寄せる。
+        scanState === "ok" && !isPartialCoverage ? (
+          <div
+            className="text-sm text-ink-strong px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
+            style={{ borderColor: "#a7f3d0", background: "#ecfdf5", color: "#065f46" }}
+          >
+            <div className="text-2xl mb-1">
+              <CheckCircleIcon />
+            </div>
+            {emptyState}
+          </div>
+        ) : (
           <div
             className="text-sm px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
             style={{
@@ -481,16 +492,6 @@ function PreReleaseChecklist({
             }}
           >
             {unknownState}
-          </div>
-        ) : (
-          <div
-            className="text-sm text-ink-strong px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
-            style={{ borderColor: "#a7f3d0", background: "#ecfdf5", color: "#065f46" }}
-          >
-            <div className="text-2xl mb-1">
-              <CheckCircleIcon />
-            </div>
-            {emptyState}
           </div>
         )
       ) : (
