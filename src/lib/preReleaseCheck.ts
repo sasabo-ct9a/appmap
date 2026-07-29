@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { z } from "zod";
 import type { ScreenMapResult } from "./claudeCli";
 import { type Language } from "./i18n";
 
@@ -61,12 +62,60 @@ export type ProjectMeta = {
   has_ci_workflow: boolean;
 };
 
+/**
+ * Rust の pre_release_scan コマンドから返る PreReleaseScanResult の
+ * runtime decoder。Rust struct と TS type は手同期なので、片側変更で
+ * silently 壊れるのを防ぐため invoke の境界で必ずパースを通す。
+ *
+ * schema が失敗した場合は詳細エラーを throw する(呼び出し側で scanError に載る)。
+ */
+const ScanHitSchema = z.object({
+  file: z.string(),
+  line: z.number().int().nonnegative(),
+  snippet: z.string(),
+  kind: z.string(),
+});
+
+const ProjectMetaSchema = z.object({
+  project_type: z.string().nullable(),
+  has_build_script: z.boolean(),
+  has_test_script: z.boolean(),
+  has_typecheck_script: z.boolean(),
+  has_lockfile: z.boolean(),
+  has_tsconfig: z.boolean(),
+  is_typescript_project: z.boolean(),
+  has_ci_workflow: z.boolean(),
+});
+
+const PreReleaseScanResultSchema = z.object({
+  secrets: z.array(ScanHitSchema),
+  todos: z.array(ScanHitSchema),
+  console_logs: z.array(ScanHitSchema),
+  secrets_total: z.number().int().nonnegative(),
+  todos_total: z.number().int().nonnegative(),
+  console_logs_total: z.number().int().nonnegative(),
+  files_scanned: z.number().int().nonnegative(),
+  files_truncated: z.boolean(),
+  detected_test_framework: z.string().nullable(),
+  has_test_files: z.boolean(),
+  env_files_present: z.boolean(),
+  env_covered_by_gitignore: z.boolean(),
+  project_meta: ProjectMetaSchema,
+});
+
 export async function runCodeScan(
   folderPath: string,
 ): Promise<PreReleaseScanResult> {
-  return await invoke<PreReleaseScanResult>("pre_release_scan", {
-    folder: folderPath,
-  });
+  const raw = await invoke("pre_release_scan", { folder: folderPath });
+  const parsed = PreReleaseScanResultSchema.safeParse(raw);
+  if (!parsed.success) {
+    // 片側変更(Rust or TS)で境界が壊れた時に、エラー箇所を明示。
+    // fresh install / DB migration 後に古い binary が繋がるようなケースを早期発見できる。
+    throw new Error(
+      `pre_release_scan returned a shape TS did not expect. Rust/TS type sync broken. Details: ${parsed.error.message}`,
+    );
+  }
+  return parsed.data;
 }
 
 // ────────────────────────────────────────────────────────────────
