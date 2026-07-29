@@ -145,7 +145,13 @@ fn detect_project_meta_monorepo_full_types() {
     let root = tmp.path();
     std::fs::write(root.join("package.json"), "{}").unwrap();
     std::fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
-    // Node subdir(root lockfile 継承を確認)
+    // pnpm workspace 定義:これが無いと root lockfile 継承は無効(独立 sub package 扱い)
+    std::fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages:\n  - 'apps/*'\n  - 'services/*'\n",
+    )
+    .unwrap();
+    // Node subdir(root lockfile 継承を workspace 経由で確認)
     std::fs::create_dir_all(root.join("apps/web")).unwrap();
     std::fs::write(root.join("apps/web/package.json"), r#"{"scripts": {"build": "vite build"}}"#).unwrap();
     // Python subdir(前実装で拾えなかった)
@@ -173,6 +179,27 @@ fn detect_project_meta_monorepo_full_types() {
     // apps/web は local lockfile 無し + root pnpm-lock.yaml あり → has_lockfile=true(root 継承)
     let web = meta.manifests.iter().find(|m| m.path == "apps/web/package.json").unwrap();
     assert!(web.has_lockfile, "root lockfile inheritance failed for apps/web");
+}
+
+#[test]
+fn detect_project_meta_workspace_gated_lockfile() {
+    // workspace 定義が無ければ、root lockfile があっても sub package には継承しない。
+    // 独立 sub package なのに no-lockfile を出さなくなる誤検知を防ぐガード。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("package.json"), "{}").unwrap();
+    std::fs::write(root.join("package-lock.json"), "{}").unwrap();
+    // pnpm-workspace.yaml も workspaces フィールドも無い
+    std::fs::create_dir_all(root.join("apps/demo")).unwrap();
+    std::fs::write(root.join("apps/demo/package.json"), r#"{}"#).unwrap();
+
+    let meta = detect_project_meta(root);
+    let demo = meta
+        .manifests
+        .iter()
+        .find(|m| m.path == "apps/demo/package.json")
+        .unwrap();
+    assert!(!demo.has_lockfile, "independent sub package should NOT inherit root lockfile");
 }
 
 #[test]
