@@ -9,10 +9,7 @@ import type { ScreenMapResult } from "../claudeCli";
 const EMPTY_SCREENS: ScreenMapResult = {
   nodes: [],
   edges: [],
-  appName: "test",
   appSummary: "test summary",
-  context: null,
-  language: "ja",
 };
 
 // Rust scanner が返す "何もない・きれい" 結果のベースライン。

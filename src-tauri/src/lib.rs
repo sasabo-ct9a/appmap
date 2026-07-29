@@ -1633,6 +1633,12 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         files_scanned += 1;
         let rel = path.strip_prefix(&folder_path).unwrap_or(&path)
             .to_string_lossy().replace('\\', "/");
+        // テストファイルは fixture として fake secret / test 用 console.log / TODO を
+        // 含むのが普通なので content スキャンから除外(has_test_files 判定は既に完了済み)。
+        // trufflehog / detect-secrets / bandit 等の業界標準ツールも同じ挙動。
+        if is_test_file_path(&path) {
+            continue;
+        }
 
         for (line_idx, raw_line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
@@ -1868,6 +1874,48 @@ fn detect_project_meta(folder: &Path) -> ProjectMeta {
 
 // v0.1.10:detect_potential_error は誤検知率が高すぎて実害の方が大きく、削除。
 // リリース前チェックは信頼度の高い実 grep ベース検出のみに絞った。
+
+/// 与えられたパスがテストファイルか判定する(言語別マーカー)。
+///   - JS/TS:  *.test.* / *.spec.*
+///   - Python: test_*.py / *_test.py
+///   - Rust:   tests/ 配下 or #[cfg(test)] を含むファイル(名前だけでは判定困難なので tests/ 配下 + `_test.rs` 慣例)
+///   - Go:     *_test.go
+///   - Ruby:   *_spec.rb / *_test.rb
+///   - JVM:    *Test / *Tests / *Spec で終わるファイル
+///   - 一般:   __tests__ / __test__ 配下(JS 慣例)
+fn is_test_file_path(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let full = path.to_string_lossy().replace('\\', "/");
+    let full_lower = full.to_lowercase();
+
+    // 汎用:__tests__ / __test__ ディレクトリ配下
+    if full.contains("/__tests__/") || full.contains("/__test__/") {
+        return true;
+    }
+
+    match ext.as_str() {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
+            name.contains(".test.") || name.contains(".spec.")
+        }
+        "py" => name.starts_with("test_") || name.ends_with("_test.py"),
+        "rs" => {
+            // Rust: tests/*.rs(integration test)or ファイル名末尾が `_test.rs`。
+            //   inline #[cfg(test)] mod tests までは名前判定できないので、
+            //   ここでは path-based だけに絞る(名前 wise は不十分だが安全側)。
+            let in_tests_dir = (full_lower.contains("/tests/") || full_lower.starts_with("tests/"))
+                && !full_lower.contains("/target/");
+            in_tests_dir || name.ends_with("_test.rs")
+        }
+        "go" => name.ends_with("_test.go"),
+        "rb" => name.ends_with("_spec.rb") || name.ends_with("_test.rb"),
+        "java" | "kt" | "scala" => {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            stem.ends_with("Test") || stem.ends_with("Tests") || stem.ends_with("Spec")
+        }
+        _ => false,
+    }
+}
 
 /// プロジェクト内の `.env*` ファイルを再帰的に収集する。
 ///   - `.env.example` `.env.sample` `.env.template` は意図的に共有される非秘密なので除外
@@ -2474,124 +2522,11 @@ fn stop_folder_watch(id: u64, state: State<'_, WatchState>) -> Result<(), String
     Ok(())
 }
 
-// ═════════════════════════════════════════════════════════════════════
-// Unit tests: scanner helpers(mask / TODO / console / gitignore glob)
-// ═════════════════════════════════════════════════════════════════════
+// Unit tests は scanner_test.rs に切り出し済み(fake secret を含む test 文字列が
+// dogfooding 時に content スキャン対象にならないよう、`_test.rs` 命名でスキップさせる)。
 #[cfg(test)]
-mod scanner_tests {
-    use super::*;
-
-    // ─── mask_snippet ──────────────────────────────────────────────
-    #[test]
-    fn mask_quoted_long_value() {
-        // 8+ 文字のクオート内は伏せ字
-        let out = mask_snippet("api_key = \"sk-abc12345XYZ\"");
-        assert!(out.contains(MASK), "expected mask, got {out}");
-        assert!(!out.contains("sk-abc12345XYZ"), "raw value leaked: {out}");
-    }
-
-    #[test]
-    fn mask_quoted_short_value_kept() {
-        // 7 文字以下はクオート内でもそのまま
-        let out = mask_snippet("name = \"short\"");
-        assert!(out.contains("\"short\""), "short quoted value should be kept: {out}");
-    }
-
-    #[test]
-    fn mask_url_credentials() {
-        // URL 内 user:pass を伏せる
-        let out = mask_snippet("DATABASE_URL=postgres://alice:s3cret@db.host/app");
-        assert!(!out.contains("alice"), "url user leaked: {out}");
-        assert!(!out.contains("s3cret"), "url password leaked: {out}");
-        assert!(out.contains("db.host"), "host should stay visible: {out}");
-    }
-
-    #[test]
-    fn mask_bare_env_assignment() {
-        // KEY=value(クオートなし)も伏せる
-        let out = mask_snippet("API_KEY=sk-abc12345XYZ0000");
-        assert!(!out.contains("sk-abc12345XYZ0000"), "bare secret leaked: {out}");
-        assert!(out.contains("API_KEY="), "key name should stay visible: {out}");
-    }
-
-    #[test]
-    fn mask_env_ref_untouched() {
-        // process.env.X / ${VAR} は伏せない(参照であって秘密ではない)
-        let out = mask_snippet("API_KEY=process.env.MY_KEY");
-        assert!(out.contains("process.env.MY_KEY"), "env-ref should stay visible: {out}");
-    }
-
-    // ─── is_real_console_log ───────────────────────────────────────
-    #[test]
-    fn console_log_matches_various_forms() {
-        assert!(is_real_console_log("  console.log('hi')"), "plain");
-        assert!(is_real_console_log("  console.log ('hi')"), "with space");
-        assert!(is_real_console_log("  console?.log('hi')"), "optional chaining");
-    }
-
-    #[test]
-    fn console_log_ignores_string_literal() {
-        // 文字列リテラル中の "console.log(" は無視する
-        assert!(!is_real_console_log("  const s = 'console.log(x)'"));
-    }
-
-    // ─── is_tag_in_real_comment(TODO 検出)─────────────────────────
-    #[test]
-    fn todo_bare_marker_detected() {
-        assert!(is_tag_in_real_comment("// TODO: fix later", "TODO"));
-    }
-
-    #[test]
-    fn todo_tracked_with_issue_skipped() {
-        // #123 / PROJECT-42 は tracked → 検出から外す
-        assert!(!is_tag_in_real_comment("// TODO(#123): xxx", "TODO"));
-        assert!(!is_tag_in_real_comment("// TODO(PROJECT-42): xxx", "TODO"));
-        assert!(!is_tag_in_real_comment("// TODO(123): xxx", "TODO"));
-    }
-
-    #[test]
-    fn todo_owner_only_kept() {
-        // @user だけの owner は未完了扱いのまま(担当者付きでも作業は残っている)
-        assert!(is_tag_in_real_comment("// TODO(@alice): implement", "TODO"));
-    }
-
-    // ─── gitignore_pattern_matches ─────────────────────────────────
-    #[test]
-    fn gitignore_exact_match() {
-        assert!(gitignore_pattern_matches(".env", ".env"));
-    }
-
-    #[test]
-    fn gitignore_wildcard_star() {
-        assert!(gitignore_pattern_matches(".env*", ".env.local"));
-        assert!(gitignore_pattern_matches(".env.*", ".env.local"));
-        assert!(!gitignore_pattern_matches(".env.*", ".env"));
-    }
-
-    #[test]
-    fn gitignore_globstar_prefix() {
-        assert!(gitignore_pattern_matches("**/.env", ".env"));
-    }
-
-    // ─── is_plausible_secret_hit(URL credential 必須)─────────────
-    #[test]
-    fn plausible_secret_url_needs_at_sign() {
-        // credential 付き URL → 検出
-        assert!(is_plausible_secret_hit(
-            "url = postgres://alice:pw@host/db",
-            "postgres://",
-        ));
-        // credential 無し URL → 検出しない(host 情報だけでは秘密でない)
-        assert!(!is_plausible_secret_hit(
-            "url = postgres://localhost:5432/app",
-            "postgres://",
-        ));
-    }
-
-    // ─── collect_env_files(サンプルは実 FS がない環境では skip)──
-    // Note: 一時ディレクトリ操作は tokio/tauri テスト環境で不安定なため、
-    //       collect_env_files は integration test 側で網羅する。
-}
+#[path = "scanner_test.rs"]
+mod scanner_tests;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
