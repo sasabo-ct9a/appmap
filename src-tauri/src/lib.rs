@@ -1840,10 +1840,12 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                 }
             }
 
-            // 2) 変数名 = 値 パターン(quoted / bare 両方)。
+            // 2) 変数名 = 値 パターン。
             //   LHS 側の識別子を separator(`=` / config 系のみ `:`)ごとに切り出し、
             //   `is_secret_variable_name` で「明らかに secret っぽいキー名」かを判定する。
-            //   env 参照 / 空 / template 変数 / 明らかに短い値 は除外。
+            //   値の妥当性は hardcoded_secret_value に委譲(コードのクオート無し右辺 =
+            //   関数呼び出し/変数参照 は拾わない。bare 値は env/設定/シェルのみ)。
+            //   env 参照 / 空 / placeholder / 短い値 は除外。
             //   prefix 検出で既に同じ行が記録済みなら重複させない(重複 push 回避)。
             if !is_commentish && !line_secret_recorded {
                 let colon_ok = matches!(
@@ -1877,43 +1879,11 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                     if lhs.is_empty() { continue; }
                     if !is_secret_variable_name(lhs) { continue; }
 
-                    // RHS 評価:env 参照除外、長さ 16+ を要求
+                    // RHS 評価:hardcoded_secret_value が「直書き secret 値」か判定して値を返す。
+                    // コードファイルのクオート無し右辺(関数呼び出し・変数比較)は None で弾く。
                     let after = &raw_line[sep_pos + 1..];
                     let rest = after.trim_start();
-                    if rest.is_empty()
-                        || rest.starts_with("process.env")
-                        || rest.starts_with("env.")
-                        || rest.starts_with("import.meta.env")
-                        || rest.starts_with("Deno.env")
-                        || rest.starts_with("System.getenv")
-                        || rest.starts_with("${")
-                        || rest.starts_with('$')
-                    {
-                        continue;
-                    }
-                    // 値本体を取り出す(quote あり/なし)
-                    let value: String = if rest.starts_with('"') || rest.starts_with('\'') {
-                        let quote_char = rest.chars().next().unwrap();
-                        rest[1..].chars().take_while(|c| *c != quote_char).collect()
-                    } else if colon_ok {
-                        rest.chars()
-                            .take_while(|c| {
-                                !c.is_whitespace()
-                                    && !matches!(c, '#' | ';' | '`' | ',' | ']' | '}' | ')')
-                            })
-                            .collect()
-                    } else {
-                        rest.chars()
-                            .take_while(|c| {
-                                c.is_ascii_alphanumeric()
-                                    || matches!(c, '-' | '_' | '/' | '+' | '=' | '@' | '~')
-                            })
-                            .collect()
-                    };
-                    if value.chars().count() < 16 { continue; }
-                    // 値側 placeholder 判定:`your-secret-here` `changeme` `xxxxxxxx` 等は誤検出。
-                    //   これで allowlist を「値が明示 placeholder のとき」だけに絞れる。
-                    if is_placeholder_value(&value) { continue; }
+                    if hardcoded_secret_value(rest, ext.as_str()).is_none() { continue; }
 
                     secrets.push(ScanHit {
                         file: rel.clone(),
@@ -2698,6 +2668,63 @@ fn is_placeholder_value(value: &str) -> bool {
         "0000000000", "1234567890", "abcdef",
     ];
     PLACEHOLDER_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// 代入の右辺(`=`/`:` の後、trim 済み)が「直書き secret 値」として妥当かを判定し、値を返す。
+/// None を返したら secret ではない(env 参照 / 空 / placeholder / コード式)。
+///
+/// **なぜ ext を見るか(誤検出の核心):**
+/// コードファイル(.rs/.ts/.tsx/.js/.py/.cs …)では、秘密情報は必ず文字列リテラル
+/// (クオート付き)で書かれる。クオート無しの右辺は関数呼び出しや変数参照などの
+/// 「コード式」であって値ではない。例:
+///   - `let tokens = tokenize_var_name(lhs);`(変数名に token → 右辺は関数呼び出し)
+///   - `const authOk = loginCompletedAt !== null;`(auth → 右辺は変数比較)
+/// これらを 16 文字超の「値」と誤認して秘密情報扱いしていた(dogfooding で発覚)。
+///
+/// 一方 env / 設定 / シェルファイルでは `KEY=value`(クオート無し)が本物の secret 形式
+/// なので、そこだけ bare 値を許可する。
+fn hardcoded_secret_value(rest: &str, ext: &str) -> Option<String> {
+    if rest.is_empty()
+        || rest.starts_with("process.env")
+        || rest.starts_with("env.")
+        || rest.starts_with("import.meta.env")
+        || rest.starts_with("Deno.env")
+        || rest.starts_with("System.getenv")
+        || rest.starts_with("${")
+        || rest.starts_with('$')
+    {
+        return None;
+    }
+
+    let quoted = rest.starts_with('"') || rest.starts_with('\'');
+    // bare(クオート無し)値を secret として拾ってよいファイル種別
+    let bare_ok = matches!(
+        ext,
+        "env" | "yaml" | "yml" | "toml" | "json" | "ini" | "properties"
+            | "sh" | "bash" | "zsh" | "ps1"
+    );
+
+    let value: String = if quoted {
+        let quote_char = rest.chars().next().unwrap();
+        rest[1..].chars().take_while(|c| *c != quote_char).collect()
+    } else if bare_ok {
+        rest.chars()
+            .take_while(|c| {
+                !c.is_whitespace() && !matches!(c, '#' | ';' | '`' | ',' | ']' | '}' | ')')
+            })
+            .collect()
+    } else {
+        // コードファイルのクオート無し右辺 = コード式。secret ではない。
+        return None;
+    };
+
+    if value.chars().count() < 16 {
+        return None;
+    }
+    if is_placeholder_value(&value) {
+        return None;
+    }
+    Some(value)
 }
 
 /// プロジェクト内の `.env*` ファイルを再帰的に収集する。
