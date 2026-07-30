@@ -77,6 +77,27 @@ fn line_secret_detection_for_masking() {
     assert!(!line_contains_secret("SELECT * FROM users WHERE active = true"));
 }
 
+// ─── is_skippable_dir(Unity/.NET 巨大キャッシュ除外)──────────
+#[test]
+fn skippable_dir_covers_unity_and_dotnet() {
+    // Unity/.NET のキャッシュを大文字小文字問わず除外(3GB Library でタイムアウトの回帰)
+    assert!(is_skippable_dir("Library"));
+    assert!(is_skippable_dir("library"));
+    assert!(is_skippable_dir("Temp"));
+    assert!(is_skippable_dir("Logs"));
+    assert!(is_skippable_dir("obj"));
+    assert!(is_skippable_dir("bin"));
+    // 従来の除外も維持
+    assert!(is_skippable_dir("node_modules"));
+    assert!(is_skippable_dir(".git"));
+    assert!(is_skippable_dir("target"));
+    // ユーザーのコードは除外しない
+    assert!(!is_skippable_dir("src"));
+    assert!(!is_skippable_dir("Assets"));
+    assert!(!is_skippable_dir("app"));
+    assert!(!is_skippable_dir("components"));
+}
+
 // ─── trailing_identifier(UTF-8 境界 panic 回帰)────────────────
 #[test]
 fn trailing_identifier_multibyte_no_panic() {

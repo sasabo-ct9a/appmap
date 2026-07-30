@@ -8,6 +8,30 @@ use futures_util::StreamExt;
 use tauri::{Emitter, Manager, State};
 use tokio::io::AsyncWriteExt;
 
+/// スキャン・コンテキスト収集で走査対象から外すディレクトリ名か(大文字小文字無視)。
+///
+/// 依存・生成物・キャッシュ・IDE メタなど「ユーザーが書いたコードではない」もの。
+/// 特に Unity(`Library` / `Temp` / `Logs`)や .NET(`obj` / `bin`)の巨大キャッシュを
+/// 外さないと、3GB 級・2 万ファイルの `Library` を全 stat してスキャンがタイムアウトする
+/// (実際に Unity プロジェクトで発生)。名前は OS ごとに大小が違うため lowercase で比較。
+fn is_skippable_dir(name: &str) -> bool {
+    const SKIP: &[&str] = &[
+        // JS / 汎用ビルド出力・キャッシュ
+        "node_modules", "dist", "build", "out", "coverage",
+        ".next", ".nuxt", ".svelte-kit", ".turbo", ".vite", ".parcel-cache", ".angular", ".cache",
+        // VCS / IDE / OS
+        ".git", ".hg", ".svn", ".idea", ".vscode", ".vs",
+        // Python
+        "venv", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",
+        // Rust / mobile / その他パッケージキャッシュ
+        "target", "pods", ".gradle", ".dart_tool",
+        // Unity / .NET(巨大キャッシュ・生成物)
+        "library", "temp", "logs", "obj", "bin", "builds", "memorycaptures",
+    ];
+    let lower = name.to_lowercase();
+    SKIP.contains(&lower.as_str())
+}
+
 /// 既存 PATH に開発者ツールがよく置かれるパスを追記して返す。
 ///
 /// macOS の GUI アプリ(.app)は launchd から起動するため PATH が縮小されており、
@@ -731,20 +755,7 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
     let max_total: usize = 30 * 1024;
     let max_per_file: usize = 10 * 1024;
 
-    const SKIP_DIRS: &[&str] = &[
-        "node_modules",
-        ".git",
-        "target",
-        "dist",
-        "build",
-        ".next",
-        ".cache",
-        "venv",
-        ".venv",
-        "__pycache__",
-        ".idea",
-        ".vscode",
-    ];
+    // ディレクトリ除外は is_skippable_dir に一元化(Unity/.NET キャッシュも含む)。
     const INCLUDE_EXTS: &[&str] = &[
         "md", "json", "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "rb",
         "vue", "svelte", "html", "css", "toml", "yaml", "yml",
@@ -811,7 +822,6 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
         total: &mut usize,
         max_total: usize,
         max_per_file: usize,
-        skip_dirs: &[&str],
         include_exts: &[&str],
         visited: &mut std::collections::HashSet<PathBuf>,
     ) {
@@ -832,7 +842,7 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
                 continue;
             }
             if path.is_dir() {
-                if skip_dirs.contains(&name.as_str()) {
+                if is_skippable_dir(&name) {
                     continue;
                 }
                 walk(
@@ -842,7 +852,6 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
                     total,
                     max_total,
                     max_per_file,
-                    skip_dirs,
                     include_exts,
                     visited,
                 );
@@ -882,7 +891,6 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
         &mut total,
         max_total,
         max_per_file,
-        SKIP_DIRS,
         INCLUDE_EXTS,
         &mut visited,
     );
@@ -1429,11 +1437,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         return Err(format!("folder does not exist: {}", folder));
     }
 
-    // 分析用と同じディレクトリ / 拡張子フィルタ
-    const SKIP_DIRS: &[&str] = &[
-        "node_modules", ".git", "target", "dist", "build", ".next",
-        ".cache", "venv", ".venv", "__pycache__", ".idea", ".vscode",
-    ];
+    // ディレクトリの除外は is_skippable_dir に一元化(Unity/.NET キャッシュも含む)。
     const INCLUDE_EXTS: &[&str] = &[
         "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "rb",
         "vue", "svelte", "html", "css", "json", "toml", "yaml", "yml",
@@ -1447,6 +1451,9 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     //   落とさない。
     const MAX_SCAN_FILES: usize = 200;
     const MAX_WALK_FILES: usize = 10_000;
+    // 訪問(stat)エントリ数の上限。既知の巨大キャッシュは is_skippable_dir で除外するが、
+    // 未知の巨大ツリーに対する保険。この数に達したら partial 扱いで打ち切る。
+    const MAX_WALK_VISITS: usize = 40_000;
 
     // シークレット系:プレフィックス or キー名パターン
     // 誤検知を減らすため、代入っぽい表現(= の右側 or : の後)に絞る
@@ -1582,13 +1589,20 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     /// 掘り切ってから `packages/web/src/` に来るため、cap 到達で本命が未収集になる。
     /// (priority, depth) の小さい順にディレクトリを処理する優先度付き BFS にすることで、
     /// 全 subtree の src/app/server を深い generated より先に消化する。
+    ///
+    /// 上限は 2 系統:
+    ///   - max_files:収集した(拡張子マッチ)ファイル数。並び替え後 content scan する母数。
+    ///   - max_visits:stat したエントリ数。Unity の `Library`(3GB / 2 万ファイル)のように
+    ///     拡張子フィルタに大量に引っかからないまま延々走査してタイムアウトするのを防ぐ
+    ///     ハードストッパ。is_skippable_dir で Library 自体は除外するが、未知の巨大ツリーに
+    ///     対する保険として visits 上限も持つ。
     /// 返り値:cap で「未処理のディレクトリ/ファイルが残ったか」= true。
     fn walk(
         root: &Path,
-        skip_dirs: &[&str],
         include_exts: &[&str],
         files: &mut Vec<PathBuf>,
         max_files: usize,
+        max_visits: usize,
     ) -> bool {
         use std::collections::BinaryHeap;
         use std::cmp::Reverse;
@@ -1600,26 +1614,38 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         heap.push(Reverse((dir_priority(root_name), 0, String::new(), root.to_path_buf())));
 
         let mut had_more = false;
-        while let Some(Reverse((_prio, depth, _tie, dir))) = heap.pop() {
-            if files.len() >= max_files {
+        let mut visits: usize = 0;
+        'outer: while let Some(Reverse((_prio, depth, _tie, dir))) = heap.pop() {
+            if files.len() >= max_files || visits >= max_visits {
                 had_more = true;
                 break;
             }
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };
             for entry in entries.flatten() {
+                visits += 1;
+                if visits >= max_visits {
+                    had_more = true;
+                    break 'outer;
+                }
+                // file_type() は多くの環境で追加 stat 無しに種別が取れる(is_dir/is_file の
+                // 二重 stat を避ける)。symlink はディレクトリ扱いしない=ループ回避にもなる。
+                let is_dir = match entry.file_type() {
+                    Ok(ft) => ft.is_dir(),
+                    Err(_) => entry.path().is_dir(),
+                };
                 let path = entry.path();
-                if path.is_dir() {
+                if is_dir {
                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if !skip_dirs.contains(&name) && !name.starts_with('.') {
+                    if !is_skippable_dir(name) && !name.starts_with('.') {
                         let key = path.to_string_lossy().to_string();
                         heap.push(Reverse((dir_priority(name), depth + 1, key, path)));
                     }
-                } else if path.is_file() {
+                } else {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
                     if include_exts.contains(&ext.as_str()) {
                         if files.len() >= max_files {
                             had_more = true;
-                            break;
+                            break 'outer;
                         }
                         files.push(path);
                     }
@@ -1634,7 +1660,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     let folder_for_sort = folder_path.clone();
     let (file_list, walk_truncated): (Vec<PathBuf>, bool) = tauri::async_runtime::spawn_blocking(move || {
         let mut list = Vec::new();
-        let truncated = walk(&folder_owned, SKIP_DIRS, INCLUDE_EXTS, &mut list, MAX_WALK_FILES);
+        let truncated = walk(&folder_owned, INCLUDE_EXTS, &mut list, MAX_WALK_FILES, MAX_WALK_VISITS);
         // 優先順位付き並び替え:
         //   MAX_SCAN_FILES=200 で content 読み込みが打ち切られる時、重要ファイルが
         //   後方に残ると誤検知(見つからなかった=安全)を招く。
@@ -2684,13 +2710,9 @@ fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize)
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let skip = matches!(
-                name,
-                "node_modules" | ".git" | "target" | "dist" | "build"
-                    | ".next" | ".turbo" | ".vite" | ".cache" | ".idea" | ".vscode"
-                    | "venv" | ".venv" | "__pycache__"
-            );
-            if !skip {
+            // Unity/.NET の巨大キャッシュも除外(is_skippable_dir に一元化)。これが無いと
+            // .env 探索だけで Library 配下 2 万ファイルを走査してしまう。
+            if !is_skippable_dir(name) {
                 collect_env_files(&path, base, out, max);
             }
         } else if path.is_file() {
@@ -3185,21 +3207,12 @@ pub struct WatchState {
 }
 
 fn should_ignore_watch_path(path: &Path) -> bool {
+    // 除外ディレクトリは is_skippable_dir に一元化(Unity の Library/Temp/Logs も含む)。
+    // これが無いと 3GB 級の Library 全体を監視して、Unity のキャッシュ書換えで
+    // 大量の folder-changed が発火し続ける。.DS_Store はファイルなので個別に維持。
     path.components().any(|c| {
-        matches!(
-            c.as_os_str().to_str(),
-            Some(".git")
-                | Some("node_modules")
-                | Some("dist")
-                | Some("target")
-                | Some("build")
-                | Some(".next")
-                | Some(".turbo")
-                | Some(".vite")
-                | Some(".DS_Store")
-                | Some(".idea")
-                | Some(".vscode")
-        )
+        let name = c.as_os_str().to_str().unwrap_or("");
+        is_skippable_dir(name) || name == ".DS_Store"
     })
 }
 
