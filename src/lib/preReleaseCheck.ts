@@ -630,7 +630,25 @@ export function buildFindings({
   const hasTests = scan ? scan.has_test_files : ctxTesting?.hasTests;
 
   const stackHint = inferStackHint(screens.context?.techStack);
-  if (!framework) {
+  if (framework) {
+    if (hasTests === false) {
+      // framework が入っているだけ「準備は済んでいる」状態なので、「framework すら無い」よりは
+      // 1 段軽い扱い(severity を low に格下げ)。
+      findings.push({
+        id: "no-tests",
+        severity: "low",
+        category: "testing",
+        title: t.noTestsTitle(framework),
+        hint: t.noTestsHint,
+        fixSteps: t.noTestsFix(stackHint),
+      });
+    }
+  } else if (hasTests !== true) {
+    // framework 未検出 かつ テストファイルも無い → テスト整備なしとして指摘。
+    //   JS/TS/Python は framework を依存パッケージで検出するが、Rust/Go/C# は
+    //   テストランナーがツールチェーン内蔵(cargo test / go test / dotnet test)。
+    //   これらは framework が常に null なので、テストファイルがあれば整備済みとみなし
+    //   「テストフレームワーク未検出」を出さない(全 Rust/Go/C# 誤検出の回避)。
     findings.push({
       id: "no-test-framework",
       severity: "medium",
@@ -638,17 +656,6 @@ export function buildFindings({
       title: t.noTestFrameworkTitle,
       hint: t.noTestFrameworkHint,
       fixSteps: t.noTestFrameworkFix(stackHint),
-    });
-  } else if (hasTests === false) {
-    // framework が入っているだけ「準備は済んでいる」状態なので、「framework すら無い」よりは
-    // 1 段軽い扱い(severity を low に格下げ)。
-    findings.push({
-      id: "no-tests",
-      severity: "low",
-      category: "testing",
-      title: t.noTestsTitle(framework),
-      hint: t.noTestsHint,
-      fixSteps: t.noTestsFix(stackHint),
     });
   }
 
