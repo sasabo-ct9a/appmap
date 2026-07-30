@@ -1282,11 +1282,7 @@ fn line_contains_secret(line: &str) -> bool {
             if is_inside_string_literal(line, i) { continue; }
             let before = line[..i].trim_end();
             let key_body = before.strip_suffix('"').or_else(|| before.strip_suffix('\'')).unwrap_or(before);
-            let lhs_start = key_body
-                .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            let lhs = &key_body[lhs_start..];
+            let lhs = trailing_identifier(key_body);
             if lhs.is_empty() || !is_secret_variable_name(lhs) { continue; }
             let rest = line[i + 1..].trim_start();
             if rest.starts_with("process.env") || rest.starts_with("${") || rest.starts_with('$') {
@@ -1849,11 +1845,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                         .or_else(|| before_trimmed.strip_suffix('\''))
                         .unwrap_or(before_trimmed);
                     // identifier chars(英数字 + _-)を末尾から取る
-                    let lhs_start = key_body
-                        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                    let lhs = &key_body[lhs_start..];
+                    let lhs = trailing_identifier(key_body);
                     if lhs.is_empty() { continue; }
                     if !is_secret_variable_name(lhs) { continue; }
 
@@ -2583,6 +2575,22 @@ fn is_test_file_path(path: &Path) -> bool {
         }
         _ => false,
     }
+}
+
+/// key_body の末尾から identifier(英数字 / `_` / `-`)の連続だけを切り出す。
+///
+/// なぜ専用関数か:`rfind` は「マッチした文字の先頭 byte」を返すため、直前が
+/// マルチバイト文字(日本語コメント・全角記号など)だと `pos + 1` が UTF-8 の
+/// char 境界を割り、`&key_body[pos + 1..]` が panic する。日本語を含むファイル
+/// (Unity の JSON / C# 等)で実際にスキャンが落ちた。char_indices で境界を保つ。
+fn trailing_identifier(key_body: &str) -> &str {
+    let start = key_body
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_' && *c != '-')
+        .map(|(i, c)| i + c.len_utf8()) // マッチ文字の「次」の境界へ進める
+        .unwrap_or(0);
+    &key_body[start..]
 }
 
 /// 変数名を token に分割する(`_` `-` 区切り + camelCase 境界)。全て小文字化。

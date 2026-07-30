@@ -77,6 +77,29 @@ fn line_secret_detection_for_masking() {
     assert!(!line_contains_secret("SELECT * FROM users WHERE active = true"));
 }
 
+// ─── trailing_identifier(UTF-8 境界 panic 回帰)────────────────
+#[test]
+fn trailing_identifier_multibyte_no_panic() {
+    // マルチバイト文字の直後で切り出しても panic しない(旧 rfind+1 が落ちていた)
+    assert_eq!(trailing_identifier("名前"), ""); // 全部 non-identifier → 空
+    assert_eq!(trailing_identifier("設定 apiKey"), "apiKey"); // 空白が境界
+    assert_eq!(trailing_identifier("plainKey"), "plainKey"); // 全部 identifier
+    assert_eq!(trailing_identifier(""), "");
+    assert_eq!(trailing_identifier("料金=x"), "x"); // 実際には呼ばれないが安全確認
+}
+
+#[test]
+fn line_secret_detection_survives_japanese() {
+    // 日本語コメント/文字列を含む行でも panic せず正しく判定する。
+    // これがまさに Unity(日本語)プロジェクトでスキャンを落としていたケース。
+    assert!(!line_contains_secret("// 設定ファイルの名前です"));
+    assert!(!line_contains_secret("名前=太郎")); // secret 名でない + 短い
+    assert!(!line_contains_secret("メッセージ: \"接続しました\""));
+    // 日本語が前置されても本物 secret は拾う
+    assert!(line_contains_secret("設定 apiKey=sk_live_0123456789abcdef"));
+    assert!(line_contains_secret("認証トークン API_TOKEN=abcdef1234567890xyz"));
+}
+
 // ─── glob_segments_match(R13-#4 workspace glob)──────────────────
 fn split_segs(s: &str) -> Vec<&str> {
     s.split('/').filter(|x| !x.is_empty()).collect()
