@@ -107,7 +107,7 @@ function PreReleaseChecklist({
     scanningRef.current = true;
     setScanError(null);
     setScanning(true);
-    runCodeScan(targetFolder)
+    runCodeScan(targetFolder, language)
       .then((result) => {
         // 完了時点で folder が変わっていたら結果を捨てる(stale scan 破棄)
         if (folderPathRef.current === targetFolder) {
@@ -130,7 +130,7 @@ function PreReleaseChecklist({
           Promise.resolve().then(() => scanNowRef.current());
         }
       });
-  }, [folderPath]);
+  }, [folderPath, language]);
 
   // 常に最新の scanNow を指す(microtask flush から使うため render body で同期)
   scanNowRef.current = scanNow;

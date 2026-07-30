@@ -144,10 +144,44 @@ const PreReleaseScanResultSchema = z
   })
   .strict();
 
+/**
+ * Promise に上限時間を設ける。期限超過で reject する(元の Promise は放置=結果を捨てる)。
+ * Rust の invoke がハングした場合の UI 保険。Rust タスク自体はキャンセルできないが、
+ * JS 側の await を打ち切って scanError に倒すことで無限スピナーを防ぐ。
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 export async function runCodeScan(
   folderPath: string,
+  language: Language = "ja",
 ): Promise<PreReleaseScanResult> {
-  const raw = await invoke("pre_release_scan", { folder: folderPath });
+  // 通常スキャンは cap 付き(walk 1万件 / content 200件)で数秒で終わる。
+  // これを大きく超えるのは Rust 側の異常(想定外の巨大フォルダ or 処理停止)。
+  // 無限スピナーを避け、scanError → "unknown" 判定に倒すためのタイムアウト。
+  const SCAN_TIMEOUT_MS = 120_000;
+  const timeoutMsg =
+    language === "ja"
+      ? "コードのスキャンが120秒以内に終わりませんでした。フォルダがとても大きいか、スキャンが途中で止まった可能性があります。フォルダを選び直すか、再読込を試してください。"
+      : "The code scan did not finish within 120s. The folder may be very large or the scan stalled. Try reselecting the folder or reloading.";
+  const raw = await withTimeout(
+    invoke("pre_release_scan", { folder: folderPath }),
+    SCAN_TIMEOUT_MS,
+    timeoutMsg,
+  );
   const parsed = PreReleaseScanResultSchema.safeParse(raw);
   if (!parsed.success) {
     // 片側変更(Rust or TS)で境界が壊れた時に、エラー箇所を明示。
