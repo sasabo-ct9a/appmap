@@ -1439,10 +1439,12 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
 
     // ディレクトリの除外は is_skippable_dir に一元化(Unity/.NET キャッシュも含む)。
     const INCLUDE_EXTS: &[&str] = &[
-        "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "rb",
+        "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "rb", "cs",
         "vue", "svelte", "html", "css", "json", "toml", "yaml", "yml",
         "env", "sh", "ps1",
     ];
+    // cs は Unity/.NET 向け。secret/TODO は言語非依存で効く(console.log 検出は JS 用の
+    // ままなので C# には出ない=誤検出も出ない)。
     // v0.1.10(Codex 指摘 Medium #6 対応):
     //   - MAX_SCAN_FILES:ソース内容を読む上限(現状値を維持、パフォーマンス保護)
     //   - MAX_WALK_FILES:ファイル名リストの上限(test framework/test file 検出は
