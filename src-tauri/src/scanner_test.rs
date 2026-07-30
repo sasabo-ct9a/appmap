@@ -110,6 +110,29 @@ fn real_hardcoded_secret_still_detected() {
     assert_eq!(hardcoded_secret_value("\"short\"", "ts"), None);
 }
 
+// ─── package_json_is_unity(Unity パッケージ除外)──────────────
+#[test]
+fn unity_package_json_is_excluded() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    // Unity パッケージ(unity フィールドあり)= 除外対象
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"jp.lilxyzw.liltoon","version":"2.3.2","displayName":"lilToon","unity":"2022.3"}"#,
+    )
+    .unwrap();
+    assert!(package_json_is_unity(dir.path()));
+
+    // 通常の Node package.json = 除外しない
+    let dir2 = tempfile::tempdir().unwrap();
+    fs::write(
+        dir2.path().join("package.json"),
+        r#"{"name":"my-app","version":"1.0.0","scripts":{"build":"vite build"}}"#,
+    )
+    .unwrap();
+    assert!(!package_json_is_unity(dir2.path()));
+}
+
 // ─── is_secret_variable_name(token 完全一致・誤検出回帰)──────
 #[test]
 fn secret_var_name_no_substring_false_positives() {

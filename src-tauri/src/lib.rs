@@ -2199,11 +2199,29 @@ fn expand_segments(
 /// 指定ディレクトリ直下の manifest を全 6 種類チェックして manifests に push する。
 ///   Node / Rust / Python / Go / Ruby / PHP を root / subdir で同じルールで扱う。
 ///   `rel_prefix` は project root からの相対パス接頭辞("" for root、"apps/web" for subdir)。
+/// package.json が Unity パッケージ(UPM)か。`unity` フィールドを持つ package.json は
+/// Unity のパッケージ(第三者シェーダー等の依存物)であって、ユーザーの Node プロジェクト
+/// ではない。Node 運用ゲート(build/CI/lockfile/test)を当てはめると全く無意味な指摘に
+/// なるため manifest 収集から除外する。
+///
+/// なぜ踏むか:Windows はフォルダ名の大文字小文字を区別しないため、monorepo 検出の
+/// `packages/` フォールバックが Unity の `Packages/` にヒットし、その中の第三者パッケージ
+/// (例 jp.lilxyzw.liltoon)を「ユーザーの package」と誤認していた。
+fn package_json_is_unity(dir: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|v| v.get("unity").cloned())
+        .is_some()
+}
+
 fn collect_manifests_at(dir: &Path, project_root: &Path, rel_prefix: &str, out: &mut Vec<ManifestInfo>) {
     let has = |p: &str| dir.join(p).exists();
     let prefix = if rel_prefix.is_empty() { String::new() } else { format!("{}/", rel_prefix) };
 
-    if has("package.json") {
+    if has("package.json") && !package_json_is_unity(dir) {
         out.push(build_node_manifest(
             dir,
             project_root,
