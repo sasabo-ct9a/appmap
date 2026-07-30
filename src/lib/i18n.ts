@@ -262,6 +262,7 @@ export type Translations = {
     removedNodesLabel: (n: number) => string;
     addedEdgesLabel: (n: number) => string;
     removedEdgesLabel: (n: number) => string;
+    ambiguousNote: (n: number) => string;
     addedBadge: string;
     removedBadge: string;
     removedSectionTitle: string;
@@ -583,6 +584,7 @@ const JA: Translations = {
     removedNodesLabel: (n) => `消えた画面 ${n}`,
     addedEdgesLabel: (n) => `追加されたつながり ${n}`,
     removedEdgesLabel: (n) => `消えたつながり ${n}`,
+    ambiguousNote: (n) => `同名の画面 ${n} 件は比較不能`,
     addedBadge: "追加",
     removedBadge: "削除",
     removedSectionTitle: "今回消えた画面(前回分析にはあった)",
@@ -914,6 +916,7 @@ const EN: Translations = {
     removedNodesLabel: (n) => `Removed screens: ${n}`,
     addedEdgesLabel: (n) => `Added links: ${n}`,
     removedEdgesLabel: (n) => `Removed links: ${n}`,
+    ambiguousNote: (n) => `${n} same-name screen(s) can't be compared`,
     addedBadge: "New",
     removedBadge: "Gone",
     removedSectionTitle: "Removed screens (were in the previous analysis)",

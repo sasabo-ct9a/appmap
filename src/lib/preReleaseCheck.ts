@@ -60,7 +60,7 @@ export type ProjectMeta = {
   has_test_script: boolean;
   has_typecheck_script: boolean;
   has_lockfile: boolean;
-  has_tsconfig: boolean;
+  has_tsconfig_file: boolean;
   is_typescript_project: boolean;
   has_ci_workflow: boolean;
   manifests: ManifestInfo[];
@@ -73,7 +73,10 @@ export type ManifestInfo = {
   has_test: boolean;
   has_typecheck: boolean;
   has_lockfile: boolean;
-  has_tsconfig: boolean;
+  /** 純粋な tsconfig ファイル実在(devDeps.typescript は含まない) */
+  has_tsconfig_file: boolean;
+  /** TS project 扱い(has_tsconfig_file OR typescript 依存)。typecheck 欠落 gate はこれで判定 */
+  is_typescript_project: boolean;
 };
 
 /**
@@ -103,7 +106,8 @@ const ManifestInfoSchema = z
     has_test: z.boolean(),
     has_typecheck: z.boolean(),
     has_lockfile: z.boolean(),
-    has_tsconfig: z.boolean(),
+    has_tsconfig_file: z.boolean(),
+    is_typescript_project: z.boolean(),
   })
   .strict();
 
@@ -115,7 +119,7 @@ const ProjectMetaSchema = z
     has_test_script: z.boolean(),
     has_typecheck_script: z.boolean(),
     has_lockfile: z.boolean(),
-    has_tsconfig: z.boolean(),
+    has_tsconfig_file: z.boolean(),
     is_typescript_project: z.boolean(),
     has_ci_workflow: z.boolean(),
     manifests: z.array(ManifestInfoSchema),
@@ -523,9 +527,10 @@ export function buildFindings({
     }
     // typecheck script は per-manifest 判定にする(root だけの has_typecheck_script を見ると
     //   root は OK、apps/web が欠落、のような monorepo 事情を落とす)。
-    //   TypeScript project の目印は per-manifest の has_tsconfig を採用。
+    //   TS project 判定は is_typescript_project(tsconfig OR typescript 依存)を採用。
+    //   純粋な tsconfig ファイル欠落は別 gate で扱う(has_tsconfig_file)。
     const tsManifestsMissingTypecheck = nodeManifests
-      .filter((m) => m.has_tsconfig && !m.has_typecheck)
+      .filter((m) => m.is_typescript_project && !m.has_typecheck)
       .map((m) => m.path);
     if (tsManifestsMissingTypecheck.length > 0) {
       findings.push({

@@ -8,6 +8,58 @@
 
 use super::*;
 
+// ─── is_secret_variable_name(R12-#2 複合 env 名検出)──────────────
+#[test]
+fn secret_var_name_composite_env_names() {
+    // 実運用で普通に出る複合名を検出できること(前回の境界チェックで落ちていた回帰)
+    assert!(is_secret_variable_name("SUPABASE_SERVICE_ROLE_KEY"));
+    assert!(is_secret_variable_name("OPENAI_API_KEY"));
+    assert!(is_secret_variable_name("NEXTAUTH_SECRET"));
+    assert!(is_secret_variable_name("STRIPE_WEBHOOK_SIGNING_SECRET"));
+    assert!(is_secret_variable_name("clientSecret"));
+    assert!(is_secret_variable_name("DATABASE_PASSWORD"));
+}
+
+#[test]
+fn secret_var_name_allowlist_rejects_lookalikes() {
+    // secret っぽいが実際は secret でない名前は弾く
+    assert!(!is_secret_variable_name("API_KEY_HINT"));
+    assert!(!is_secret_variable_name("PASSWORDLESS"));
+    assert!(!is_secret_variable_name("KEYBOARD_LAYOUT"));
+    assert!(!is_secret_variable_name("KEY_ID"));
+    assert!(!is_secret_variable_name("token_type"));
+    assert!(!is_secret_variable_name("secret_name"));
+    assert!(!is_secret_variable_name("keyword"));
+}
+
+#[test]
+fn secret_var_name_non_secret_rejected() {
+    assert!(!is_secret_variable_name("username"));
+    assert!(!is_secret_variable_name("count"));
+    assert!(!is_secret_variable_name("port"));
+}
+
+// ─── find_yaml_comment_start(R12-#4 pnpm YAML inline comment)──────
+#[test]
+fn yaml_comment_start_strips_inline() {
+    // quote 外の `# ...` を検出
+    assert_eq!(find_yaml_comment_start("- \"apps/*\" # frontend"), Some(11));
+    // quote 内の `#` は無視
+    assert_eq!(find_yaml_comment_start("- \"apps/#special\""), None);
+    // コメントなし
+    assert_eq!(find_yaml_comment_start("- apps/*"), None);
+}
+
+// ─── workspace_glob_matches(R11-#5 / R12-#4)─────────────────────
+#[test]
+fn workspace_glob_variants() {
+    assert!(workspace_glob_matches("apps/*", "apps/web"));
+    assert!(!workspace_glob_matches("apps/*", "apps/web/nested"));
+    assert!(workspace_glob_matches("apps/**", "apps/web/nested"));
+    assert!(workspace_glob_matches("packages/foo", "packages/foo"));
+    assert!(!workspace_glob_matches("apps/*", "packages/foo"));
+}
+
 // ─── mask_snippet ──────────────────────────────────────────────
 #[test]
 fn mask_quoted_long_value() {
@@ -203,6 +255,33 @@ fn detect_project_meta_workspace_gated_lockfile() {
 }
 
 #[test]
+fn detect_project_meta_pnpm_yaml_with_comments_and_dotslash() {
+    // pnpm-workspace.yaml の実例(inline comment / ./ prefix / examples/*)対応。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("package.json"), "{}").unwrap();
+    std::fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
+    std::fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages:\n  - \"apps/*\" # frontend apps\n  - ./packages/*\n  - \"examples/*\"\n",
+    )
+    .unwrap();
+    // examples/* は固定 apps|packages|services には無いディレクトリ
+    std::fs::create_dir_all(root.join("examples/demo")).unwrap();
+    std::fs::write(root.join("examples/demo/package.json"), r#"{"scripts":{"build":"x"}}"#).unwrap();
+    std::fs::create_dir_all(root.join("packages/ui")).unwrap();
+    std::fs::write(root.join("packages/ui/package.json"), "{}").unwrap();
+
+    let meta = detect_project_meta(root);
+    let paths: Vec<&str> = meta.manifests.iter().map(|m| m.path.as_str()).collect();
+    assert!(paths.contains(&"examples/demo/package.json"), "examples/* not expanded: {paths:?}");
+    assert!(paths.contains(&"packages/ui/package.json"), "./packages/* not expanded: {paths:?}");
+    // examples/demo は workspace member なので root pnpm-lock.yaml を継承
+    let demo = meta.manifests.iter().find(|m| m.path == "examples/demo/package.json").unwrap();
+    assert!(demo.has_lockfile, "workspace member should inherit root lockfile");
+}
+
+#[test]
 fn detect_project_meta_vite_tsconfig_variants() {
     // tsconfig.json 無し、tsconfig.app.json + tsconfig.node.json のみでも TS 判定される
     let tmp = tempfile::tempdir().unwrap();
@@ -212,7 +291,8 @@ fn detect_project_meta_vite_tsconfig_variants() {
     std::fs::write(root.join("tsconfig.node.json"), "{}").unwrap();
     let meta = detect_project_meta(root);
     let node = meta.manifests.iter().find(|m| m.manifest_type == "node").unwrap();
-    assert!(node.has_tsconfig, "tsconfig.app.json variant should mark node manifest as TS");
+    assert!(node.has_tsconfig_file, "tsconfig.app.json variant should mark node has_tsconfig_file");
+    assert!(node.is_typescript_project, "tsconfig.app.json variant should mark node as TS project");
 }
 
 #[test]

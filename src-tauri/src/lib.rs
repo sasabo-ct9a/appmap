@@ -1180,6 +1180,12 @@ async fn read_files_for_qa(
         if total_bytes >= QA_MAX_TOTAL_BYTES {
             break;
         }
+        // 明らかに秘密を含むファイルは Q&A プロンプトに載せない。
+        //   .env* / *.pem / *.key / id_rsa / *credentials* / *secrets* / *.p12 / *.pfx
+        //   コードチェック側で mask しているのに、Q&A 側が素通しでは思想が矛盾する。
+        if is_credential_file_path(&rel) {
+            continue;
+        }
         let candidate = folder_path.join(&rel);
         let Ok(canon) = candidate.canonicalize() else {
             continue; // 存在しないパスは黙って skip(ノードの files が古いだけかも)
@@ -1202,8 +1208,15 @@ async fn read_files_for_qa(
         if take < bytes.len() {
             truncated = true;
         }
-        // UTF-8 変換:失敗時は lossy でも渡す(コード解析用途なので雑で OK)
-        let content = String::from_utf8_lossy(&bytes[..take]).to_string();
+        // UTF-8 変換:失敗時は lossy でも渡す(コード解析用途なので雑で OK)。
+        // 各行に対して mask_snippet を通し、コードチェック側と同じレベルで
+        // 秘密情報が LLM プロンプトへ流れないよう伏せ字化する。
+        let raw = String::from_utf8_lossy(&bytes[..take]).to_string();
+        let content = raw
+            .lines()
+            .map(mask_snippet)
+            .collect::<Vec<_>>()
+            .join("\n");
         total_bytes += take;
         out.push(QAFileContent {
             file: rel,
@@ -1213,6 +1226,32 @@ async fn read_files_for_qa(
     }
 
     Ok(out)
+}
+
+/// Q&A に載せてはいけない典型的な credential ファイルパスを判定する。
+fn is_credential_file_path(rel: &str) -> bool {
+    let lower = rel.to_lowercase().replace('\\', "/");
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    // .env / .env.local / .env.production.local などは全て弾く
+    if name == ".env" || name.starts_with(".env.") {
+        return true;
+    }
+    // 秘密鍵 / 証明書 / OpenSSH / PGP 系
+    let suspicious_ext = [".pem", ".key", ".p12", ".pfx", ".jks", ".asc", ".ppk"];
+    if suspicious_ext.iter().any(|e| name.ends_with(e)) {
+        return true;
+    }
+    // 特定ファイル名(OpenSSH / Netrc / gcloud application_default_credentials 等)
+    if matches!(
+        name,
+        "id_rsa" | "id_ed25519" | "id_ecdsa" | "id_dsa"
+            | ".netrc" | "netrc" | ".htpasswd"
+            | "application_default_credentials.json"
+    ) {
+        return true;
+    }
+    // 命名に「credentials」「secrets」を含むファイル
+    name.contains("credentials") || name.contains("secrets")
 }
 
 /// v0.1.8:リリース前チェックのコードスキャン結果。
@@ -1262,7 +1301,9 @@ struct ProjectMeta {
     has_typecheck_script: bool,
     /// root で見つかる lockfile の有無(package-lock.json 等)
     has_lockfile: bool,
-    has_tsconfig: bool,
+    /// いずれかの Node manifest が tsconfig ファイルを持つ(devDeps.typescript は含まない)
+    has_tsconfig_file: bool,
+    /// いずれかの Node manifest が TS project(has_tsconfig_file OR typescript 依存)
     is_typescript_project: bool,
     has_ci_workflow: bool,
     /// 検出された全 manifest の詳細(gates finding はこれを iterate)
@@ -1282,10 +1323,14 @@ struct ManifestInfo {
     has_typecheck: bool,
     /// この manifest 直近の lockfile(package.json → package-lock.json 等)
     has_lockfile: bool,
-    /// この manifest 近傍に tsconfig.json があるか(Node manifest 用)。
-    /// per-manifest 判定にすることで root 単体では正確に検出できない
-    /// monorepo の apps/web/tsconfig.json 有無を UI に伝えられる。
-    has_tsconfig: bool,
+    /// この manifest 近傍に tsconfig.json / tsconfig*.json が実在するか。
+    ///   純粋にファイル存在の事実(devDependencies.typescript は含めない)。
+    ///   将来「tsconfig 欠落」チェックを追加するときに意味がぶれないよう分離。
+    has_tsconfig_file: bool,
+    /// この manifest が TypeScript プロジェクトとして扱われるか。
+    ///   has_tsconfig_file OR devDependencies.typescript OR dependencies.typescript。
+    ///   typecheck script 欠落 gate は「TS project なのに typecheck scripts が無い」で判定する。
+    is_typescript_project: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1365,24 +1410,10 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         ("-----BEGIN EC PRIVATE KEY-----", "ec private key"),
         ("-----BEGIN DSA PRIVATE KEY-----", "dsa private key"),
     ];
-    // 変数名系:api_key = "..." 形式 の左辺で拾う(右辺の非空 quote を要求)
-    // v0.1.10(Codex 指摘 Medium #5 対応):ENV 変数名で見かける代表的な名前を追加。
-    let secret_var_names: &[&str] = &[
-        "api_key", "apiKey", "api-key",
-        "secret_key", "secretKey", "secret-key",
-        "access_key", "accessKey",
-        "client_secret", "clientSecret",
-        "password", "passwd", "pwd",
-        "token", "auth_token", "authToken", "access_token", "accessToken", "refresh_token", "refreshToken",
-        "jwt_secret", "jwtSecret", "JWT_SECRET",
-        "session_secret", "sessionSecret", "SESSION_SECRET",
-        "webhook_secret", "webhookSecret",
-        "database_url", "DATABASE_URL", "databaseUrl",
-        "mongodb_uri", "MONGODB_URI", "mongoUri",
-        "redis_url", "REDIS_URL",
-        "encryption_key", "encryptionKey", "ENCRYPTION_KEY",
-        "private_key", "privateKey", "PRIVATE_KEY",
-    ];
+    // 変数名系 secret 検出は「LHS(左辺)にキーワードが含まれるか + 安全マーカーがないか」
+    // で判定する(is_secret_variable_name)。以前は固定 needle 列挙 → substring 一致 → 境界
+    // チェック方式だったが、SUPABASE_SERVICE_ROLE_KEY や NEXTAUTH_SECRET のような
+    // 「未知だが明らかに secret」な変数を全て取りこぼしていた回帰があったため、方針転換。
     // 実際の作業マーカーだけに絞る。XXX は "env.XXX" / "example.com/xxx" などのプレースホルダで
     // 誤検知が多すぎるので外す(HACK/FIXME/TODO で必要十分)。
     let todo_needles: &[&str] = &["TODO", "FIXME", "HACK"];
@@ -1459,8 +1490,24 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         }
     };
 
+    /// 優先ディレクトリ名。walk 時にこれらを含むディレクトリを先に辿る。
+    /// generated/fixtures/node_modules 相当が先頭 10k を食い潰して src/ に到達
+    /// できない事故を避ける。
+    fn dir_priority(name: &str) -> u8 {
+        let lower = name.to_lowercase();
+        match lower.as_str() {
+            "src" | "app" | "pages" | "routes" | "api" | "server" | "handlers" | "lib" => 0,
+            "config" | "packages" | "apps" | "services" => 1,
+            // generated / fixtures / dist 相当は最後
+            "generated" | "gen" | "fixtures" | "__fixtures__" | "examples" | "vendor" => 3,
+            _ => 2,
+        }
+    }
+
     /// 返り値:cap によって「次の候補を処理できなかった」= true。純粋な `len == cap`
     /// ではなく、実際に途中で切ったかで判定するため。
+    /// ディレクトリを priority 順に辿ることで、cap 打ち切り時でも重要ディレクトリの
+    /// ファイルが収集済みになる(後段の sort ではなく walk 自体を priority-first に)。
     fn walk(
         dir: &Path,
         base: &Path,
@@ -1471,18 +1518,15 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     ) -> bool {
         if files.len() >= max_files { return true; }
         let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+        let mut subdirs: Vec<PathBuf> = Vec::new();
+        // まず同ディレクトリ内のファイルを収集(浅いファイルを優先)、subdir は後で priority 順に。
         for entry in entries.flatten() {
-            // 各エントリ処理前と push 直前の 2 段でチェック。前実装は関数入口だけしか
-            // 見ていなかったため、1 ディレクトリに 50k ファイルあると同じ read_dir ループ内で
-            // cap を超えて push し続ける実バグがあった。
             if files.len() >= max_files { return true; }
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !skip_dirs.contains(&name) && !name.starts_with('.') {
-                    if walk(&path, base, skip_dirs, include_exts, files, max_files) {
-                        return true;
-                    }
+                    subdirs.push(path);
                 }
             } else if path.is_file() {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -1490,6 +1534,17 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                     if files.len() >= max_files { return true; }
                     files.push(path);
                 }
+            }
+        }
+        // subdir を priority 順(0 が先)に辿る
+        subdirs.sort_by_key(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            (dir_priority(name), name.to_lowercase())
+        });
+        for sub in subdirs {
+            if files.len() >= max_files { return true; }
+            if walk(&sub, base, skip_dirs, include_exts, files, max_files) {
+                return true;
             }
         }
         false
@@ -1657,6 +1712,10 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
             let is_commentish = trimmed.starts_with("//") || trimmed.starts_with('#')
                 || trimmed.starts_with('*') || trimmed.starts_with("<!--");
 
+            // 同一行の重複検出を防ぐフラグ。prefix 検出と変数名検出が同じ行を拾って
+            // 2 回 push するのを避ける(件数水増しと修正プロンプトのノイズを防ぐ)。
+            let mut line_secret_recorded = false;
+
             // 1) シークレットのプレフィックス(自身のパターン定義や説明文を弾く強化版)
             if !is_commentish {
                 for (needle, kind) in secret_needles {
@@ -1667,109 +1726,89 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                             snippet: mask_snippet(raw_line),
                             kind: kind.to_string(),
                         });
+                        line_secret_recorded = true;
                         break;
                     }
                 }
             }
 
-            // 2) 変数名 = 値 パターン。quoted / bare 両方に対応する。
-            //   quoted:  API_KEY = "abcdef..."      (中身 16+ 文字)
-            //   bare:    API_KEY=abcdef...          (.env / export 慣例、値 16+ 文字)
-            //   env 参照(process.env.X, ${VAR} 等)は除外。
-            if !is_commentish {
-                // 変数名系検出:誤検知を強く抑えるための多段フィルタ。
-                //   1) haystack / needle 両方 lowercase で比較(camelCase / snake_case / SCREAMING を吸収)。
-                //      needle 側を変えずに比較していた過去実装は clientSecret / apiKey などを
-                //      matching できていなかった false negative。
-                //   2) 区切り子:JS/TS/Rust/Go/Java など「コード」拡張子では `=` のみ許可。
-                //      `:` を許すと `password: z.string()` `token: getStore()` のような
-                //      通常コードを secret 扱いしてしまう。
-                //      `:` は .env / YAML / TOML / JSON など「値割当が : で表現される形式」でのみ許可。
-                //   3) 右辺:string literal(quote 始まり) or bare scalar のみ受ける。
-                //      関数呼び出し(`(` を含む)、object literal(`{`)、配列(`[`)、
-                //      式(`.` を含むメソッドチェイン)は「動的な値」なので除外。
-                let lower_line = raw_line.to_lowercase();
-                // 設定系ファイル(env/yaml/toml/json/ini/properties)は「:」区切りを許容し、
-                // JSON `{"apiKey": "..."}` や TOML `"api_key" = "..."` の quoted key も扱う。
-                // bare 値の許容文字集合も配置系はコード系より広くする(`.` `:` `%` `/` などが実値に登場)。
+            // 2) 変数名 = 値 パターン(quoted / bare 両方)。
+            //   LHS 側の識別子を separator(`=` / config 系のみ `:`)ごとに切り出し、
+            //   `is_secret_variable_name` で「明らかに secret っぽいキー名」かを判定する。
+            //   env 参照 / 空 / template 変数 / 明らかに短い値 は除外。
+            //   prefix 検出で既に同じ行が記録済みなら重複させない(重複 push 回避)。
+            if !is_commentish && !line_secret_recorded {
                 let colon_ok = matches!(
                     ext.as_str(),
                     "env" | "yaml" | "yml" | "toml" | "json" | "ini" | "properties"
                 );
-                'name_loop: for name in secret_var_names {
-                    let lower_name = name.to_lowercase();
-                    if lower_name.is_empty() { continue; }
-                    // find() 1 回だと `token_hint` で止まって同じ行の本物の `token` を
-                    //   落とすため、全出現位置を走査する。加えて前後境界を必須にして
-                    //   `mytoken` `passwordless` `api_key_hint` などの誤検知を弾く。
-                    for (idx, _) in lower_line.match_indices(lower_name.as_str()) {
-                        // 境界チェック:直前が identifier 文字なら別トークンの一部 → skip。
-                        let before_ok = idx == 0 || {
-                            let prev = raw_line[..idx].chars().rev().next();
-                            match prev {
-                                Some(c) => !c.is_ascii_alphanumeric() && c != '_',
-                                None => true,
-                            }
-                        };
-                        if !before_ok { continue; }
-                        let after_start = idx + name.len();
-                        if after_start > raw_line.len() { continue; }
-                        // 直後の識別子文字も別トークンの一部の可能性 → ただし config 系の
-                        // 閉じ quote を許すため、まず quote skip した後で境界を見る。
-                        let mut after = &raw_line[after_start..];
-                        if colon_ok {
-                            after = after.strip_prefix('"').or_else(|| after.strip_prefix('\'')).unwrap_or(after);
-                        }
-                        // after の直前(name の直後)が identifier 文字だとダメ
-                        // 例:`api_key_hint:` の `api_key` は直後 `_` なので誤検知除外
-                        let next_char = after.chars().next();
-                        let after_boundary_ok = match next_char {
-                            Some(c) if c.is_ascii_alphanumeric() || c == '_' => false,
-                            _ => true,
-                        };
-                        if !after_boundary_ok { continue; }
-                        let after_trim = after.trim_start();
-                        let sep_ok = after_trim.starts_with('=') || (colon_ok && after_trim.starts_with(':'));
-                        if !sep_ok { continue; }
-                        let rest = after_trim.trim_start_matches(['=', ':']).trim_start();
-                        if rest.is_empty()
-                            || rest.starts_with("process.env")
-                            || rest.starts_with("env.")
-                            || rest.starts_with("import.meta.env")
-                            || rest.starts_with("Deno.env")
-                            || rest.starts_with("System.getenv")
-                            || rest.starts_with("${")
-                            || rest.starts_with('$')
-                        {
-                            continue;
-                        }
-                        let inner_len = if rest.starts_with('"') || rest.starts_with('\'') {
-                            let quote_char = rest.chars().next().unwrap();
-                            rest[1..].chars().take_while(|c| *c != quote_char).count()
-                        } else if colon_ok {
-                            rest.chars()
-                                .take_while(|c| {
-                                    !c.is_whitespace()
-                                        && !matches!(c, '#' | ';' | '`' | ',' | ']' | '}' | ')')
-                                })
-                                .count()
-                        } else {
-                            rest.chars()
-                                .take_while(|c| {
-                                    c.is_ascii_alphanumeric()
-                                        || matches!(c, '-' | '_' | '/' | '+' | '=' | '@' | '~')
-                                })
-                                .count()
-                        };
-                        if inner_len >= 16 {
-                            secrets.push(ScanHit {
-                                file: rel.clone(),
-                                line: line_num,
-                                snippet: mask_snippet(raw_line),
-                                kind: format!("hardcoded {}", name),
-                            });
-                            break 'name_loop;
-                        }
+                // 全 separator 位置を集める。1 行複数 assignment(minified JSON など)対応。
+                let sep_positions: Vec<usize> = raw_line
+                    .char_indices()
+                    .filter_map(|(i, c)| {
+                        if c == '=' || (colon_ok && c == ':') { Some(i) } else { None }
+                    })
+                    .collect();
+                'sep_loop: for sep_pos in sep_positions {
+                    // LHS 切り出し:separator の直前から identifier chars を後ろ向きに拾う。
+                    let before = &raw_line[..sep_pos];
+                    let before_trimmed = before.trim_end();
+                    // JSON key 形式 `"apiKey":` の閉じ quote を除去
+                    let key_body = before_trimmed
+                        .strip_suffix('"')
+                        .or_else(|| before_trimmed.strip_suffix('\''))
+                        .unwrap_or(before_trimmed);
+                    // identifier chars(英数字 + _-)を末尾から取る
+                    let lhs_start = key_body
+                        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    let lhs = &key_body[lhs_start..];
+                    if lhs.is_empty() { continue; }
+                    if !is_secret_variable_name(lhs) { continue; }
+
+                    // RHS 評価:env 参照除外、長さ 16+ を要求
+                    let after = &raw_line[sep_pos + 1..];
+                    let rest = after.trim_start();
+                    if rest.is_empty()
+                        || rest.starts_with("process.env")
+                        || rest.starts_with("env.")
+                        || rest.starts_with("import.meta.env")
+                        || rest.starts_with("Deno.env")
+                        || rest.starts_with("System.getenv")
+                        || rest.starts_with("${")
+                        || rest.starts_with('$')
+                    {
+                        continue;
+                    }
+                    let inner_len = if rest.starts_with('"') || rest.starts_with('\'') {
+                        let quote_char = rest.chars().next().unwrap();
+                        rest[1..].chars().take_while(|c| *c != quote_char).count()
+                    } else if colon_ok {
+                        // config 系:空白 / セミコロン / コメント / 構造区切りだけで止める
+                        rest.chars()
+                            .take_while(|c| {
+                                !c.is_whitespace()
+                                    && !matches!(c, '#' | ';' | '`' | ',' | ']' | '}' | ')')
+                            })
+                            .count()
+                    } else {
+                        // code 系:secret っぽい文字集合のみ算入(method chain 等で即打ち切り)
+                        rest.chars()
+                            .take_while(|c| {
+                                c.is_ascii_alphanumeric()
+                                    || matches!(c, '-' | '_' | '/' | '+' | '=' | '@' | '~')
+                            })
+                            .count()
+                    };
+                    if inner_len >= 16 {
+                        secrets.push(ScanHit {
+                            file: rel.clone(),
+                            line: line_num,
+                            snippet: mask_snippet(raw_line),
+                            kind: format!("hardcoded {}", lhs),
+                        });
+                        break 'sep_loop;
                     }
                 }
             }
@@ -1857,17 +1896,33 @@ fn detect_project_meta(folder: &Path) -> ProjectMeta {
 
     collect_manifests_at(folder, folder, "", &mut manifests);
 
-    // monorepo 慣例ディレクトリの直下 1 段
-    for mono_dir in ["apps", "packages", "services"] {
-        let base = folder.join(mono_dir);
-        if let Ok(entries) = std::fs::read_dir(&base) {
-            for entry in entries.flatten() {
-                let sub = entry.path();
-                if !sub.is_dir() { continue; }
-                let sub_name = sub.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if sub_name.starts_with('.') { continue; }
-                let rel_prefix = format!("{}/{}", mono_dir, sub_name);
-                collect_manifests_at(&sub, folder, &rel_prefix, &mut manifests);
+    // workspace 定義があればソース・オブ・トゥルースとして展開する。
+    //   pnpm-workspace.yaml / package.json.workspaces の pattern から候補ディレクトリを
+    //   実際に列挙(例:`examples/*` → examples/foo, examples/bar)。
+    //   `apps|packages|services` 固定だと `examples/*` や `tools/*`、`apps/*/*` の
+    //   nested 構成を落とすため。
+    let workspace_dirs = expand_workspace_member_dirs(folder);
+    for (sub, rel_prefix) in &workspace_dirs {
+        // 既に同 prefix で拾っていればスキップ(重複防止)
+        let dup = manifests.iter().any(|m| m.path.starts_with(&format!("{}/", rel_prefix)));
+        if !dup {
+            collect_manifests_at(sub, folder, rel_prefix, &mut manifests);
+        }
+    }
+
+    // fallback:workspace 定義が無い場合の慣例ディレクトリ(直下 1 段)
+    if workspace_dirs.is_empty() {
+        for mono_dir in ["apps", "packages", "services"] {
+            let base = folder.join(mono_dir);
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let sub = entry.path();
+                    if !sub.is_dir() { continue; }
+                    let sub_name = sub.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if sub_name.starts_with('.') { continue; }
+                    let rel_prefix = format!("{}/{}", mono_dir, sub_name);
+                    collect_manifests_at(&sub, folder, &rel_prefix, &mut manifests);
+                }
             }
         }
     }
@@ -1896,13 +1951,16 @@ fn detect_project_meta(folder: &Path) -> ProjectMeta {
         || has("package-lock.json") || has("yarn.lock") || has("pnpm-lock.yaml")
         || has("Cargo.lock") || has("poetry.lock") || has("Pipfile.lock")
         || has("Gemfile.lock") || has("composer.lock") || has("go.sum");
-    // project-wide TS 判定は manifest 側の has_tsconfig(tsconfig*.json / devDeps.typescript
-    // を含む)から導出する。root の tsconfig.json だけを見ていた前実装は
-    // tsconfig.app.json 単独構成や devDeps 依存の TS プロジェクトを取りこぼしていた。
-    let has_tsconfig = manifests
+    // project-wide TS 判定は Node manifest 側の情報から導出。
+    // has_tsconfig_file は「純粋な tsconfig 実在」、is_typescript_project は
+    // 「tsconfig OR devDeps.typescript」で意味を分離。tsconfig 欠落 gate を
+    // 将来追加するときに has_tsconfig_file だけ見ればよくなる。
+    let has_tsconfig_file = manifests
         .iter()
-        .any(|m| m.manifest_type == "node" && m.has_tsconfig);
-    let is_typescript_project = has_tsconfig;
+        .any(|m| m.manifest_type == "node" && m.has_tsconfig_file);
+    let is_typescript_project = manifests
+        .iter()
+        .any(|m| m.manifest_type == "node" && m.is_typescript_project);
     let has_ci_workflow = has(".github/workflows")
         || has(".gitlab-ci.yml")
         || has("azure-pipelines.yml")
@@ -1917,11 +1975,124 @@ fn detect_project_meta(folder: &Path) -> ProjectMeta {
         has_test_script: has_test,
         has_typecheck_script: has_typecheck,
         has_lockfile,
-        has_tsconfig,
+        has_tsconfig_file,
         is_typescript_project,
         has_ci_workflow,
         manifests,
     }
+}
+
+/// workspace 定義(pnpm-workspace.yaml / package.json.workspaces)の pattern から
+/// 実在する member ディレクトリを列挙する。
+///   `apps/*` → apps/ 直下の各ディレクトリ
+///   `apps/**` / `apps/*/*` → 2 階層まで展開(それ以上の深さは実用上稀なので打ち切り)
+///   negation(`!...`)pattern は除外リストとして適用。
+/// 返り値:(絶対パス, root からの相対 prefix)
+fn expand_workspace_member_dirs(project_root: &Path) -> Vec<(PathBuf, String)> {
+    let mut patterns: Vec<(String, bool)> = Vec::new(); // (pattern, is_negation)
+
+    // package.json.workspaces
+    if let Ok(content) = std::fs::read_to_string(project_root.join("package.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            let ws = v.get("workspaces");
+            let arr: Vec<String> = if let Some(arr) = ws.and_then(|w| w.as_array()) {
+                arr.iter().filter_map(|s| s.as_str().map(String::from)).collect()
+            } else if let Some(obj) = ws.and_then(|w| w.as_object()) {
+                obj.get("packages").and_then(|p| p.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            for p in arr {
+                let is_neg = p.starts_with('!');
+                let clean = p.trim_start_matches('!').trim_start_matches("./").to_string();
+                patterns.push((clean, is_neg));
+            }
+        }
+    }
+    // pnpm-workspace.yaml
+    if let Ok(content) = std::fs::read_to_string(project_root.join("pnpm-workspace.yaml")) {
+        let mut in_packages = false;
+        for line in content.lines() {
+            let mut trimmed = line.trim();
+            if let Some(pos) = find_yaml_comment_start(trimmed) {
+                trimmed = trimmed[..pos].trim_end();
+            }
+            if trimmed.starts_with("packages:") {
+                in_packages = true;
+                continue;
+            }
+            if in_packages {
+                if let Some(rest) = trimmed.strip_prefix("- ") {
+                    let raw = rest.trim().trim_matches('"').trim_matches('\'');
+                    let is_neg = raw.starts_with('!');
+                    let clean = raw.trim_start_matches('!').trim_start_matches("./").to_string();
+                    patterns.push((clean, is_neg));
+                } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    in_packages = false;
+                }
+            }
+        }
+    }
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    // pattern からディレクトリ候補を展開
+    let mut result: Vec<(PathBuf, String)> = Vec::new();
+    let list_dirs = |base: &Path| -> Vec<(PathBuf, String)> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !name.starts_with('.') && name != "node_modules" {
+                        out.push((p.clone(), name.to_string()));
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    for (pattern, is_neg) in &patterns {
+        if *is_neg { continue; } // negation は後段で filter
+        let pat = pattern.trim_end_matches('/');
+        if let Some(prefix) = pat.strip_suffix("/*") {
+            // 1 階層展開
+            let base = project_root.join(prefix);
+            for (dir, name) in list_dirs(&base) {
+                result.push((dir, format!("{}/{}", prefix, name)));
+            }
+        } else if let Some(prefix) = pat.strip_suffix("/**").or_else(|| pat.strip_suffix("/*/*")) {
+            // 2 階層まで展開(3 階層以上は打ち切り)
+            let base = project_root.join(prefix);
+            for (dir1, name1) in list_dirs(&base) {
+                result.push((dir1.clone(), format!("{}/{}", prefix, name1)));
+                for (dir2, name2) in list_dirs(&dir1) {
+                    result.push((dir2, format!("{}/{}/{}", prefix, name1, name2)));
+                }
+            }
+        } else {
+            // 固定パス
+            let dir = project_root.join(pat);
+            if dir.is_dir() {
+                result.push((dir, pat.to_string()));
+            }
+        }
+    }
+
+    // negation pattern に一致する候補を除外
+    let negations: Vec<&str> = patterns.iter().filter(|(_, n)| *n).map(|(p, _)| p.as_str()).collect();
+    if !negations.is_empty() {
+        result.retain(|(_, rel)| {
+            !negations.iter().any(|n| workspace_glob_matches(n, rel))
+        });
+    }
+
+    result
 }
 
 /// 指定ディレクトリ直下の manifest を全 6 種類チェックして manifests に push する。
@@ -1995,8 +2166,10 @@ fn build_node_manifest(dir: &Path, project_root: &Path, path: &str) -> ManifestI
         dev.map_or(false, |m| m.contains_key("typescript"))
             || prod.map_or(false, |m| m.contains_key("typescript"))
     });
-    let has_any_tsconfig = dir_has_tsconfig(dir);
-    let has_tsconfig = has_any_tsconfig || has_ts_dep;
+    let has_tsconfig_file = dir_has_tsconfig(dir);
+    // TS project 判定は tsconfig ファイルまたは typescript 依存の OR。
+    // これで tsconfig.app.json 単独構成でも devDeps.typescript 単独でも TS 扱いになる。
+    let is_typescript_project = has_tsconfig_file || has_ts_dep;
     // Node lockfile 判定:
     //   1. local(sub package 直下)にあれば OK
     //   2. root にあり、かつ「この sub package が root のワークスペースメンバー」なら OK
@@ -2019,7 +2192,8 @@ fn build_node_manifest(dir: &Path, project_root: &Path, path: &str) -> ManifestI
         has_test,
         has_typecheck,
         has_lockfile: local_lock || root_lock,
-        has_tsconfig,
+        has_tsconfig_file,
+        is_typescript_project,
     }
 }
 
@@ -2053,29 +2227,69 @@ fn node_workspace_includes(project_root: &Path, sub_dir: &Path) -> bool {
             }
         }
     }
-    // 2) pnpm-workspace.yaml
+    // 2) pnpm-workspace.yaml — 実運用の書き方に合わせて頑張って parse:
+    //   - inline comment `- "apps/*" # note` → `# note` を除去
+    //   - `./packages/*` の先頭 `./` を正規化
+    //   - `!**/dist/**` の negation は最後に一致した方を勝ちにする
     if let Ok(content) = std::fs::read_to_string(project_root.join("pnpm-workspace.yaml")) {
-        // 簡易 YAML パース:`packages:` の下のリスト行(`- pattern`)
         let mut in_packages = false;
+        let mut is_included = false; // 「最後に一致したルール」で更新
         for line in content.lines() {
-            let trimmed = line.trim();
+            let mut trimmed = line.trim();
+            // inline コメント除去(quote 外の `#` から後ろ)
+            if let Some(pos) = find_yaml_comment_start(trimmed) {
+                trimmed = trimmed[..pos].trim_end();
+            }
             if trimmed.starts_with("packages:") {
                 in_packages = true;
                 continue;
             }
             if in_packages {
-                if let Some(pat) = trimmed.strip_prefix("- ") {
-                    let clean = pat.trim().trim_matches('"').trim_matches('\'');
-                    if workspace_glob_matches(clean, &rel_str) {
-                        return true;
+                if let Some(rest) = trimmed.strip_prefix("- ") {
+                    let raw = rest.trim().trim_matches('"').trim_matches('\'');
+                    // negation の適用順を保つ
+                    let (pat, is_negation) = if let Some(pos_pat) = raw.strip_prefix('!') {
+                        (pos_pat, true)
+                    } else {
+                        (raw, false)
+                    };
+                    // `./packages/*` を `packages/*` に正規化
+                    let normalized = pat.strip_prefix("./").unwrap_or(pat);
+                    if workspace_glob_matches(normalized, &rel_str) {
+                        is_included = !is_negation;
                     }
                 } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
                     in_packages = false;
                 }
             }
         }
+        if is_included {
+            return true;
+        }
     }
     false
+}
+
+/// YAML 行の quote 外の `#` 位置(コメント開始点)を返す。quote 内 `#` は無視。
+fn find_yaml_comment_start(line: &str) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => {
+                // 直前が空白でない場合(URL#anchor 等)はコメント扱いしない
+                let prev_is_space = i == 0
+                    || line[..i].chars().rev().next().map_or(true, |c| c.is_whitespace());
+                if prev_is_space {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// workspace pattern の最小 glob マッチ(`apps/*` `apps/**` `packages/foo` などを想定)。
@@ -2123,7 +2337,8 @@ fn build_rust_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
         has_test: true,
         has_typecheck: true,
         has_lockfile,
-        has_tsconfig: false,
+        has_tsconfig_file: false,
+        is_typescript_project: false,
     }
 }
 
@@ -2140,7 +2355,8 @@ fn build_python_manifest(dir: &Path, path: String, has_lockfile: bool) -> Manife
         has_test,
         has_typecheck: true,
         has_lockfile,
-        has_tsconfig: false,
+        has_tsconfig_file: false,
+        is_typescript_project: false,
     }
 }
 
@@ -2152,7 +2368,8 @@ fn build_go_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
         has_test: true,
         has_typecheck: true,
         has_lockfile,
-        has_tsconfig: false,
+        has_tsconfig_file: false,
+        is_typescript_project: false,
     }
 }
 
@@ -2164,7 +2381,8 @@ fn build_ruby_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
         has_test: true,
         has_typecheck: true,
         has_lockfile,
-        has_tsconfig: false,
+        has_tsconfig_file: false,
+        is_typescript_project: false,
     }
 }
 
@@ -2176,7 +2394,8 @@ fn build_php_manifest(path: String, has_lockfile: bool) -> ManifestInfo {
         has_test: true,
         has_typecheck: true,
         has_lockfile,
-        has_tsconfig: false,
+        has_tsconfig_file: false,
+        is_typescript_project: false,
     }
 }
 
@@ -2224,6 +2443,45 @@ fn is_test_file_path(path: &Path) -> bool {
         }
         _ => false,
     }
+}
+
+/// 変数名(LHS)が「secret を保持していそうな名前」かを判定する。
+///
+///   Positive:  key / secret / token / password / pwd / credential / webhook / dsn
+///              / authorization / _auth / auth_
+///   Allowlist: hint / example / sample / placeholder / mock / dummy / default
+///              / expiry / expires / ttl / less(passwordless)/ chain(keychain)
+///              / board(keyboard)/ word(keyword)/ path / prefix / suffix
+///              / _name / _type / _id / readme
+///
+/// 判定は 2 段:allowlist substring がひとつでも含まれれば非 secret 扱い。
+/// これで `API_KEY_HINT` / `PASSWORDLESS` / `KEYBOARD_LAYOUT` / `KEY_ID` は落ちる。
+/// その後 positive substring があれば secret 扱い。SUPABASE_SERVICE_ROLE_KEY /
+/// OPENAI_API_KEY / NEXTAUTH_SECRET / STRIPE_WEBHOOK_SIGNING_SECRET 等は拾える。
+fn is_secret_variable_name(lhs: &str) -> bool {
+    let lower = lhs.to_lowercase();
+    // 注意:substring マッチなので、secret 系語("password" 等)を巻き込まない語を選ぶ。
+    //   例:`word` は `password` にヒットしてしまうので使わず、`keyword` を明示する。
+    const SAFE_MARKERS: &[&str] = &[
+        "hint", "example", "sample", "placeholder", "mock", "dummy", "default",
+        "expiry", "expires", "ttl", "less", "keychain", "keyboard", "keyword",
+        "path", "prefix", "suffix", "_name", "_type", "_id", "readme", "label",
+    ];
+    for m in SAFE_MARKERS {
+        if lower.contains(m) {
+            return false;
+        }
+    }
+    const SECRET_MARKERS: &[&str] = &[
+        "key", "secret", "token", "password", "pwd", "credential", "webhook",
+        "dsn", "auth_", "_auth", "authorization",
+    ];
+    for m in SECRET_MARKERS {
+        if lower.contains(m) {
+            return true;
+        }
+    }
+    false
 }
 
 /// プロジェクト内の `.env*` ファイルを再帰的に収集する。

@@ -35,7 +35,7 @@ function cleanScan(overrides: Partial<PreReleaseScanResult> = {}): PreReleaseSca
       has_test_script: true,
       has_typecheck_script: true,
       has_lockfile: true,
-      has_tsconfig: true,
+      has_tsconfig_file: true,
       is_typescript_project: true,
       has_ci_workflow: true,
       manifests: [
@@ -46,7 +46,8 @@ function cleanScan(overrides: Partial<PreReleaseScanResult> = {}): PreReleaseSca
           has_test: true,
           has_typecheck: true,
           has_lockfile: true,
-          has_tsconfig: true,
+          has_tsconfig_file: true,
+          is_typescript_project: true,
         },
       ],
     },
@@ -134,7 +135,7 @@ describe("buildFindings", () => {
           has_test_script: false,
           has_typecheck_script: false,
           has_lockfile: false,
-          has_tsconfig: true,
+          has_tsconfig_file: true,
           is_typescript_project: true,
           has_ci_workflow: false,
           manifests: [
@@ -145,7 +146,8 @@ describe("buildFindings", () => {
               has_test: false,
               has_typecheck: false,
               has_lockfile: false,
-              has_tsconfig: true,
+              has_tsconfig_file: true,
+              is_typescript_project: true,
             },
           ],
         },
@@ -171,7 +173,7 @@ describe("buildFindings", () => {
           has_test_script: true,
           has_typecheck_script: true,
           has_lockfile: true, // Cargo.lock
-          has_tsconfig: false,
+          has_tsconfig_file: false,
           is_typescript_project: false,
           has_ci_workflow: true,
           manifests: [
@@ -182,7 +184,8 @@ describe("buildFindings", () => {
               has_test: true,
               has_typecheck: true,
               has_lockfile: true,
-              has_tsconfig: false,
+              has_tsconfig_file: false,
+              is_typescript_project: false,
             },
           ],
         },
@@ -205,7 +208,7 @@ describe("buildFindings", () => {
           has_test_script: true,
           has_typecheck_script: true,
           has_lockfile: true,
-          has_tsconfig: true,
+          has_tsconfig_file: true,
           is_typescript_project: true,
           has_ci_workflow: true,
           manifests: [
@@ -216,7 +219,8 @@ describe("buildFindings", () => {
               has_test: false, // <— missing on node side
               has_typecheck: true,
               has_lockfile: true,
-              has_tsconfig: true,
+              has_tsconfig_file: true,
+              is_typescript_project: true,
             },
             {
               manifest_type: "rust",
@@ -225,7 +229,8 @@ describe("buildFindings", () => {
               has_test: true,
               has_typecheck: true,
               has_lockfile: false, // <— missing Cargo.lock
-              has_tsconfig: false,
+              has_tsconfig_file: false,
+              is_typescript_project: false,
             },
           ],
         },

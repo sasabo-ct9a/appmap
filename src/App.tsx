@@ -1115,6 +1115,14 @@ function App() {
                               {t(language).diff.noChanges}
                             </span>
                           )}
+                          {mapDiff.ambiguousLabels.length > 0 && (
+                            <span className="ml-1 text-amber-600">
+                              {" · "}
+                              {t(language).diff.ambiguousNote(
+                                mapDiff.ambiguousLabels.length,
+                              )}
+                            </span>
+                          )}
                         </span>
                       )}
                       {!showDiff && (

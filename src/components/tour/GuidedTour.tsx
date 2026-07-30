@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Language } from "../../lib/i18n";
 
 /**
@@ -43,6 +43,9 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
     w: typeof window !== "undefined" ? window.innerWidth : 1200,
     h: typeof window !== "undefined" ? window.innerHeight : 800,
   });
+  // カードの実測高さ。日本語/英語の文量差や狭画面で 190px 固定だと clamp が
+  // ズレてカード下部が画面外に出るため、描画後に getBoundingClientRect で測る。
+  const [cardHeight, setCardHeight] = useState<number>(190);
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   const isJa = language === "ja";
@@ -134,6 +137,18 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
     };
   }, [open, currentStep]);
 
+  // カードの実測高さを配置計算に反映。描画後に測るので useLayoutEffect で
+  // ペイント前に高さを取り、次フレームの clamp をズラさない。
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = cardRef.current;
+    if (!el) return;
+    const h = el.getBoundingClientRect().height;
+    if (h > 0 && Math.abs(h - cardHeight) > 1) {
+      setCardHeight(h);
+    }
+  });
+
   // ESC で閉じる、← → で移動
   useEffect(() => {
     if (!open) return;
@@ -162,12 +177,13 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
       }
     : null;
 
-  // カード位置決定
+  // カード位置決定(実測高さを渡す)
   const cardPos = computeCardPosition(
     highlight,
     currentStep.placement,
     viewport,
     CARD_WIDTH,
+    cardHeight,
   );
 
   const isFirst = stepIndex === 0;
@@ -317,28 +333,30 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
   );
 }
 
-/** カード位置を対象矩形の周囲から決定。ビューポート外にはみ出さないようクランプ */
+/** カード位置を対象矩形の周囲から決定。ビューポート外にはみ出さないようクランプ。
+ *  cardHeight は描画後に実測した値(初回は 190 の推定)。狭画面/長文でも下端が
+ *  画面外に出ないよう、clamp 計算に実測高さを使う。 */
 function computeCardPosition(
   highlight: { x: number; y: number; width: number; height: number } | null,
   placement: TourStep["placement"],
   viewport: { w: number; h: number },
   cardWidth: number,
+  cardHeight: number,
 ): { left: number; top: number } {
-  // 対象がない or center 指定 → 中央
+  // 対象がない or center 指定 → 中央(実測高さで縦中央に寄せる)
   if (!highlight || placement === "center") {
     return {
       left: Math.max(0, viewport.w / 2 - cardWidth / 2),
-      top: Math.max(0, viewport.h / 2 - 100),
+      top: Math.max(8, viewport.h / 2 - cardHeight / 2),
     };
   }
-  const estimatedCardH = 190; // カード高さ想定(実測は面倒なので固定値)
   // 自動判定:右側に空間があれば right、下に空間があれば bottom、というシンプルなロジック
   let effective = placement;
   if (!effective) {
     const spaceRight = viewport.w - (highlight.x + highlight.width);
     const spaceBelow = viewport.h - (highlight.y + highlight.height);
     if (spaceRight >= cardWidth + CARD_MARGIN + 20) effective = "right";
-    else if (spaceBelow >= estimatedCardH + CARD_MARGIN + 20) effective = "bottom";
+    else if (spaceBelow >= cardHeight + CARD_MARGIN + 20) effective = "bottom";
     else if (highlight.x >= cardWidth + CARD_MARGIN + 20) effective = "left";
     else effective = "top";
   }
@@ -352,15 +370,15 @@ function computeCardPosition(
     top = highlight.y;
   } else if (effective === "top") {
     left = highlight.x + highlight.width / 2 - cardWidth / 2;
-    top = highlight.y - estimatedCardH - CARD_MARGIN;
+    top = highlight.y - cardHeight - CARD_MARGIN;
   } else {
     // bottom
     left = highlight.x + highlight.width / 2 - cardWidth / 2;
     top = highlight.y + highlight.height + CARD_MARGIN;
   }
-  // ビューポートクランプ(端 8px マージン)
+  // ビューポートクランプ(端 8px マージン、実測高さで下端はみ出しを防ぐ)
   left = Math.min(viewport.w - cardWidth - 8, Math.max(8, left));
-  top = Math.min(viewport.h - estimatedCardH - 8, Math.max(8, top));
+  top = Math.min(viewport.h - cardHeight - 8, Math.max(8, top));
   return { left, top };
 }
 
