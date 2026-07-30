@@ -39,6 +39,61 @@ fn secret_var_name_non_secret_rejected() {
     assert!(!is_secret_variable_name("port"));
 }
 
+#[test]
+fn secret_var_name_default_prefixed_still_detected() {
+    // R13-#1:DEFAULT_/SAMPLE_ が付いても直書きなら検出する(allowlist が殺していた回帰)
+    assert!(is_secret_variable_name("DEFAULT_ADMIN_PASSWORD"));
+    assert!(is_secret_variable_name("DEFAULT_JWT_SECRET"));
+    assert!(is_secret_variable_name("SAMPLE_STRIPE_SECRET"));
+    assert!(is_secret_variable_name("EXAMPLE_API_KEY"));
+}
+
+// ─── is_placeholder_value(R13-#1 値側 placeholder 判定)──────────
+#[test]
+fn placeholder_values_recognized() {
+    assert!(is_placeholder_value("your-secret-here"));
+    assert!(is_placeholder_value("changeme-please-x"));
+    assert!(is_placeholder_value("xxxxxxxxxxxxxxxx"));
+    assert!(is_placeholder_value("<your-api-key>"));
+    assert!(is_placeholder_value("0000000000000000"));
+    // 本物っぽい値は placeholder 扱いしない
+    assert!(!is_placeholder_value("sk_live_51KfooBarBaz"));
+    assert!(!is_placeholder_value("aB3xQ9zLmP2wReal"));
+}
+
+// ─── line_contains_secret(R13-#7 Q&A/localLLM mask 判定)────────
+#[test]
+fn line_secret_detection_for_masking() {
+    // URL クエリの token= は誤検出しない(quote 内)
+    assert!(!line_contains_secret(
+        "  callbackUrl: \"https://example.com/cb?token=aaaaaaaaaaaaaaaa\""
+    ));
+    // 実 secret 代入は mask 対象
+    assert!(line_contains_secret("SUPABASE_SERVICE_ROLE_KEY=abcdef1234567890xyz"));
+    // credential URL は mask 対象
+    assert!(line_contains_secret("DATABASE_URL=postgres://user:pass@host/db"));
+    // 通常の UI 文言・SQL は mask しない
+    assert!(!line_contains_secret("const label = \"ようこそ、ログインしてください\""));
+    assert!(!line_contains_secret("SELECT * FROM users WHERE active = true"));
+}
+
+// ─── glob_segments_match(R13-#4 workspace glob)──────────────────
+fn split_segs(s: &str) -> Vec<&str> {
+    s.split('/').filter(|x| !x.is_empty()).collect()
+}
+
+#[test]
+fn glob_segments_recursive() {
+    // apps/*/packages/*
+    assert!(glob_segments_match(&split_segs("apps/*/packages/*"), &split_segs("apps/web/packages/ui")));
+    assert!(!glob_segments_match(&split_segs("apps/*/packages/*"), &split_segs("apps/web/src")));
+    // services/**
+    assert!(glob_segments_match(&split_segs("services/**"), &split_segs("services/api")));
+    assert!(glob_segments_match(&split_segs("services/**"), &split_segs("services/api/worker")));
+    // !**/dist/** 相当(negation の pattern としてのマッチ)
+    assert!(glob_segments_match(&split_segs("**/dist/**"), &split_segs("apps/web/dist/assets")));
+}
+
 // ─── find_yaml_comment_start(R12-#4 pnpm YAML inline comment)──────
 #[test]
 fn yaml_comment_start_strips_inline() {

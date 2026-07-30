@@ -773,7 +773,13 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
     let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     let push_file = |rel: &str, content: &str, total: &mut usize, out: &mut String| -> bool {
-        let truncated: String = content.chars().take(max_per_file).collect();
+        // credential ファイルは丸ごと skip、それ以外は secret 行だけ mask してから渡す。
+        // Q&A と同じ思想(local LLM でもログ出力される可能性があるため素通しにしない)。
+        if is_credential_file_path(rel) {
+            return true; // skip(false を返すと以降の処理も止まるので true で継続)
+        }
+        let masked = mask_secrets_only(content);
+        let truncated: String = masked.chars().take(max_per_file).collect();
         let header = format!("\n\n<<<<< FILE: {} >>>>>\n", rel);
         let need = header.len() + truncated.len();
         if *total + need > max_total {
@@ -1212,11 +1218,9 @@ async fn read_files_for_qa(
         // 各行に対して mask_snippet を通し、コードチェック側と同じレベルで
         // 秘密情報が LLM プロンプトへ流れないよう伏せ字化する。
         let raw = String::from_utf8_lossy(&bytes[..take]).to_string();
-        let content = raw
-            .lines()
-            .map(mask_snippet)
-            .collect::<Vec<_>>()
-            .join("\n");
+        // secret を含む行だけ選択的に mask する。全 quote を伏せると UI 文言・SQL・
+        // route 名まで消えて Q&A の回答品質が落ちるため(mask_snippet 全行適用の弊害)。
+        let content = mask_secrets_only(&raw);
         total_bytes += take;
         out.push(QAFileContent {
             file: rel,
@@ -1226,6 +1230,80 @@ async fn read_files_for_qa(
     }
 
     Ok(out)
+}
+
+/// 各行を見て「secret っぽい行」だけ mask_snippet で伏せ字化し、それ以外はそのまま返す。
+/// LLM に渡す文脈の情報量を保ちつつ、秘密情報の流出だけを防ぐ。
+///   secret 判定:既知 prefix(is_plausible_secret_hit)、secret 変数名 = 値、
+///   credential URL(scheme://user:pass@)のいずれか。
+fn mask_secrets_only(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            if line_contains_secret(line) {
+                mask_snippet(line)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 行が secret を含むか(mask 対象か)の軽量判定。scan 本体のロジックの簡易版。
+fn line_contains_secret(line: &str) -> bool {
+    // 既知 prefix
+    let needles = [
+        "sk-", "sk_live_", "sk_test_", "AKIA", "AIza", "ghp_", "github_pat_",
+        "xoxb-", "xoxp-", "-----BEGIN", "mongodb+srv://", "postgres://", "mysql://",
+    ];
+    for n in needles {
+        if line.contains(n) && is_plausible_secret_hit(line, n) {
+            return true;
+        }
+    }
+    // credential URL(scheme://user:pass@)
+    if line.contains("://") && line.contains('@') {
+        // @ が URL の credential 区切りかを緩く判定
+        if let Some(pos) = line.find("://") {
+            let after = &line[pos + 3..];
+            if let Some(at) = after.find('@') {
+                if after[..at].contains(':') || !after[..at].is_empty() {
+                    // ホスト前に user[:pass] があれば credential URL
+                    if !after[..at].contains('/') && !after[..at].contains(' ') {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // secret 変数名 = 16 文字以上の値(quote あり/なし)
+    for sep in ['=', ':'] {
+        for (i, _) in line.match_indices(sep) {
+            if is_inside_string_literal(line, i) { continue; }
+            let before = line[..i].trim_end();
+            let key_body = before.strip_suffix('"').or_else(|| before.strip_suffix('\'')).unwrap_or(before);
+            let lhs_start = key_body
+                .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let lhs = &key_body[lhs_start..];
+            if lhs.is_empty() || !is_secret_variable_name(lhs) { continue; }
+            let rest = line[i + 1..].trim_start();
+            if rest.starts_with("process.env") || rest.starts_with("${") || rest.starts_with('$') {
+                continue;
+            }
+            let val_len = if rest.starts_with('"') || rest.starts_with('\'') {
+                let q = rest.chars().next().unwrap();
+                rest[1..].chars().take_while(|c| *c != q).count()
+            } else {
+                rest.chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != ',').count()
+            };
+            if val_len >= 16 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Q&A に載せてはいけない典型的な credential ファイルパスを判定する。
@@ -1504,57 +1582,63 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         }
     }
 
-    /// 返り値:cap によって「次の候補を処理できなかった」= true。純粋な `len == cap`
-    /// ではなく、実際に途中で切ったかで判定するため。
-    /// ディレクトリを priority 順に辿ることで、cap 打ち切り時でも重要ディレクトリの
-    /// ファイルが収集済みになる(後段の sort ではなく walk 自体を priority-first に)。
+    /// priority frontier queue による探索。DFS だと `packages/a/generated/` の 10k を
+    /// 掘り切ってから `packages/web/src/` に来るため、cap 到達で本命が未収集になる。
+    /// (priority, depth) の小さい順にディレクトリを処理する優先度付き BFS にすることで、
+    /// 全 subtree の src/app/server を深い generated より先に消化する。
+    /// 返り値:cap で「未処理のディレクトリ/ファイルが残ったか」= true。
     fn walk(
-        dir: &Path,
-        base: &Path,
+        root: &Path,
         skip_dirs: &[&str],
         include_exts: &[&str],
         files: &mut Vec<PathBuf>,
         max_files: usize,
     ) -> bool {
-        if files.len() >= max_files { return true; }
-        let Ok(entries) = std::fs::read_dir(dir) else { return false; };
-        let mut subdirs: Vec<PathBuf> = Vec::new();
-        // まず同ディレクトリ内のファイルを収集(浅いファイルを優先)、subdir は後で priority 順に。
-        for entry in entries.flatten() {
-            if files.len() >= max_files { return true; }
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !skip_dirs.contains(&name) && !name.starts_with('.') {
-                    subdirs.push(path);
-                }
-            } else if path.is_file() {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                if include_exts.contains(&ext.as_str()) {
-                    if files.len() >= max_files { return true; }
-                    files.push(path);
+        use std::collections::BinaryHeap;
+        use std::cmp::Reverse;
+
+        // ヒープキー:(priority, depth, path文字列)。Reverse で min-heap 化。
+        // path 文字列は決定性のためのタイブレーク。
+        let mut heap: BinaryHeap<Reverse<(u8, u32, String, PathBuf)>> = BinaryHeap::new();
+        let root_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        heap.push(Reverse((dir_priority(root_name), 0, String::new(), root.to_path_buf())));
+
+        let mut had_more = false;
+        while let Some(Reverse((_prio, depth, _tie, dir))) = heap.pop() {
+            if files.len() >= max_files {
+                had_more = true;
+                break;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !skip_dirs.contains(&name) && !name.starts_with('.') {
+                        let key = path.to_string_lossy().to_string();
+                        heap.push(Reverse((dir_priority(name), depth + 1, key, path)));
+                    }
+                } else if path.is_file() {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    if include_exts.contains(&ext.as_str()) {
+                        if files.len() >= max_files {
+                            had_more = true;
+                            break;
+                        }
+                        files.push(path);
+                    }
                 }
             }
         }
-        // subdir を priority 順(0 が先)に辿る
-        subdirs.sort_by_key(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            (dir_priority(name), name.to_lowercase())
-        });
-        for sub in subdirs {
-            if files.len() >= max_files { return true; }
-            if walk(&sub, base, skip_dirs, include_exts, files, max_files) {
-                return true;
-            }
-        }
-        false
+        // heap にディレクトリが残っていれば未探索あり
+        had_more || !heap.is_empty()
     }
 
     let folder_owned = folder_path.clone();
     let folder_for_sort = folder_path.clone();
     let (file_list, walk_truncated): (Vec<PathBuf>, bool) = tauri::async_runtime::spawn_blocking(move || {
         let mut list = Vec::new();
-        let truncated = walk(&folder_owned, &folder_owned, SKIP_DIRS, INCLUDE_EXTS, &mut list, MAX_WALK_FILES);
+        let truncated = walk(&folder_owned, SKIP_DIRS, INCLUDE_EXTS, &mut list, MAX_WALK_FILES);
         // 優先順位付き並び替え:
         //   MAX_SCAN_FILES=200 で content 読み込みが打ち切られる時、重要ファイルが
         //   後方に残ると誤検知(見つからなかった=安全)を招く。
@@ -1742,11 +1826,17 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                     ext.as_str(),
                     "env" | "yaml" | "yml" | "toml" | "json" | "ini" | "properties"
                 );
-                // 全 separator 位置を集める。1 行複数 assignment(minified JSON など)対応。
+                // separator 位置を集める。ただし文字列リテラル内(URL クエリの `?token=` 等)は除外。
+                //   `callbackUrl: "https://...?token=aaaa"` の URL 内 `token=` を LHS と誤認しない。
+                //   1 行複数 assignment(minified JSON など)は複数 separator を許容。
                 let sep_positions: Vec<usize> = raw_line
                     .char_indices()
                     .filter_map(|(i, c)| {
-                        if c == '=' || (colon_ok && c == ':') { Some(i) } else { None }
+                        if (c == '=' || (colon_ok && c == ':')) && !is_inside_string_literal(raw_line, i) {
+                            Some(i)
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 'sep_loop: for sep_pos in sep_positions {
@@ -1781,35 +1871,37 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                     {
                         continue;
                     }
-                    let inner_len = if rest.starts_with('"') || rest.starts_with('\'') {
+                    // 値本体を取り出す(quote あり/なし)
+                    let value: String = if rest.starts_with('"') || rest.starts_with('\'') {
                         let quote_char = rest.chars().next().unwrap();
-                        rest[1..].chars().take_while(|c| *c != quote_char).count()
+                        rest[1..].chars().take_while(|c| *c != quote_char).collect()
                     } else if colon_ok {
-                        // config 系:空白 / セミコロン / コメント / 構造区切りだけで止める
                         rest.chars()
                             .take_while(|c| {
                                 !c.is_whitespace()
                                     && !matches!(c, '#' | ';' | '`' | ',' | ']' | '}' | ')')
                             })
-                            .count()
+                            .collect()
                     } else {
-                        // code 系:secret っぽい文字集合のみ算入(method chain 等で即打ち切り)
                         rest.chars()
                             .take_while(|c| {
                                 c.is_ascii_alphanumeric()
                                     || matches!(c, '-' | '_' | '/' | '+' | '=' | '@' | '~')
                             })
-                            .count()
+                            .collect()
                     };
-                    if inner_len >= 16 {
-                        secrets.push(ScanHit {
-                            file: rel.clone(),
-                            line: line_num,
-                            snippet: mask_snippet(raw_line),
-                            kind: format!("hardcoded {}", lhs),
-                        });
-                        break 'sep_loop;
-                    }
+                    if value.chars().count() < 16 { continue; }
+                    // 値側 placeholder 判定:`your-secret-here` `changeme` `xxxxxxxx` 等は誤検出。
+                    //   これで allowlist を「値が明示 placeholder のとき」だけに絞れる。
+                    if is_placeholder_value(&value) { continue; }
+
+                    secrets.push(ScanHit {
+                        file: rel.clone(),
+                        line: line_num,
+                        snippet: mask_snippet(raw_line),
+                        kind: format!("hardcoded {}", lhs),
+                    });
+                    break 'sep_loop;
                 }
             }
 
@@ -2039,49 +2131,17 @@ fn expand_workspace_member_dirs(project_root: &Path) -> Vec<(PathBuf, String)> {
         return Vec::new();
     }
 
-    // pattern からディレクトリ候補を展開
+    // pattern からディレクトリ候補を展開(segment 単位の再帰 glob)
     let mut result: Vec<(PathBuf, String)> = Vec::new();
-    let list_dirs = |base: &Path| -> Vec<(PathBuf, String)> {
-        let mut out = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if !name.starts_with('.') && name != "node_modules" {
-                        out.push((p.clone(), name.to_string()));
-                    }
-                }
-            }
-        }
-        out
-    };
 
     for (pattern, is_neg) in &patterns {
         if *is_neg { continue; } // negation は後段で filter
         let pat = pattern.trim_end_matches('/');
-        if let Some(prefix) = pat.strip_suffix("/*") {
-            // 1 階層展開
-            let base = project_root.join(prefix);
-            for (dir, name) in list_dirs(&base) {
-                result.push((dir, format!("{}/{}", prefix, name)));
-            }
-        } else if let Some(prefix) = pat.strip_suffix("/**").or_else(|| pat.strip_suffix("/*/*")) {
-            // 2 階層まで展開(3 階層以上は打ち切り)
-            let base = project_root.join(prefix);
-            for (dir1, name1) in list_dirs(&base) {
-                result.push((dir1.clone(), format!("{}/{}", prefix, name1)));
-                for (dir2, name2) in list_dirs(&dir1) {
-                    result.push((dir2, format!("{}/{}/{}", prefix, name1, name2)));
-                }
-            }
-        } else {
-            // 固定パス
-            let dir = project_root.join(pat);
-            if dir.is_dir() {
-                result.push((dir, pat.to_string()));
-            }
-        }
+        // pattern を `/` の segment に分解し、segment 単位で glob 展開する。
+        //   `apps/*/packages/*` → apps 直下 → 各 * → packages 直下 → 各 *
+        //   `services/**` → services 配下を全階層再帰
+        let segments: Vec<&str> = pat.split('/').collect();
+        expand_segments(project_root, "", &segments, &mut result);
     }
 
     // negation pattern に一致する候補を除外
@@ -2092,7 +2152,78 @@ fn expand_workspace_member_dirs(project_root: &Path) -> Vec<(PathBuf, String)> {
         });
     }
 
+    // `**` の再帰展開で同一ディレクトリが複数回入りうるので dedup(相対パス基準)。
+    result.sort_by(|a, b| a.1.cmp(&b.1));
+    result.dedup_by(|a, b| a.1 == b.1);
+
     result
+}
+
+/// workspace pattern の segment 列を再帰的に glob 展開して、実在ディレクトリを列挙する。
+///   segment `*`  → 現在ディレクトリの子ディレクトリ全て(1 階層)
+///   segment `**` → 現在ディレクトリ配下の全ディレクトリ(再帰、自身含む)
+///   それ以外    → 固定名の子ディレクトリ
+/// `cur_rel` は project_root からの現在の相対パス。マッチしたディレクトリを
+/// (絶対パス, 相対パス) として out に push。
+fn expand_segments(
+    project_root: &Path,
+    cur_rel: &str,
+    segments: &[&str],
+    out: &mut Vec<(PathBuf, String)>,
+) {
+    // 無限再帰・巨大展開の保護:相対パス階層が深すぎたら打ち切り。
+    if cur_rel.matches('/').count() > 8 {
+        return;
+    }
+    let cur_abs = if cur_rel.is_empty() {
+        project_root.to_path_buf()
+    } else {
+        project_root.join(cur_rel)
+    };
+    // 全 segment 消化 → cur が最終マッチ
+    let Some((seg, rest)) = segments.split_first() else {
+        if !cur_rel.is_empty() && cur_abs.is_dir() {
+            out.push((cur_abs, cur_rel.to_string()));
+        }
+        return;
+    };
+
+    let join_rel = |name: &str| -> String {
+        if cur_rel.is_empty() { name.to_string() } else { format!("{}/{}", cur_rel, name) }
+    };
+    let child_dirs = |dir: &Path| -> Vec<String> {
+        let mut names = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !name.starts_with('.') && name != "node_modules" {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        names
+    };
+
+    if *seg == "**" {
+        // `**` は 0 階層以上にマッチ。まず「この階層で ** を消費した」= rest を試す。
+        expand_segments(project_root, cur_rel, rest, out);
+        // 加えて子ディレクトリを再帰的に ** のまま辿る。
+        for name in child_dirs(&cur_abs) {
+            expand_segments(project_root, &join_rel(&name), segments, out);
+        }
+    } else if *seg == "*" {
+        for name in child_dirs(&cur_abs) {
+            expand_segments(project_root, &join_rel(&name), rest, out);
+        }
+    } else {
+        // 固定名
+        let next = join_rel(seg);
+        if project_root.join(&next).is_dir() {
+            expand_segments(project_root, &next, rest, out);
+        }
+    }
 }
 
 /// 指定ディレクトリ直下の manifest を全 6 種類チェックして manifests に push する。
@@ -2296,17 +2427,26 @@ fn find_yaml_comment_start(line: &str) -> Option<usize> {
 fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
     let pat = pattern.trim().trim_end_matches('/');
     let path = path.trim().trim_end_matches('/');
-    if pat == path { return true; }
-    // `apps/*` → `apps/xxx` にマッチ(1 階層)
-    if let Some(prefix) = pat.strip_suffix("/*") {
-        return path.starts_with(&format!("{}/", prefix))
-            && !path[prefix.len() + 1..].contains('/');
+    let pat_segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+    let path_segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    glob_segments_match(&pat_segs, &path_segs)
+}
+
+/// segment 単位の glob マッチ(`*` は 1 セグメント、`**` は 0+ セグメント)。
+/// `!**/dist/**` `apps/*/packages/*` のような workspace / negation pattern を扱う。
+fn glob_segments_match(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first(), path.first()) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(&"**"), _) => {
+            // ** は 0 セグメント消費 or 1 セグメント消費して ** のまま継続
+            glob_segments_match(&pat[1..], path)
+                || (!path.is_empty() && glob_segments_match(pat, &path[1..]))
+        }
+        (Some(_), None) => false,
+        (Some(&"*"), Some(_)) => glob_segments_match(&pat[1..], &path[1..]),
+        (Some(&p), Some(&s)) => p == s && glob_segments_match(&pat[1..], &path[1..]),
     }
-    // `apps/**` → `apps/xxx/yyy/...` にもマッチ
-    if let Some(prefix) = pat.strip_suffix("/**") {
-        return path.starts_with(&format!("{}/", prefix));
-    }
-    false
 }
 
 /// dir 直下に `tsconfig.json` or `tsconfig*.json` が 1 つでもあれば真。
@@ -2445,43 +2585,83 @@ fn is_test_file_path(path: &Path) -> bool {
     }
 }
 
+/// 変数名を token に分割する(`_` `-` 区切り + camelCase 境界)。全て小文字化。
+///   `SUPABASE_SERVICE_ROLE_KEY` → ["supabase","service","role","key"]
+///   `clientSecret` → ["client","secret"]
+///   `PASSWORDLESS` → ["passwordless"](区切りなしの単一 token)
+fn tokenize_var_name(name: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if c == '_' || c == '-' || c == '.' {
+            if !cur.is_empty() { tokens.push(std::mem::take(&mut cur)); }
+            prev_lower = false;
+            continue;
+        }
+        // camelCase 境界:小文字 → 大文字
+        if c.is_ascii_uppercase() && prev_lower && !cur.is_empty() {
+            tokens.push(std::mem::take(&mut cur));
+        }
+        cur.push(c.to_ascii_lowercase());
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+    }
+    if !cur.is_empty() { tokens.push(cur); }
+    tokens
+}
+
 /// 変数名(LHS)が「secret を保持していそうな名前」かを判定する。
 ///
-///   Positive:  key / secret / token / password / pwd / credential / webhook / dsn
-///              / authorization / _auth / auth_
-///   Allowlist: hint / example / sample / placeholder / mock / dummy / default
-///              / expiry / expires / ttl / less(passwordless)/ chain(keychain)
-///              / board(keyboard)/ word(keyword)/ path / prefix / suffix
-///              / _name / _type / _id / readme
+/// token 境界で判定する(substring マッチだと DEFAULT_ADMIN_PASSWORD が `default` に
+/// ヒットして本物 secret を殺す回帰があったため)。
+///   - SAFE_TOKENS のどれかが token に一致 → 非 secret(hint/id/name/type 等の構造語)
+///   - SECRET_MARKERS のどれかを token が含む → secret(key/secret/token/password 等)
 ///
-/// 判定は 2 段:allowlist substring がひとつでも含まれれば非 secret 扱い。
-/// これで `API_KEY_HINT` / `PASSWORDLESS` / `KEYBOARD_LAYOUT` / `KEY_ID` は落ちる。
-/// その後 positive substring があれば secret 扱い。SUPABASE_SERVICE_ROLE_KEY /
-/// OPENAI_API_KEY / NEXTAUTH_SECRET / STRIPE_WEBHOOK_SIGNING_SECRET 等は拾える。
+/// `default` `sample` `example` `mock` `dummy` `placeholder` は名前では弾かず、値側の
+/// is_placeholder_value で判定する(DEFAULT_ADMIN_PASSWORD="realpw" は検出したい)。
 fn is_secret_variable_name(lhs: &str) -> bool {
-    let lower = lhs.to_lowercase();
-    // 注意:substring マッチなので、secret 系語("password" 等)を巻き込まない語を選ぶ。
-    //   例:`word` は `password` にヒットしてしまうので使わず、`keyword` を明示する。
-    const SAFE_MARKERS: &[&str] = &[
-        "hint", "example", "sample", "placeholder", "mock", "dummy", "default",
-        "expiry", "expires", "ttl", "less", "keychain", "keyboard", "keyword",
-        "path", "prefix", "suffix", "_name", "_type", "_id", "readme", "label",
+    let tokens = tokenize_var_name(lhs);
+    // 構造的に secret でないことが確実な token(完全一致で除外)
+    const SAFE_TOKENS: &[&str] = &[
+        "hint", "id", "name", "type", "path", "prefix", "suffix", "label",
+        "readme", "keyword", "keyboard", "keychain", "passwordless", "layout",
+        "ttl", "expiry", "expires", "expire", "count", "length", "size",
     ];
-    for m in SAFE_MARKERS {
-        if lower.contains(m) {
+    for t in &tokens {
+        if SAFE_TOKENS.contains(&t.as_str()) {
             return false;
         }
     }
     const SECRET_MARKERS: &[&str] = &[
-        "key", "secret", "token", "password", "pwd", "credential", "webhook",
-        "dsn", "auth_", "_auth", "authorization",
+        "key", "secret", "token", "password", "passwd", "pwd",
+        "credential", "credentials", "webhook", "dsn", "auth", "authorization",
+        "privatekey", "apikey",
     ];
-    for m in SECRET_MARKERS {
-        if lower.contains(m) {
+    for t in &tokens {
+        if SECRET_MARKERS.iter().any(|m| t.contains(m)) {
             return true;
         }
     }
     false
+}
+
+/// 値が「明示的な placeholder」なら真(検出から除外)。
+///   your-secret-here / changeme / xxxxxxxx / <your-key> / TODO / example 等。
+fn is_placeholder_value(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    // 全部同じ文字の繰り返し(xxxx / **** / ....)は placeholder
+    if let Some(first) = lower.chars().next() {
+        if lower.chars().all(|c| c == first) {
+            return true;
+        }
+    }
+    const PLACEHOLDER_MARKERS: &[&str] = &[
+        "your-", "your_", "yourkey", "yoursecret", "changeme", "change-me",
+        "placeholder", "example", "dummy", "xxxx", "todo", "fixme",
+        "<", "insert-", "replace-", "put-your", "my-secret", "sk_test_xxx",
+        "0000000000", "1234567890", "abcdef",
+    ];
+    PLACEHOLDER_MARKERS.iter().any(|m| lower.contains(m))
 }
 
 /// プロジェクト内の `.env*` ファイルを再帰的に収集する。
