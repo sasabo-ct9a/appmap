@@ -32,6 +32,45 @@ fn is_skippable_dir(name: &str) -> bool {
     SKIP.contains(&lower.as_str())
 }
 
+/// 既知 secret のプレフィックス一覧(検出とマスクで共有)。
+///
+/// 以前は scan 本体(block 1)と line_contains_secret(マスク側)が別々の縮小リストを
+/// 持っており、gho_/whsec_/SG./PEM などが「検出はされるがマスクされず AI に平文送信」される
+/// 漏洩があった。両者をこの 1 つの定数に統一してドリフトを防ぐ。
+const SECRET_NEEDLES: &[(&str, &str)] = &[
+    ("sk-", "openai-like key"),
+    ("sk_live_", "stripe live key"),
+    ("sk_test_", "stripe test key"),
+    ("pk_live_", "stripe publishable live"),
+    ("rk_live_", "stripe restricted live"),
+    ("whsec_", "stripe webhook secret"),
+    ("AKIA", "aws access key id"),
+    ("ASIA", "aws temporary access key"),
+    ("AIza", "google api key"),
+    ("ghp_", "github personal token"),
+    ("gho_", "github oauth token"),
+    ("ghu_", "github user token"),
+    ("ghs_", "github server token"),
+    ("ghr_", "github refresh token"),
+    ("github_pat_", "github fine-grained pat"),
+    ("xoxb-", "slack bot token"),
+    ("xoxp-", "slack user token"),
+    ("xoxa-", "slack workspace token"),
+    ("xoxs-", "slack app token"),
+    ("dckr_pat_", "docker hub pat"),
+    ("SG.", "sendgrid api key"),
+    ("mongodb+srv://", "mongodb connection string"),
+    ("postgres://", "postgres connection string"),
+    ("postgresql://", "postgres connection string"),
+    ("mysql://", "mysql connection string"),
+    ("redis://", "redis connection string"),
+    ("-----BEGIN RSA PRIVATE KEY-----", "private key"),
+    ("-----BEGIN OPENSSH PRIVATE KEY-----", "openssh private key"),
+    ("-----BEGIN PRIVATE KEY-----", "private key"),
+    ("-----BEGIN EC PRIVATE KEY-----", "ec private key"),
+    ("-----BEGIN DSA PRIVATE KEY-----", "dsa private key"),
+];
+
 /// 既存 PATH に開発者ツールがよく置かれるパスを追記して返す。
 ///
 /// macOS の GUI アプリ(.app)は launchd から起動するため PATH が縮小されており、
@@ -1245,9 +1284,19 @@ async fn read_files_for_qa(
 ///   secret 判定:既知 prefix(is_plausible_secret_hit)、secret 変数名 = 値、
 ///   credential URL(scheme://user:pass@)のいずれか。
 fn mask_secrets_only(raw: &str) -> String {
+    // PEM 秘密鍵は複数行(ヘッダ + base64 本体 + フッタ)。base64 本体行はどの needle にも
+    // 当たらないので、BEGIN...END PRIVATE KEY の間は行内容に関係なく全行マスクする。
+    let mut in_pem = false;
     raw.lines()
         .map(|line| {
-            if line_contains_secret(line) {
+            if line.contains("-----BEGIN") && line.contains("PRIVATE KEY") {
+                in_pem = true;
+            }
+            let mask = in_pem || line_contains_secret(line);
+            if line.contains("-----END") && line.contains("PRIVATE KEY") {
+                in_pem = false;
+            }
+            if mask {
                 mask_snippet(line)
             } else {
                 line.to_string()
@@ -1257,14 +1306,11 @@ fn mask_secrets_only(raw: &str) -> String {
         .join("\n")
 }
 
-/// 行が secret を含むか(mask 対象か)の軽量判定。scan 本体のロジックの簡易版。
+/// 行が secret を含むか(mask 対象か)の軽量判定。検出本体(block 1)と同じ SECRET_NEEDLES +
+/// is_plausible_secret_hit を使う。以前はここが縮小リストで、検出はされるがマスクされない
+/// 漏洩があった(gho_/whsec_/SG./PEM 等)。
 fn line_contains_secret(line: &str) -> bool {
-    // 既知 prefix
-    let needles = [
-        "sk-", "sk_live_", "sk_test_", "AKIA", "AIza", "ghp_", "github_pat_",
-        "xoxb-", "xoxp-", "-----BEGIN", "mongodb+srv://", "postgres://", "mysql://",
-    ];
-    for n in needles {
+    for (n, _) in SECRET_NEEDLES {
         if line.contains(n) && is_plausible_secret_hit(line, n) {
             return true;
         }
@@ -1457,42 +1503,8 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     // 未知の巨大ツリーに対する保険。この数に達したら partial 扱いで打ち切る。
     const MAX_WALK_VISITS: usize = 40_000;
 
-    // シークレット系:プレフィックス or キー名パターン
-    // 誤検知を減らすため、代入っぽい表現(= の右側 or : の後)に絞る
-    // v0.1.10(Codex 指摘 Medium #5 対応):代表的な token prefix を追加。
-    let secret_needles: &[(&str, &str)] = &[
-        ("sk-", "openai-like key"),
-        ("sk_live_", "stripe live key"),
-        ("sk_test_", "stripe test key"),
-        ("pk_live_", "stripe publishable live"),
-        ("rk_live_", "stripe restricted live"),
-        ("whsec_", "stripe webhook secret"),
-        ("AKIA", "aws access key id"),
-        ("ASIA", "aws temporary access key"),
-        ("AIza", "google api key"),
-        ("ghp_", "github personal token"),
-        ("gho_", "github oauth token"),
-        ("ghu_", "github user token"),
-        ("ghs_", "github server token"),
-        ("ghr_", "github refresh token"),
-        ("github_pat_", "github fine-grained pat"),
-        ("xoxb-", "slack bot token"),
-        ("xoxp-", "slack user token"),
-        ("xoxa-", "slack workspace token"),
-        ("xoxs-", "slack app token"),
-        ("dckr_pat_", "docker hub pat"),
-        ("SG.", "sendgrid api key"),
-        ("mongodb+srv://", "mongodb connection string"),
-        ("postgres://", "postgres connection string"),
-        ("postgresql://", "postgres connection string"),
-        ("mysql://", "mysql connection string"),
-        ("redis://", "redis connection string"),
-        ("-----BEGIN RSA PRIVATE KEY-----", "private key"),
-        ("-----BEGIN OPENSSH PRIVATE KEY-----", "openssh private key"),
-        ("-----BEGIN PRIVATE KEY-----", "private key"),
-        ("-----BEGIN EC PRIVATE KEY-----", "ec private key"),
-        ("-----BEGIN DSA PRIVATE KEY-----", "dsa private key"),
-    ];
+    // シークレット系プレフィックス。検出とマスクで同じ定義を使う(SECRET_NEEDLES)。
+    let secret_needles = SECRET_NEEDLES;
     // 変数名系 secret 検出は「LHS(左辺)にキーワードが含まれるか + 安全マーカーがないか」
     // で判定する(is_secret_variable_name)。以前は固定 needle 列挙 → substring 一致 → 境界
     // チェック方式だったが、SUPABASE_SERVICE_ROLE_KEY や NEXTAUTH_SECRET のような
@@ -1520,7 +1532,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     let env_walk_start = folder_path.clone();
     let existing_env_files: Vec<String> = tauri::async_runtime::spawn_blocking(move || {
         let mut out: Vec<String> = Vec::new();
-        collect_env_files(&env_walk_start, &env_walk_start, &mut out, 512);
+        collect_env_files(&env_walk_start, &env_walk_start, &mut out, 512, 0);
         out
     })
     .await
@@ -1530,47 +1542,12 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         // 対象ファイルが無ければ「守るものが無い」→ true 扱いで finding は発火しない
         true
     } else {
-        let gi_path = folder_path.join(".gitignore");
-        match std::fs::read_to_string(&gi_path) {
-            Ok(content) => {
-                // Git のルール評価は「上から順、最後に一致したルールが勝ち」。
-                // (pattern, is_negation) のタプルで順序保存し、ファイルごとに上から
-                // 評価して最後の match 結果を採用する。
-                let rules: Vec<(&str, bool)> = content
-                    .lines()
-                    .filter_map(|line| {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with('#') {
-                            return None;
-                        }
-                        let first = trimmed.split_whitespace().next()?;
-                        if let Some(stripped) = first.strip_prefix('!') {
-                            Some((stripped, true)) // negation
-                        } else {
-                            Some((first, false)) // positive
-                        }
-                    })
-                    .collect();
-                existing_env_files.iter().all(|rel_path| {
-                    // rel_path はプロジェクトルートからの相対パス(例: "apps/web/.env.local")
-                    // gitignore パターンは filename マッチ + フルパスマッチの両方を試す
-                    let file_name = std::path::Path::new(rel_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(rel_path.as_str());
-                    let mut ignored = false;
-                    for (pattern, is_negation) in &rules {
-                        if gitignore_pattern_matches(pattern, file_name)
-                            || gitignore_pattern_matches(pattern, rel_path)
-                        {
-                            ignored = !is_negation;
-                        }
-                    }
-                    ignored
-                })
-            }
-            Err(_) => false, // .gitignore 自体が無い = カバーしていない
-        }
+        // 各 env ファイルを、ルート〜そのファイルの親までの全 .gitignore で評価する。
+        // ルート .gitignore しか見ないと、monorepo の apps/web/.gitignore で守られた
+        // .env.local を「未保護」と誤判定して block を出していた。
+        existing_env_files
+            .iter()
+            .all(|rel_path| env_file_is_gitignored(&folder_path, rel_path))
     };
 
     /// 優先ディレクトリ名。walk 時にこれらを含むディレクトリを先に辿る。
@@ -1805,7 +1782,13 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         .take(MAX_SCAN_FILES)
         .collect();
     for path in content_targets {
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            // 読めなかった対象(権限 / 非 UTF-8 バイナリ)は「未走査」扱いにして
+            // partial(unknown)へ倒す。素通りで ready に至り、読めない所の secret を
+            // 見逃す false-ready を防ぐ。
+            files_truncated = true;
+            continue;
+        };
         files_scanned += 1;
         let rel = path.strip_prefix(&folder_path).unwrap_or(&path)
             .to_string_lossy().replace('\\', "/");
@@ -1841,24 +1824,21 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
             }
 
             // 2) 変数名 = 値 パターン。
-            //   LHS 側の識別子を separator(`=` / config 系のみ `:`)ごとに切り出し、
+            //   LHS 側の識別子を separator(`=` と `:` の両方)ごとに切り出し、
             //   `is_secret_variable_name` で「明らかに secret っぽいキー名」かを判定する。
-            //   値の妥当性は hardcoded_secret_value に委譲(コードのクオート無し右辺 =
-            //   関数呼び出し/変数参照 は拾わない。bare 値は env/設定/シェルのみ)。
-            //   env 参照 / 空 / placeholder / 短い値 は除外。
+            //   `:` は全ファイルで受け入れる:コードの `apiKey: "secret"`(オブジェクト
+            //   リテラル)を拾うため。誤検出は hardcoded_secret_value がガードする
+            //   (コードのクオート無し右辺は None → `token: string` 型注釈や `a ? b : c`
+            //   三項演算子は拾わない。bare 値は env/設定/シェルのみ)。
             //   prefix 検出で既に同じ行が記録済みなら重複させない(重複 push 回避)。
             if !is_commentish && !line_secret_recorded {
-                let colon_ok = matches!(
-                    ext.as_str(),
-                    "env" | "yaml" | "yml" | "toml" | "json" | "ini" | "properties"
-                );
                 // separator 位置を集める。ただし文字列リテラル内(URL クエリの `?token=` 等)は除外。
                 //   `callbackUrl: "https://...?token=aaaa"` の URL 内 `token=` を LHS と誤認しない。
                 //   1 行複数 assignment(minified JSON など)は複数 separator を許容。
                 let sep_positions: Vec<usize> = raw_line
                     .char_indices()
                     .filter_map(|(i, c)| {
-                        if (c == '=' || (colon_ok && c == ':')) && !is_inside_string_literal(raw_line, i) {
+                        if (c == '=' || c == ':') && !is_inside_string_literal(raw_line, i) {
                             Some(i)
                         } else {
                             None
@@ -2273,10 +2253,17 @@ fn build_node_manifest(dir: &Path, project_root: &Path, path: &str) -> ManifestI
         .map(|v| {
             let scripts = v.get("scripts").and_then(|s| s.as_object());
             let has_key = |k: &str| scripts.map_or(false, |m| m.contains_key(k));
+            // 専用 typecheck スクリプトが無くても、いずれかの script の「値」で tsc を
+            // 走らせていれば型検査はできている(`"build": "tsc && vite build"` が典型)。
+            // これを見ないと default Vite react-ts テンプレ全部で誤って「typecheck 無し」が出る。
+            let value_runs_tsc = scripts.map_or(false, |m| {
+                m.values()
+                    .any(|val| val.as_str().map_or(false, |s| s.contains("tsc")))
+            });
             (
                 has_key("build"),
                 has_key("test"),
-                has_key("typecheck") || has_key("type-check") || has_key("tsc"),
+                has_key("typecheck") || has_key("type-check") || has_key("tsc") || value_runs_tsc,
             )
         })
         .unwrap_or((false, false, false));
@@ -2571,6 +2558,13 @@ fn is_test_file_path(path: &Path) -> bool {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             stem.ends_with("Test") || stem.ends_with("Tests") || stem.ends_with("Spec")
         }
+        // C# / Unity:FooTest(s).cs / FooSpec.cs、または Tests/ 配下(Unity は Editor/Tests)。
+        "cs" => {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            stem.ends_with("Test") || stem.ends_with("Tests") || stem.ends_with("Spec")
+                || full_lower.contains("/tests/") || full_lower.contains("/test/")
+                || full_lower.starts_with("tests/")
+        }
         _ => false,
     }
 }
@@ -2627,24 +2621,38 @@ fn tokenize_var_name(name: &str) -> Vec<String> {
 /// is_placeholder_value で判定する(DEFAULT_ADMIN_PASSWORD="realpw" は検出したい)。
 fn is_secret_variable_name(lhs: &str) -> bool {
     let tokens = tokenize_var_name(lhs);
-    // 構造的に secret でないことが確実な token(完全一致で除外)
+    // 構造的に secret でないことが確実な token(完全一致で除外)。
+    // public/primary/... は「公開鍵」「DB キー」など secret でない key 修飾語。
     const SAFE_TOKENS: &[&str] = &[
         "hint", "id", "name", "type", "path", "prefix", "suffix", "label",
         "readme", "keyword", "keyboard", "keychain", "passwordless", "layout",
         "ttl", "expiry", "expires", "expire", "count", "length", "size",
+        "public", "primary", "partition", "sort", "foreign", "row", "cache",
+        "routing", "map", "idempotency",
     ];
     for t in &tokens {
         if SAFE_TOKENS.contains(&t.as_str()) {
             return false;
         }
     }
-    const SECRET_MARKERS: &[&str] = &[
-        "key", "secret", "token", "password", "passwd", "pwd",
-        "credential", "credentials", "webhook", "dsn", "auth", "authorization",
-        "privatekey", "apikey",
+    // 単独の "key" は汎用すぎる(CI cache key / map key / primary key)。修飾付き
+    // (apiKey/secretKey)や既知 prefix(block 1)に委ねるため、単独では secret 扱いしない。
+    if tokens.len() == 1 && tokens[0] == "key" {
+        return false;
+    }
+    // 短い曖昧マーカーは token 完全一致で判定する。substring だと author⊃auth /
+    // tokenizer⊃token / secretary⊃secret / monkey⊃key を誤検出していた。
+    const EXACT_MARKERS: &[&str] = &[
+        "key", "secret", "token", "password", "passwd", "pwd", "passphrase",
+        "auth", "authorization", "credential", "credentials", "webhook", "dsn",
     ];
+    // 複合語は substring(APIKEY / PRIVATEKEY のように区切り無しで綴られる)。
+    const SUBSTRING_MARKERS: &[&str] = &["apikey", "privatekey", "accesskey", "secretkey"];
     for t in &tokens {
-        if SECRET_MARKERS.iter().any(|m| t.contains(m)) {
+        if EXACT_MARKERS.contains(&t.as_str()) {
+            return true;
+        }
+        if SUBSTRING_MARKERS.iter().any(|m| t.contains(m)) {
             return true;
         }
     }
@@ -2661,13 +2669,22 @@ fn is_placeholder_value(value: &str) -> bool {
             return true;
         }
     }
-    const PLACEHOLDER_MARKERS: &[&str] = &[
+    const WORD_MARKERS: &[&str] = &[
         "your-", "your_", "yourkey", "yoursecret", "changeme", "change-me",
         "placeholder", "example", "dummy", "xxxx", "todo", "fixme",
         "<", "insert-", "replace-", "put-your", "my-secret", "sk_test_xxx",
-        "0000000000", "1234567890", "abcdef",
     ];
-    PLACEHOLDER_MARKERS.iter().any(|m| lower.contains(m))
+    if WORD_MARKERS.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    // 連番/連続文字は「値が短くその並びが支配的」な時だけ placeholder 扱い。
+    // 本物の長いキーが偶然 "abcdef" を含むだけで捨てない
+    // (例:django-insecure-abcdef... や base64 キーの一部)。
+    const SEQ_MARKERS: &[&str] = &["0000000000", "1234567890", "abcdef"];
+    if lower.chars().count() <= 20 && SEQ_MARKERS.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    false
 }
 
 /// 代入の右辺(`=`/`:` の後、trim 済み)が「直書き secret 値」として妥当かを判定し、値を返す。
@@ -2731,20 +2748,26 @@ fn hardcoded_secret_value(rest: &str, ext: &str) -> Option<String> {
 ///   - `.env.example` `.env.sample` `.env.template` は意図的に共有される非秘密なので除外
 ///   - node_modules / .git / target / dist / build 等はスキップ
 ///   - out には base からの相対パス(POSIX 区切り)を入れる
-fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize) {
-    if out.len() >= max { return; }
+fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize, depth: usize) {
+    // 深さ上限:ディレクトリ symlink の循環や異常に深いツリーでの無限再帰
+    // (= スタックオーバーフローによる強制クラッシュ)を防ぐ保険。
+    const MAX_DEPTH: usize = 24;
+    if out.len() >= max || depth > MAX_DEPTH { return; }
     let Ok(entries) = std::fs::read_dir(dir) else { return; };
     for entry in entries.flatten() {
         if out.len() >= max { return; }
+        // file_type() は symlink を辿らない。path.is_dir() は symlink を辿るため、
+        // `a/b -> a` のような循環でスタックオーバーフローし得た。
+        let Ok(ft) = entry.file_type() else { continue };
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // Unity/.NET の巨大キャッシュも除外(is_skippable_dir に一元化)。これが無いと
             // .env 探索だけで Library 配下 2 万ファイルを走査してしまう。
             if !is_skippable_dir(name) {
-                collect_env_files(&path, base, out, max);
+                collect_env_files(&path, base, out, max, depth + 1);
             }
-        } else if path.is_file() {
+        } else if ft.is_file() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let is_env = name == ".env" || name.starts_with(".env.");
             let is_example = name.ends_with(".example")
@@ -2771,6 +2794,57 @@ fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize)
 ///   - `?` は非対応(実運用でほぼ使われない)
 ///   - `[abc]` クラスは非対応
 ///   - 否定ルール `!` は呼び出し側で事前に除外している前提
+/// env ファイル(ルート相対 POSIX パス)が、ルートからそのファイルの親までの
+/// 各階層の `.gitignore` のいずれかで無視されるかを判定する。
+///
+/// git は階層 `.gitignore` を持ち、深い方が優先・各ファイル内は last-match-wins。
+/// ここでは浅い→深いの順に評価し、最後に一致したルールの符号を採る(近似)。
+/// - ファイル名 / その `.gitignore` から見た相対パス / 祖先ディレクトリ名(`deploy/` 等の
+///   ディレクトリ丸ごと ignore)のいずれかにマッチしたら適用。
+fn env_file_is_gitignored(root: &Path, rel_path: &str) -> bool {
+    let parts: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return false;
+    }
+    let file_name = parts[parts.len() - 1];
+    let mut ignored = false;
+    // depth = このファイルまでのディレクトリ段数。0 = ルート .gitignore。
+    for depth in 0..parts.len() {
+        let mut gi_dir = root.to_path_buf();
+        for p in &parts[..depth] {
+            gi_dir.push(p);
+        }
+        let Ok(content) = std::fs::read_to_string(gi_dir.join(".gitignore")) else {
+            continue;
+        };
+        let rel_from_here = parts[depth..].join("/");
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some(first) = trimmed.split_whitespace().next() else { continue };
+            let (pattern, is_negation) = match first.strip_prefix('!') {
+                Some(s) => (s, true),
+                None => (first, false),
+            };
+            // `deploy/` `deploy` のようなディレクトリ丸ごと ignore:この .gitignore から
+            // 見た祖先ディレクトリ名のどれかに一致するか。
+            let pat_dir = pattern.trim_start_matches('/').trim_end_matches('/');
+            let dir_prefix_match = parts[depth..parts.len().saturating_sub(1)]
+                .iter()
+                .any(|seg| *seg == pat_dir);
+            if dir_prefix_match
+                || gitignore_pattern_matches(pattern, file_name)
+                || gitignore_pattern_matches(pattern, &rel_from_here)
+            {
+                ignored = !is_negation;
+            }
+        }
+    }
+    ignored
+}
+
 fn gitignore_pattern_matches(pattern: &str, filename: &str) -> bool {
     let mut p = pattern;
     p = p.strip_prefix('/').unwrap_or(p);
@@ -2829,6 +2903,13 @@ fn is_plausible_secret_hit(line: &str, prefix: &str) -> bool {
     let prefix_end = prefix_start + prefix.len();
     let bytes = line.as_bytes();
 
+    // ルール 0(左境界):プレフィックス直前が英数字なら単語の途中。
+    //   `sk-` が `task-`/`risk-`/`disk-`、`SG.` が `<img>` 等に誤ヒットするのを防ぐ。
+    //   本物のキーは必ずクオート/空白/`=`/`:`/`(`(いずれも非英数字)の後に来る。
+    if prefix_start > 0 && bytes[prefix_start - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+
     // ルール 1:短い引用符囲みは棄却
     if prefix_start > 0 {
         let quote = bytes[prefix_start - 1];
@@ -2837,7 +2918,7 @@ fn is_plausible_secret_hit(line: &str, prefix: &str) -> bool {
             let mut chars = tail.char_indices();
             let mut closed_within = None;
             for (i, c) in &mut chars {
-                if c as u8 == quote {
+                if c == quote as char {
                     closed_within = Some(i);
                     break;
                 }
@@ -2996,12 +3077,18 @@ fn is_real_console_log(line: &str) -> bool {
         let mut search_from = 0usize;
         while let Some(rel_idx) = line[search_from..].find(target) {
             let idx = search_from + rel_idx;
+            // 左境界:console の直前が識別子文字(英数字/_/$)なら myconsole.log 等の
+            // 別ロガー。window.console.log は直前が `.` なので通る。
+            let boundary_ok = idx == 0 || {
+                let b = line.as_bytes()[idx - 1];
+                !(b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+            };
             // 直後は空白 0〜複数を許容してから `(` を要求
             let after_target = idx + target_len;
             let rest = &line[after_target..];
             let stripped = rest.trim_start();
             let paren_ok = stripped.starts_with('(');
-            if paren_ok && !is_inside_string_literal(line, idx) {
+            if boundary_ok && paren_ok && !is_inside_string_literal(line, idx) {
                 return true;
             }
             search_from = after_target;

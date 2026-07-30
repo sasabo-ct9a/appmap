@@ -110,6 +110,62 @@ fn real_hardcoded_secret_still_detected() {
     assert_eq!(hardcoded_secret_value("\"short\"", "ts"), None);
 }
 
+// ─── is_secret_variable_name(token 完全一致・誤検出回帰)──────
+#[test]
+fn secret_var_name_no_substring_false_positives() {
+    // 実在の英単語が secret マーカーを substring 包含しても誤検出しない
+    assert!(!is_secret_variable_name("author")); // ⊃ auth
+    assert!(!is_secret_variable_name("tokenizer")); // ⊃ token
+    assert!(!is_secret_variable_name("secretary")); // ⊃ secret
+    assert!(!is_secret_variable_name("monkey")); // ⊃ key
+    // 公開・構造キーは secret ではない
+    assert!(!is_secret_variable_name("publicKey"));
+    assert!(!is_secret_variable_name("primaryKey"));
+    assert!(!is_secret_variable_name("partitionKey"));
+    assert!(!is_secret_variable_name("cacheKey"));
+    // 単独の key は汎用すぎるので拾わない(CI cache key 等)
+    assert!(!is_secret_variable_name("key"));
+    // 本物 secret 変数は従来通り検出
+    assert!(is_secret_variable_name("clientSecret"));
+    assert!(is_secret_variable_name("API_KEY"));
+    assert!(is_secret_variable_name("signingKey"));
+    assert!(is_secret_variable_name("DATABASE_PASSWORD"));
+    assert!(is_secret_variable_name("SUPABASE_SERVICE_ROLE_KEY"));
+    assert!(is_secret_variable_name("passphrase"));
+    assert!(is_secret_variable_name("authToken"));
+}
+
+// ─── is_plausible_secret_hit(左境界・誤検出回帰)──────────────
+#[test]
+fn plausible_hit_requires_left_boundary() {
+    // sk- が単語の途中(task-/risk-/disk-)に出ても誤検出しない
+    assert!(!is_plausible_secret_hit("<div className=\"task-management-dashboard\">", "sk-"));
+    assert!(!is_plausible_secret_hit("const url = \"/api/risk-assessment-report\";", "sk-"));
+    assert!(!is_plausible_secret_hit(".disk-space-indicator-container {}", "sk-"));
+    // 正当な代入は検出(左が空白 → 境界 OK、本体 16 文字以上)
+    assert!(is_plausible_secret_hit("const k = sk-RtY7bQmz9WpKvN3xLsK5;", "sk-"));
+}
+
+// ─── line_contains_secret(マスク漏れ回帰:検出と同じ needle 集合)─
+#[test]
+fn masker_covers_full_needle_set() {
+    // 以前マスク側の縮小リストから漏れていた prefix も mask 対象になる
+    assert!(line_contains_secret("const t = \"gho_RtY7bQmz9WpKvN3xLsK5abcd\";"));
+    assert!(line_contains_secret("const w = \"whsec_RtY7bQmz9WpKvN3xLsK5abcd\";"));
+    assert!(line_contains_secret("const s = \"SG.RtY7bQmz9WpKvN3xLsK5.abcdRtY7bQmz\";"));
+    assert!(line_contains_secret("const pk = \"pk_live_RtY7bQmz9WpKvN3xLsK5abcd\";"));
+}
+
+// ─── is_test_file_path(C# 追加)────────────────────────────────
+#[test]
+fn test_file_path_recognizes_csharp() {
+    use std::path::Path;
+    assert!(is_test_file_path(Path::new("Assets/Scripts/PlayerTests.cs")));
+    assert!(is_test_file_path(Path::new("src/FooTest.cs")));
+    assert!(is_test_file_path(Path::new("Tests/IntegrationSpec.cs")));
+    assert!(!is_test_file_path(Path::new("Assets/Scripts/Player.cs")));
+}
+
 // ─── is_skippable_dir(Unity/.NET 巨大キャッシュ除外)──────────
 #[test]
 fn skippable_dir_covers_unity_and_dotnet() {
