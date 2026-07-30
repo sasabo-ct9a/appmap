@@ -110,7 +110,10 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
         setRect(null);
       }
       // viewport も同時に更新(SVG 全体サイズ)。resize で乖離しないように。
-      setViewport({ w: window.innerWidth, h: window.innerHeight });
+      // 同値なら set しない(scroll 中の毎フレーム再 render を抑える)。
+      const nw = window.innerWidth;
+      const nh = window.innerHeight;
+      setViewport((prev) => (prev.w === nw && prev.h === nh ? prev : { w: nw, h: nh }));
     };
     const scheduleMeasure = () => {
       if (pendingRaf !== null) return; // 同フレーム内の重複を捨てる
@@ -139,6 +142,7 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
 
   // カードの実測高さを配置計算に反映。描画後に測るので useLayoutEffect で
   // ペイント前に高さを取り、次フレームの clamp をズラさない。
+  // deps を明示してステップ/言語/文言変更時だけ測定(deps 無しだと全 render で走る)。
   useLayoutEffect(() => {
     if (!open) return;
     const el = cardRef.current;
@@ -147,7 +151,10 @@ function GuidedTour({ open, onClose, language, steps }: GuidedTourProps) {
     if (h > 0 && Math.abs(h - cardHeight) > 1) {
       setCardHeight(h);
     }
-  });
+    // cardHeight を deps に入れると収束後の再測定でループするので入れない。
+    // 1px 閾値で収束するため 1 回の余分測定で止まる。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, stepIndex, language, currentStep?.title, currentStep?.body]);
 
   // ESC で閉じる、← → で移動
   useEffect(() => {

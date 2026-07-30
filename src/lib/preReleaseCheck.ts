@@ -535,7 +535,9 @@ export function buildFindings({
     if (tsManifestsMissingTypecheck.length > 0) {
       findings.push({
         id: "no-typecheck-script",
-        severity: "low",
+        // TS プロジェクトで型チェックコマンドが無い = 型エラーを機械的に検出できない。
+        // これを low(Ready 許容)にすると「型崩れのまま出荷」を見逃すので medium。
+        severity: "medium",
         category: "release-gates",
         title: t.noTypecheckScriptTitle,
         hint: t.noTypecheckScriptHint,
@@ -559,7 +561,9 @@ export function buildFindings({
     if (meta.manifests.length > 0 && !meta.has_ci_workflow) {
       findings.push({
         id: "no-ci-workflow",
-        severity: "low",
+        // CI が無い = push のたびの自動検証が人力頼み。「リリース前チェック」を
+        // 名乗る以上、build/test を人間が忘れても気づけない状態は medium にする。
+        severity: "medium",
         category: "release-gates",
         title: t.noCiWorkflowTitle,
         hint: t.noCiWorkflowHint,

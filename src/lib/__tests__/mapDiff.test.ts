@@ -81,4 +81,13 @@ describe("computeMapDiff", () => {
     expect(diff.hasChanges).toBe(true);
     expect(diff.removedNodes.map((n) => n.id)).toContain(2);
   });
+
+  it("single screen with empty files is NOT ambiguous", () => {
+    // files 空でも 1 つしかなければ衝突しない → ambiguous にしない(誤判定回帰ガード)
+    const prev = result([node(1, "Home"), node(2, "設定")]);
+    const curr = result([node(10, "Home"), node(20, "設定")]);
+    const diff = computeMapDiff(curr, prev, "ja");
+    expect(diff.ambiguousLabels).toHaveLength(0);
+    expect(diff.hasChanges).toBe(false);
+  });
 });
