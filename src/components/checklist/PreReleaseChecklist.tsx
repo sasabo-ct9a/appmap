@@ -224,6 +224,12 @@ function PreReleaseChecklist({
   const unknownState = isJa
     ? "コード検査が完了していないため、判定を出せません。フォルダのアクセス権を確認するか、再度スキャンを実行してください。"
     : "The code check has not completed, so no verdict can be given. Check folder access or run the scan again.";
+  // partial coverage(大きいプロジェクトで一部未走査)は「失敗」ではない。上の unknownState を
+  // 出すと「アクセス権を確認/再スキャン」と誤誘導してしまう(Codex round 16 Low:表示矛盾)。
+  // 見えた範囲で問題が無かったことと、まだ全部は見ていないことを正直に分けて伝える。
+  const partialEmptyState = isJa
+    ? "見えた範囲では重大な問題は見つかりませんでした。ただしプロジェクトが大きく、一部のファイルはまだ検査できていません。"
+    : "No serious issues were found in the part we scanned. But the project is large, so some files haven't been checked yet.";
   const scanningText = isJa
     ? "コード全体をスキャン中…"
     : "Scanning the codebase…";
@@ -484,6 +490,19 @@ function PreReleaseChecklist({
             </div>
             {emptyState}
           </div>
+        ) : isPartialCoverage ? (
+          // 大きいプロジェクトで一部未走査(失敗ではない)。amber で「見えた範囲は問題なし +
+          // ただし未完了」を伝える。下の AssessmentPanel が unknown verdict の詳細を補う。
+          <div
+            className="text-sm px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
+            style={{
+              borderColor: "#fde68a",
+              background: "#fffbeb",
+              color: "#92400e",
+            }}
+          >
+            {partialEmptyState}
+          </div>
         ) : (
           <div
             className="text-sm px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
@@ -504,8 +523,15 @@ function PreReleaseChecklist({
         </ul>
       )}
 
-      {/* 全体評価パネル。findings が無くても scan 未完了(unknown)状態は表示する。 */}
-      {!scanning && (findings.length > 0 || scanState === "failed" || scanState === "unavailable") && (
+      {/* 全体評価パネル。findings が無くても scan 未完了(unknown)状態は表示する。
+          partial coverage も unknown verdict なので、パネルで「一部未走査」の判定理由を出す
+          (Codex round 16 Low:従来ここに isPartialCoverage が無く、partial+指摘0 で
+          verdictUnknownPartialSummary が一切表示されなかった表示矛盾を解消)。 */}
+      {!scanning &&
+        (findings.length > 0 ||
+          scanState === "failed" ||
+          scanState === "unavailable" ||
+          isPartialCoverage) && (
         <AssessmentPanel
           assessment={assessment}
           language={language}
