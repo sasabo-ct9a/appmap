@@ -124,6 +124,35 @@ describe("buildFindings", () => {
     expect(secret?.count).toBe(300);
   });
 
+  it("suppresses the test-missing finding when the scan was truncated (Codex round 20)", () => {
+    // walk 打ち切り時は has_test_files=false が「未走査で見つからなかっただけ」の可能性が
+    // あるため、テスト欠落 finding を出さない(不明扱いに寄せる)。
+    const findings = buildFindings({
+      screens: EMPTY_SCREENS,
+      scan: cleanScan({
+        files_truncated: true,
+        has_test_files: false,
+        detected_test_framework: null,
+      }),
+      language: "ja",
+    });
+    expect(findings.find((f) => f.id === "no-test-framework")).toBeUndefined();
+    expect(findings.find((f) => f.id === "no-tests")).toBeUndefined();
+  });
+
+  it("still emits the test-missing finding when the scan was complete", () => {
+    const findings = buildFindings({
+      screens: EMPTY_SCREENS,
+      scan: cleanScan({
+        files_truncated: false,
+        has_test_files: false,
+        detected_test_framework: null,
+      }),
+      language: "ja",
+    });
+    expect(findings.find((f) => f.id === "no-test-framework")).toBeDefined();
+  });
+
   it("never emits Node/DevOps release-gate findings (scope charter, CLAUDE.md §6.5)", () => {
     // build/test/typecheck script・lockfile・CI は対象外に決めた。manifest が全部
     // 「欠落」でも、これらの gate finding は一切出さない。将来うっかり復活したらここで落ちる。
