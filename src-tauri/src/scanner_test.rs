@@ -120,17 +120,17 @@ fn plausible_hit_requires_left_boundary() {
     assert!(!is_plausible_secret_hit("const url = \"/api/risk-assessment-report\";", "sk-"));
     assert!(!is_plausible_secret_hit(".disk-space-indicator-container {}", "sk-"));
     // 正当な代入は検出(左が空白 → 境界 OK、本体 16 文字以上)
-    assert!(is_plausible_secret_hit("const k = sk-RtY7bQmz9WpKvN3xLsK5;", "sk-"));
+    assert!(is_plausible_secret_hit("const k = sk-EXAMPLE_fake_test_key;", "sk-"));
 }
 
 // ─── line_contains_secret(マスク漏れ回帰:検出と同じ needle 集合)─
 #[test]
 fn masker_covers_full_needle_set() {
     // 以前マスク側の縮小リストから漏れていた prefix も mask 対象になる
-    assert!(line_contains_secret("const t = \"gho_RtY7bQmz9WpKvN3xLsK5abcd\";"));
-    assert!(line_contains_secret("const w = \"whsec_RtY7bQmz9WpKvN3xLsK5abcd\";"));
-    assert!(line_contains_secret("const s = \"SG.RtY7bQmz9WpKvN3xLsK5.abcdRtY7bQmz\";"));
-    assert!(line_contains_secret("const pk = \"pk_live_RtY7bQmz9WpKvN3xLsK5abcd\";"));
+    assert!(line_contains_secret("const t = \"gho_EXAMPLE_fake_test_keyabcd\";"));
+    assert!(line_contains_secret("const w = \"whsec_EXAMPLE_fake_test_keyabcd\";"));
+    assert!(line_contains_secret("const s = \"SG.EXAMPLE_fake_test_key.abcdRtY7bQmz\";"));
+    assert!(line_contains_secret("const pk = \"pk_live_EXAMPLE_fake_test_keyabcd\";"));
 }
 
 // ─── is_test_file_path(C# 追加)────────────────────────────────
@@ -177,17 +177,36 @@ fn connection_string_placeholder_userinfo_rejected() {
     assert!(is_plausible_secret_hit("DATABASE_URL=postgres://dbadmin:R7bQmz9WpKv@prod/app", "postgres://"));
 }
 
+// ─── is_plausible_secret_hit(同一行の全出現を走査:Codex round 16 High)────
+#[test]
+fn secret_hit_scans_all_occurrences_on_line() {
+    // 先頭が短い例示(sk-xxx / user:pass@)で、後続に本物がある行。
+    // 旧実装は line.find で最初の 1 回だけ見て false を返し、本物を取りこぼしていた。
+    // トークン接頭辞:最初の sk-xxx は本体 3 文字で棄却、2 個目の長いキーで検出。
+    assert!(is_plausible_secret_hit(
+        "// 例: sk-xxx  実キー: sk-EXAMPLE_fake_test_keyabcd",
+        "sk-"
+    ));
+    // 接続文字列:最初は placeholder(user:pass)、2 個目に実資格情報。
+    assert!(is_plausible_secret_hit(
+        "// 例 postgres://user:pass@host  実際 postgres://appuser:Xk29fjQ7Zw@10.0.3.5/db",
+        "postgres://"
+    ));
+    // 例示だけの行は依然として棄却される(全出現走査でも誤検出を増やさない)。
+    assert!(!is_plausible_secret_hit("// 例: sk-xxx と sk-yyy のみ", "sk-"));
+}
+
 // ─── mask_snippet(既知トークンの平文漏れ回帰:Codex round 15 High)────
 #[test]
 fn mask_snippet_hides_lowercase_bare_tokens() {
     // 小文字 snake_case のクオート無し代入でもトークン値を伏せる(平文漏れの回帰)
-    let masked = mask_snippet("github_token=ghp_RtY7bQmz9WpKvN3xLsK5abcd");
-    assert!(!masked.contains("ghp_RtY7bQmz9WpKvN3xLsK5abcd"), "got: {}", masked);
-    let masked2 = mask_snippet("slack_token: xoxb-RtY7bQmz9WpKvN3xLsK5abcd");
-    assert!(!masked2.contains("xoxb-RtY7bQmz9WpKvN3xLsK5abcd"), "got: {}", masked2);
+    let masked = mask_snippet("github_token=ghp_EXAMPLE_fake_test_keyabcd");
+    assert!(!masked.contains("ghp_EXAMPLE_fake_test_keyabcd"), "got: {}", masked);
+    let masked2 = mask_snippet("slack_token: xoxb-EXAMPLE_fake_test_keyabcd");
+    assert!(!masked2.contains("xoxb-EXAMPLE_fake_test_keyabcd"), "got: {}", masked2);
     // クオート付きも従来通り伏せる
-    let masked3 = mask_snippet("const k = \"sk_live_RtY7bQmz9WpKvN3xLsK5\"");
-    assert!(!masked3.contains("sk_live_RtY7bQmz9WpKvN3xLsK5"), "got: {}", masked3);
+    let masked3 = mask_snippet("const k = \"sk_live_EXAMPLE_fake_test_key\"");
+    assert!(!masked3.contains("sk_live_EXAMPLE_fake_test_key"), "got: {}", masked3);
 }
 
 // ─── decode_scan_bytes(UTF-16 検出:Codex round 15 Medium)──────────
@@ -204,6 +223,32 @@ fn decode_handles_utf16() {
     assert!(decoded.contains("ghp_secret"));
     // 通常の UTF-8 はそのまま
     assert_eq!(decode_scan_bytes(b"hello world"), "hello world");
+}
+
+// ─── decode_scan_bytes(BOM 無し UTF-16:Codex round 16 Medium)──────────
+#[test]
+fn decode_handles_bomless_utf16() {
+    // 先頭に日本語コメント、本体は ASCII コードで secret を含む BOM 無し UTF-16LE。
+    // ASCII が多数派なので奇数位置 NUL 偏りで LE と判定でき、secret を拾える。
+    let mut src = String::new();
+    src.push_str("// これはライセンスヘッダーです。日本語の説明がしばらく続きます。著作権表示など。\n");
+    for _ in 0..20 {
+        src.push_str("export const value = computeSomething(alpha, beta, gamma);\n");
+    }
+    src.push_str("const token = ghp_EXAMPLE_fake_test_keyabcd;\n");
+    let le: Vec<u8> = src.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let decoded = decode_scan_bytes(&le);
+    assert!(decoded.contains("ghp_EXAMPLE_fake_test_keyabcd"), "LE decode failed");
+
+    // BOM 無し UTF-16BE(高位バイトが偶数位置)も対称に判定する。
+    let text = "const token = ghp_EXAMPLE_fake_test_keyabcd;";
+    let be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+    let decoded_be = decode_scan_bytes(&be);
+    assert!(decoded_be.contains("ghp_EXAMPLE_fake_test_keyabcd"), "BE decode failed");
+
+    // 純粋な UTF-8(日本語 + ASCII、NUL 皆無)は UTF-16 と誤判定しない。
+    let utf8 = "秘密は書かない。const x = compute(a, b, c);";
+    assert_eq!(decode_scan_bytes(utf8.as_bytes()), utf8);
 }
 
 // ─── trailing_identifier(UTF-8 境界 panic 回帰)────────────────
@@ -225,7 +270,7 @@ fn line_secret_detection_survives_japanese() {
     assert!(!line_contains_secret("名前=太郎")); // secret 名でない + 短い
     assert!(!line_contains_secret("メッセージ: \"接続しました\""));
     // 日本語が前置されても本物 secret は拾う
-    assert!(line_contains_secret("設定 apiKey=sk_live_0123456789abcdef"));
+    assert!(line_contains_secret("設定 apiKey=sk_live_EXAMPLE_fake_key"));
     assert!(line_contains_secret("認証トークン API_TOKEN=abcdef1234567890xyz"));
 }
 

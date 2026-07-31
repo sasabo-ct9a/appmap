@@ -2804,8 +2804,19 @@ fn gitignore_pattern_matches(pattern: &str, filename: &str) -> bool {
 ///   2) プレフィックス末尾からキー本体らしき連続文字([A-Za-z0-9_/+=-])を数え、
 ///      16 文字未満なら本物のキーではないと見なして棄却
 ///   3) PRIVATE KEY のような長いプレフィックスは 1) の判定だけを適用(それ自身が有意)
+///
+/// v0.1.32(Codex round 16 High):1 行に prefix が複数回現れる場合を全部見る。
+///   例:`// 例: postgres://user:pass@host  実際は postgres://appuser:Xk29@10.0.3.5/db`
+///   先頭一致(旧 `line.find`)だけだと最初の placeholder で false 判定して打ち切り、
+///   後続の本物を取りこぼしていた。全出現を走査し、どれか 1 つでも本物らしければ真。
 fn is_plausible_secret_hit(line: &str, prefix: &str) -> bool {
-    let Some(prefix_start) = line.find(prefix) else { return false };
+    line.match_indices(prefix)
+        .any(|(prefix_start, _)| is_plausible_hit_at(line, prefix, prefix_start))
+}
+
+/// prefix が `prefix_start` に 1 回出現したとき、その箇所が本物の秘密っぽいかを判定する。
+/// is_plausible_secret_hit が各出現位置ごとに呼ぶ内部ヘルパ。
+fn is_plausible_hit_at(line: &str, prefix: &str, prefix_start: usize) -> bool {
     let prefix_end = prefix_start + prefix.len();
     let bytes = line.as_bytes();
 
@@ -3056,14 +3067,27 @@ fn decode_scan_bytes(bytes: &[u8]) -> String {
         let u: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
         return String::from_utf16_lossy(&u);
     }
-    // BOM 無し UTF-16LE 推定:ASCII テキストなら奇数バイト位置が NUL になる。
-    //   先頭最大 512 バイトで奇数位置 NUL が 6 割以上ならそう見なす(バイナリ誤判定を避けるため高めに)。
-    let sample = &bytes[..bytes.len().min(512)];
-    if sample.len() >= 8 {
-        let pairs = sample.len() / 2;
+    // BOM 無し UTF-16 推定。ASCII は LE=[byte,0x00] / BE=[0x00,byte] となり、片側の
+    //   バイト位置に NUL が偏る。日本語主体だと NUL は減るが、改行やコード片・記号は必ず
+    //   ASCII なので偏りは残る(Codex round 16 Medium:先頭 512B が日本語だけだと旧判定が
+    //   取りこぼしていた)。対策:窓を 8KB に広げ、しきい値 60% に加えて「片側 NUL が反対側の
+    //   4 倍超 かつ 30% 超」という偏り条件も採用。UTF-8 テキストは NUL がほぼ皆無なので
+    //   どちらの条件も踏まず、from_utf8_lossy に落ちる(誤判定リスクは実質無い)。
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.len() >= 16 {
+        let pairs = (sample.len() / 2).max(1);
         let odd_nuls = sample.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
-        if pairs > 0 && odd_nuls * 100 / pairs >= 60 {
+        let even_nuls = sample.iter().step_by(2).filter(|&&b| b == 0).count();
+        let odd_pct = odd_nuls * 100 / pairs;
+        let even_pct = even_nuls * 100 / pairs;
+        // LE:高位バイト(奇数位置)が NUL 優勢
+        if odd_pct >= 60 || (odd_pct >= 30 && odd_nuls >= even_nuls.saturating_mul(4) + 4) {
             let u: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            return String::from_utf16_lossy(&u);
+        }
+        // BE:高位バイト(偶数位置)が NUL 優勢
+        if even_pct >= 60 || (even_pct >= 30 && even_nuls >= odd_nuls.saturating_mul(4) + 4) {
+            let u: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
             return String::from_utf16_lossy(&u);
         }
     }
