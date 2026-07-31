@@ -2850,6 +2850,25 @@ fn is_plausible_secret_hit(line: &str, prefix: &str) -> bool {
         if !body.contains('@') {
             return false;
         }
+        // userinfo(:// と @ の間)が明らかな placeholder(user:pass 等)なら、ドキュメント/
+        // コメント中の"例"であって本物の資格情報ではない。棄却する。コメント行も検出する
+        // ようにした副作用で、スキャナ自身の説明コメント(`例:mongodb+srv://user:pass@host`)まで
+        // 拾っていた(Codex round 15 の comment 検出の後始末)。本物の接続文字列は実資格情報を持つ。
+        if let Some(at) = body.find('@') {
+            let userinfo = body[..at].to_lowercase();
+            let pw = userinfo.rsplit(':').next().unwrap_or("");
+            const PLACEHOLDER_PW: &[&str] = &[
+                "pass", "password", "passwd", "pwd", "secret", "changeme",
+                "xxx", "***", "your_password", "yourpassword", "user", "example",
+            ];
+            const PLACEHOLDER_USERINFO: &[&str] = &[
+                "user:pass", "user:password", "username:password", "user:secret",
+                "admin:admin", "root:root", "foo:bar", "user:xxx",
+            ];
+            if PLACEHOLDER_PW.contains(&pw) || PLACEHOLDER_USERINFO.contains(&userinfo.as_str()) {
+                return false;
+            }
+        }
         // credential ありなら以下のルール 2/3 を通さず即真(URL 自体で 20 字超)
         return true;
     }

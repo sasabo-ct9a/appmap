@@ -166,6 +166,17 @@ fn skippable_dir_covers_unity_and_dotnet() {
     assert!(!is_skippable_dir("components"));
 }
 
+// ─── is_plausible_secret_hit(接続文字列の placeholder 例示を弾く)────
+#[test]
+fn connection_string_placeholder_userinfo_rejected() {
+    // ドキュメント/コメント中の例示(user:pass@)は本物ではないので検出しない
+    assert!(!is_plausible_secret_hit("// 例:mongodb+srv://user:pass@host/db", "mongodb+srv://"));
+    assert!(!is_plausible_secret_hit("/// postgres://user:pass@db.host/app → ...", "postgres://"));
+    assert!(!is_plausible_secret_hit("redis://admin:admin@localhost", "redis://"));
+    // 実際の資格情報を持つ接続文字列は検出する
+    assert!(is_plausible_secret_hit("DATABASE_URL=postgres://dbadmin:R7bQmz9WpKv@prod/app", "postgres://"));
+}
+
 // ─── mask_snippet(既知トークンの平文漏れ回帰:Codex round 15 High)────
 #[test]
 fn mask_snippet_hides_lowercase_bare_tokens() {
