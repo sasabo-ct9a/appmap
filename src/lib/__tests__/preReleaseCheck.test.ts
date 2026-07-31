@@ -28,6 +28,7 @@ function cleanScan(overrides: Partial<PreReleaseScanResult> = {}): PreReleaseSca
     has_test_files: true,
     env_files_present: false,
     env_covered_by_gitignore: true,
+    env_tracked_files: [],
     project_meta: {
       project_type: "node",
       project_types: ["node"],
@@ -104,6 +105,31 @@ describe("buildFindings", () => {
       language: "ja",
     });
     expect(findings.find((f) => f.id === "env-unprotected")).toBeUndefined();
+  });
+
+  it("surfaces env-tracked as high even when gitignored (Codex round 20)", () => {
+    // gitignore 済みでも既に git 追跡済み(commit 済み)なら漏洩リスクが残る。
+    const findings = buildFindings({
+      screens: EMPTY_SCREENS,
+      scan: cleanScan({
+        env_files_present: true,
+        env_covered_by_gitignore: true, // gitignore 済みでも
+        env_tracked_files: [".env"], // tracked なら High
+      }),
+      language: "ja",
+    });
+    const tracked = findings.find((f) => f.id === "env-tracked");
+    expect(tracked?.severity).toBe("high");
+    expect(tracked?.examples?.[0].file).toBe(".env");
+  });
+
+  it("does not surface env-tracked when nothing is tracked", () => {
+    const findings = buildFindings({
+      screens: EMPTY_SCREENS,
+      scan: cleanScan({ env_files_present: true, env_tracked_files: [] }),
+      language: "ja",
+    });
+    expect(findings.find((f) => f.id === "env-tracked")).toBeUndefined();
   });
 
   it("counts secrets from secrets_total, not truncated .length", () => {

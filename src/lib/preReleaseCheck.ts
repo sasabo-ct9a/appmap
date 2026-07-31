@@ -46,6 +46,8 @@ export type PreReleaseScanResult = {
   env_files_present: boolean;
   /** 全ての実在 env が .gitignore で保護されているか */
   env_covered_by_gitignore: boolean;
+  /** git で追跡済み(commit 済み)の .env。gitignore 済みでも既にリポジトリに載っており漏洩リスクが残る。 */
+  env_tracked_files: string[];
   /** 運用インフラ有無(build/test scripts / CI / lockfile / tsconfig) */
   project_meta: ProjectMeta;
 };
@@ -140,6 +142,7 @@ const PreReleaseScanResultSchema = z
     has_test_files: z.boolean(),
     env_files_present: z.boolean(),
     env_covered_by_gitignore: z.boolean(),
+    env_tracked_files: z.array(z.string()),
     project_meta: ProjectMetaSchema,
   })
   .strict();
@@ -518,6 +521,21 @@ export function buildFindings({
     });
   }
 
+  // .env が既に Git 追跡済み(commit 済み)の場合:gitignore で守っても既にリポジトリと
+  //   履歴に載っているので漏洩リスクが残る。gitignore 済みでも別途 High で指摘する
+  //   (Codex round 20 High)。git 未導入 / 非 git フォルダでは env_tracked_files が空。
+  if (scan && scan.env_tracked_files.length > 0) {
+    findings.push({
+      id: "env-tracked",
+      severity: "high",
+      category: "secrets",
+      title: t.envTrackedTitle,
+      hint: t.envTrackedHint,
+      fixSteps: t.envTrackedFix,
+      examples: scan.env_tracked_files.slice(0, 10).map((f) => ({ file: f })),
+    });
+  }
+
   // ── 運用ゲート(build/test script・typecheck・lockfile・CI)は撤去した。
   //   CLAUDE.md §6.5 スコープ憲章の判断基準に反するため:非エンジニアには専門用語で
   //   「なぜ大事か」が伝わらず、直すのに DevOps 知識が要り、かつスタック固有(Unity/C# には
@@ -641,6 +659,9 @@ type Copy = {
   envUnprotectedTitle: string;
   envUnprotectedHint: string;
   envUnprotectedFix: string[];
+  envTrackedTitle: string;
+  envTrackedHint: string;
+  envTrackedFix: string[];
   // 運用ゲート(build/test/typecheck/lockfile/CI)の Copy は CLAUDE.md §6.5 スコープ憲章で
   // 撤去済みのため削除した。ここには戻さない。
   noTestFrameworkTitle: string;
@@ -694,6 +715,14 @@ const JA: Copy = {
     "`git status` で .env が「Untracked files」に表示されないことを確認(既に追跡中なら次のステップ)",
     "既に追跡されている場合:`git rm --cached .env` で追跡から外し、変更をコミット",
     "GitHub 等に既に push 済みなら .env 内の秘密情報は漏洩済み扱い。**すべての API キー・パスワードを即ローテーション**",
+  ],
+  envTrackedTitle: ".env が Git に登録(commit)済みです",
+  envTrackedHint:
+    ".env が既に Git の追跡対象に入っています。一度追跡されたファイルは `.gitignore` に書いても無視されないため、このままだと秘密情報がリポジトリと履歴に残ります。",
+  envTrackedFix: [
+    "`git rm --cached <該当ファイル>` で追跡から外す(ディスク上のファイル自体は消えません)",
+    "`.gitignore` に `.env` / `.env.local` を追加してから、変更をコミット",
+    "GitHub 等に既に push 済みなら履歴に秘密情報が残っています。**すべての API キー・パスワードを即ローテーション**(履歴からの削除だけでは不十分)",
   ],
   noTestFrameworkTitle: "自動テストがまだありません",
   noTestFrameworkHint:
@@ -829,6 +858,14 @@ const EN: Copy = {
     "Run `git status` and confirm .env does NOT appear under 'Untracked files' (if it's already tracked, do the next step)",
     "If already tracked: `git rm --cached .env` to untrack it, then commit",
     "If already pushed to GitHub, treat everything in .env as leaked. **Rotate every API key / password immediately**",
+  ],
+  envTrackedTitle: ".env is tracked by Git (already committed)",
+  envTrackedHint:
+    "Your .env is already tracked by Git. Adding it to `.gitignore` won't help — once a file is tracked, Git keeps it, so the secrets stay in the repo and its history.",
+  envTrackedFix: [
+    "Run `git rm --cached <file>` to untrack it (the file stays on disk)",
+    "Add `.env` / `.env.local` to `.gitignore`, then commit the change",
+    "If already pushed to GitHub, the secrets are in the history. **Rotate every API key / password immediately** (removing from history alone is not enough)",
   ],
   noTestFrameworkTitle: "No automated tests yet",
   noTestFrameworkHint:

@@ -538,6 +538,48 @@ fn private_key_file_names_are_scannable() {
     assert!(!is_private_key_file_name("README.md"));
 }
 
+// ─── git_tracked_env_files(commit 済み .env の検出:Codex round 20 High)──────
+#[test]
+fn git_tracked_env_files_empty_for_non_git_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".env"), "X=1").unwrap();
+    // .git が無い(= tracked の概念が無い)フォルダでは空を返す(誤検出しない)
+    assert!(git_tracked_env_files(root, &[".env".to_string()]).is_empty());
+}
+
+#[test]
+fn git_tracked_env_files_detects_tracked_env() {
+    // git が無い環境では skip(テスト環境依存を避ける)
+    let git_ok = std::process::Command::new("git")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_ok {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".env"), "SECRET=x").unwrap();
+    std::fs::write(root.join("untracked.env"), "Y=1").unwrap();
+    let run = |args: &[&str]| {
+        let _ = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    run(&["init"]);
+    run(&["add", "-f", ".env"]); // -f で global excludes の .env 無視に影響されない
+    // .env は index 追加済み → tracked、untracked.env は未追跡 → 対象外
+    let files = vec![".env".to_string(), "untracked.env".to_string()];
+    assert_eq!(git_tracked_env_files(root, &files), vec![".env".to_string()]);
+}
+
 // ─── is_plausible_secret_hit(URL credential 必須)─────────────
 #[test]
 fn plausible_secret_url_needs_at_sign() {

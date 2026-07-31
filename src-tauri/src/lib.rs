@@ -1399,6 +1399,39 @@ fn is_private_key_file_name(name: &str) -> bool {
         || matches!(lower.as_str(), "id_rsa" | "id_ed25519" | "id_ecdsa" | "id_dsa")
 }
 
+/// git で追跡済み(commit 済み or index 追加済み)の env ファイルを返す。
+/// gitignore は既に追跡されたファイルを無視できないため、tracked な `.env` は
+/// gitignore 済みでも漏洩リスクが残る(Codex round 20 High)。
+/// 非 git フォルダ / git 未導入 / 判定不能時は空を返す(安全側:誤検出しない)。
+fn git_tracked_env_files(folder: &Path, env_files: &[String]) -> Vec<String> {
+    if env_files.is_empty() || !folder.join(".git").exists() {
+        return Vec::new();
+    }
+    // `git ls-files -z -- <paths>` は tracked なパスだけを NUL 区切りで出力する
+    //(未追跡は出力されない)。1 プロセスで全 env ファイルを判定する。
+    let output = std::process::Command::new("git")
+        .current_dir(folder)
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--")
+        .args(env_files)
+        .output();
+    let Ok(out) = output else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let listed: std::collections::HashSet<String> = String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace('\\', "/"))
+        .collect();
+    env_files
+        .iter()
+        .filter(|f| listed.contains(&f.replace('\\', "/")))
+        .cloned()
+        .collect()
+}
+
 /// v0.1.8:リリース前チェックのコードスキャン結果。
 /// LLM を呼ばずローカルで regex 相当の文字列マッチだけ実行。
 #[derive(serde::Serialize)]
@@ -1430,6 +1463,10 @@ struct PreReleaseScanResult {
     /// 両者から「秘密情報を Git に上げる危険な状態か」を判定する。
     env_files_present: bool,
     env_covered_by_gitignore: bool,
+    /// v0.1.33:git で追跡済み(commit 済み or index 追加済み)の .env ファイル。
+    /// gitignore は追跡済みファイルを守らないため、gitignore 済みでも tracked なら漏洩リスクが
+    /// 残る(Codex round 20 High)。git 未導入 / 非 git フォルダでは空。
+    env_tracked_files: Vec<String>,
 }
 
 /// 運用 gates:TODO や console.log よりリリース前に効く実運用チェック。
@@ -1575,6 +1612,16 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     if env_collection_truncated && env_covered_by_gitignore {
         files_truncated = true;
     }
+    // gitignore で守られていても、既に git に追跡済み(commit 済み)の .env は漏洩リスクが
+    // 残る(gitignore は追跡済みファイルを守らない)。git で tracked な .env を拾う
+    //(Codex round 20 High)。git 未導入 / 非 git フォルダでは空(誤検出しない)。
+    let env_files_for_git = existing_env_files.clone();
+    let folder_for_git = folder_path.clone();
+    let env_tracked_files: Vec<String> = tauri::async_runtime::spawn_blocking(move || {
+        git_tracked_env_files(&folder_for_git, &env_files_for_git)
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?;
 
     /// 優先ディレクトリ名。walk 時にこれらを含むディレクトリを先に辿る。
     /// generated/fixtures/node_modules 相当が先頭 10k を食い潰して src/ に到達
@@ -1930,6 +1977,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         has_test_files,
         env_files_present,
         env_covered_by_gitignore,
+        env_tracked_files,
         project_meta,
     })
 }
