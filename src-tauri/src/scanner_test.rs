@@ -130,7 +130,22 @@ fn masker_covers_full_needle_set() {
     assert!(line_contains_secret("const t = \"gho_EXAMPLE_fake_test_keyabcd\";"));
     assert!(line_contains_secret("const w = \"whsec_EXAMPLE_fake_test_keyabcd\";"));
     assert!(line_contains_secret("const s = \"SG.EXAMPLE_fake_test_key.abcdRtY7bQmz\";"));
-    assert!(line_contains_secret("const pk = \"pk_live_EXAMPLE_fake_test_keyabcd\";"));
+}
+
+// ─── Stripe publishable key は秘密ではない(Codex round 17 Medium)────
+#[test]
+fn stripe_publishable_key_is_not_secret() {
+    // findings の元になる SECRET_NEEDLES から pk_live_ / pk_test_(公開 publishable key)を
+    // 外す。含めると「秘密が直書き」と誤検出し、ユーザーが不要な修正をしてしまう。
+    assert!(!SECRET_NEEDLES.iter().any(|(n, _)| n.starts_with("pk_")));
+    // 一方、Stripe の secret key(sk_live_)は従来どおり needle に残す。
+    assert!(SECRET_NEEDLES.iter().any(|(n, _)| *n == "sk_live_"));
+    // クオート付き publishable key はマスク対象にもならない(secret 変数名でもないため)。
+    //   ※ `STRIPE_PUBLISHABLE_KEY=` のような env 名は変数名ヒューリスティックで
+    //     マスクされ得るが、それは AI 送信前の安全側の伏字化であって findings ではない。
+    assert!(!line_contains_secret("const pk = \"pk_live_EXAMPLE_fake_test_keyabcd\";"));
+    // secret key(sk_live_)は検出もマスクもされる。
+    assert!(line_contains_secret("const sk = \"sk_live_EXAMPLE_fake_test_keyabcd\";"));
 }
 
 // ─── is_test_file_path(C# 追加)────────────────────────────────
@@ -402,6 +417,52 @@ fn gitignore_wildcard_star() {
 #[test]
 fn gitignore_globstar_prefix() {
     assert!(gitignore_pattern_matches("**/.env", ".env"));
+}
+
+// ─── env_file_is_gitignored(アンカリング:Codex round 17 High)──────
+// root の固定 `/.env` は root/.env だけを保護する。subdir の .env まで保護扱いにすると
+// 未保護 subdir .env の漏洩を見逃す。逆に非固定 `.env` は全階層を保護する(こちらを
+// 未保護と誤判定すると誤検出になる)。両方向を固定する。
+#[test]
+fn gitignore_root_anchored_env_does_not_cover_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), "/.env\n").unwrap();
+    assert!(env_file_is_gitignored(root, ".env")); // root 直下は保護
+    assert!(!env_file_is_gitignored(root, "apps/web/.env")); // subdir は保護されない(取りこぼし解消)
+}
+
+#[test]
+fn gitignore_unanchored_env_covers_all_depths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), ".env\n").unwrap();
+    assert!(env_file_is_gitignored(root, ".env"));
+    assert!(env_file_is_gitignored(root, "apps/web/.env")); // 非固定は全階層(誤検出防止)
+    std::fs::write(root.join(".gitignore"), "*.env\n").unwrap();
+    assert!(env_file_is_gitignored(root, "services/api/prod.env"));
+}
+
+#[test]
+fn gitignore_nested_gitignore_covers_local_env() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), "node_modules\n").unwrap();
+    std::fs::create_dir_all(root.join("apps/web")).unwrap();
+    std::fs::write(root.join("apps/web/.gitignore"), ".env\n").unwrap();
+    assert!(env_file_is_gitignored(root, "apps/web/.env")); // 深い .gitignore が自分の .env を保護
+    assert!(!env_file_is_gitignored(root, ".env")); // root 直下は誰も無視していない
+}
+
+#[test]
+fn gitignore_anchored_dir_does_not_cover_deep_same_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), "/secrets/\n").unwrap();
+    assert!(env_file_is_gitignored(root, "secrets/.env")); // root/secrets/ は保護
+    assert!(!env_file_is_gitignored(root, "apps/secrets/.env")); // 固定なので深い secrets は対象外
+    std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+    assert!(env_file_is_gitignored(root, "packages/ui/node_modules/.env")); // 非固定ディレクトリは全階層
 }
 
 // ─── is_plausible_secret_hit(URL credential 必須)─────────────

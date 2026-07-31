@@ -44,7 +44,9 @@ const SECRET_NEEDLES: &[(&str, &str)] = &[
     ("sk-", "openai-like key"),
     ("sk_live_", "stripe live key"),
     ("sk_test_", "stripe test key"),
-    ("pk_live_", "stripe publishable live"),
+    // pk_live_ / pk_test_(Stripe publishable key)はフロントに埋め込む前提の公開値で
+    // 秘密ではない。ここに入れると「秘密が直書き」と誤検出し、ユーザーが不要な修正を
+    // してしまう(誤検出は許されない方針・CLAUDE.md §6.5)。除外する(Codex round 17 Medium)。
     ("rk_live_", "stripe restricted live"),
     ("whsec_", "stripe webhook secret"),
     ("AKIA", "aws access key id"),
@@ -2705,8 +2707,10 @@ fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize,
 ///
 /// git は階層 `.gitignore` を持ち、深い方が優先・各ファイル内は last-match-wins。
 /// ここでは浅い→深いの順に評価し、最後に一致したルールの符号を採る(近似)。
-/// - ファイル名 / その `.gitignore` から見た相対パス / 祖先ディレクトリ名(`deploy/` 等の
-///   ディレクトリ丸ごと ignore)のいずれかにマッチしたら適用。
+/// - 非固定パターン(`/` を含まない `.env` / `*.env`)はファイル名に任意の深さでマッチ。
+/// - 固定パターン(先頭/中間に `/`。`/.env` や `apps/.env`)はその `.gitignore` からの
+///   相対パスにのみマッチ(root の `/.env` は subdir の .env を保護しない)。
+/// - ディレクトリ丸ごと ignore(`deploy/` 等)は祖先ディレクトリに一致したら適用。
 fn env_file_is_gitignored(root: &Path, rel_path: &str) -> bool {
     let parts: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() {
@@ -2734,16 +2738,40 @@ fn env_file_is_gitignored(root: &Path, rel_path: &str) -> bool {
                 Some(s) => (s, true),
                 None => (first, false),
             };
-            // `deploy/` `deploy` のようなディレクトリ丸ごと ignore:この .gitignore から
-            // 見た祖先ディレクトリ名のどれかに一致するか。
+            // git のアンカリング規則:パターンの先頭または中間に `/` があれば、その
+            // `.gitignore` の階層に固定(anchored)される。先頭 `**/` は「全階層」で非固定、
+            // 末尾のみの `/`(ディレクトリ指定)は固定扱いにしない。
+            //   例:root の `/.env` は root/.env だけ。`apps/web/.env` は対象外。
+            //       非固定の `.env` / `*.env` は任意の深さのファイル名にマッチ。
+            // 旧実装はこれを無視して file_name / 任意祖先セグメントにも照合していたため、
+            // root の `/.env` が subdir の .env まで「保護済み」にして漏洩を見逃していた
+            //(Codex round 17 High)。
+            let core = pattern.trim_end_matches('/');
+            let core_body = core.strip_prefix("**/").unwrap_or(core);
+            let anchored = core_body.contains('/');
+
+            // ディレクトリ丸ごと ignore(`deploy/` 等)の祖先一致判定。
             let pat_dir = pattern.trim_start_matches('/').trim_end_matches('/');
-            let dir_prefix_match = parts[depth..parts.len().saturating_sub(1)]
-                .iter()
-                .any(|seg| *seg == pat_dir);
-            if dir_prefix_match
-                || gitignore_pattern_matches(pattern, file_name)
-                || gitignore_pattern_matches(pattern, &rel_from_here)
-            {
+            let ancestors = &parts[depth..parts.len().saturating_sub(1)];
+            let dir_prefix_match = if anchored {
+                // 固定ディレクトリパターン:gi_dir から見た祖先パスの接頭辞に完全一致する時だけ。
+                //   `apps/secrets` は apps/secrets/... のみ。任意階層の `secrets` にはマッチしない。
+                let pat_segs: Vec<&str> =
+                    pat_dir.split('/').filter(|s| !s.is_empty()).collect();
+                !pat_segs.is_empty()
+                    && ancestors.len() >= pat_segs.len()
+                    && ancestors[..pat_segs.len()] == pat_segs[..]
+            } else {
+                // 非固定:任意階層のディレクトリ名に一致(git は非固定ディレクトリを全階層で無視)。
+                ancestors.iter().any(|seg| *seg == pat_dir)
+            };
+
+            // ファイル名(任意の深さ)への照合は非固定パターンのみ許す。
+            let name_match = !anchored && gitignore_pattern_matches(pattern, file_name);
+            // rel_from_here(この .gitignore からの相対パス)への照合は固定・非固定とも有効。
+            let rel_match = gitignore_pattern_matches(pattern, &rel_from_here);
+
+            if dir_prefix_match || name_match || rel_match {
                 ignored = !is_negation;
             }
         }
