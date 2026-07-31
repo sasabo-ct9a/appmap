@@ -222,11 +222,7 @@ function inferStackHint(techStack: {
 // 統合フィンディング型
 // ────────────────────────────────────────────────────────────────
 export type Severity = "high" | "medium" | "low";
-export type Category =
-  | "secrets"
-  | "testing"
-  | "dev-leftovers"
-  | "release-gates";
+export type Category = "secrets" | "testing" | "dev-leftovers";
 
 export type Finding = {
   id: string;
@@ -638,22 +634,8 @@ type Copy = {
   envUnprotectedTitle: string;
   envUnprotectedHint: string;
   envUnprotectedFix: string[];
-  // 運用 gates(#8)
-  noBuildScriptTitle: string;
-  noBuildScriptHint: string;
-  noBuildScriptFix: string[];
-  noTestScriptTitle: string;
-  noTestScriptHint: string;
-  noTestScriptFix: string[];
-  noTypecheckScriptTitle: string;
-  noTypecheckScriptHint: string;
-  noTypecheckScriptFix: string[];
-  noLockfileTitle: string;
-  noLockfileHint: string;
-  noLockfileFix: string[];
-  noCiWorkflowTitle: string;
-  noCiWorkflowHint: string;
-  noCiWorkflowFix: string[];
+  // 運用ゲート(build/test/typecheck/lockfile/CI)の Copy は CLAUDE.md §6.5 スコープ憲章で
+  // 撤去済みのため削除した。ここには戻さない。
   noTestFrameworkTitle: string;
   noTestFrameworkHint: string;
   /** stack ヒント(node/python/rust/go/ruby/php/unknown)から適切な導入手順を返す。
@@ -705,46 +687,6 @@ const JA: Copy = {
     "`git status` で .env が「Untracked files」に表示されないことを確認(既に追跡中なら次のステップ)",
     "既に追跡されている場合:`git rm --cached .env` で追跡から外し、変更をコミット",
     "GitHub 等に既に push 済みなら .env 内の秘密情報は漏洩済み扱い。**すべての API キー・パスワードを即ローテーション**",
-  ],
-  noBuildScriptTitle: "`build` スクリプトが定義されていません",
-  noBuildScriptHint:
-    "`package.json` に `scripts.build` が無いため、本番用ビルドをコマンド一発で作れない状態です。デプロイ時に「どうやってビルドするんだっけ?」で毎回悩みます。",
-  noBuildScriptFix: [
-    "`package.json` の `scripts` に、実際にビルドを走らせるコマンドを追加(Vite なら `\"build\": \"vite build\"`、Next.js なら `\"build\": \"next build\"` など)",
-    "`npm run build` を実行してエラーなく完了することを確認",
-    "CI(GitHub Actions 等)がある場合は build step が通ることも確認",
-  ],
-  noTestScriptTitle: "`test` スクリプトが定義されていません",
-  noTestScriptHint:
-    "`package.json` に `scripts.test` が無いため、テストがあってもワンコマンドで走らせられません。CI 側でも一貫した呼び出し方ができなくなります。",
-  noTestScriptFix: [
-    "`package.json` の `scripts` に `\"test\": \"vitest\"`(または `jest` 等)を追加",
-    "`npm test` で全テストが走ることを確認",
-  ],
-  noTypecheckScriptTitle: "`typecheck` スクリプトが未定義(TS プロジェクト)",
-  noTypecheckScriptHint:
-    "TypeScript プロジェクトなのに `scripts.typecheck`(または `tsc` 呼び出し)が無いため、CI や pre-commit で型エラーを機械的に検出できません。",
-  noTypecheckScriptFix: [
-    "`package.json` の `scripts` に `\"typecheck\": \"tsc --noEmit\"` を追加",
-    "`npm run typecheck` で型エラー 0 を確認",
-    "以降 CI で `npm run typecheck` を必ず走らせる",
-  ],
-  noLockfileTitle: "lockfile がありません",
-  noLockfileHint:
-    "`package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` の何かが必要です。無いと環境ごとに違う依存バージョンが入り「私の環境では動く」問題の温床になります。",
-  noLockfileFix: [
-    "`npm install`(または yarn / pnpm)を実行して lockfile を生成",
-    "生成された lockfile を **git に必ずコミット**(`.gitignore` に入れていないか確認)",
-    "本番デプロイ時は `npm ci`(lockfile 通りにインストール)を使う運用に切替",
-  ],
-  noCiWorkflowTitle: "CI ワークフローがありません",
-  noCiWorkflowHint:
-    "`.github/workflows/` 等の CI 設定が見つかりません。push のたびに自動でビルド/テストが走らない状態は、リリース前チェックを人力に依存させます。",
-  noCiWorkflowFix: [
-    "`.github/workflows/ci.yml` を作成(AI に「Node/GitHub Actions 用の CI を作って」と依頼するとテンプレを書いてくれる)",
-    "最低限:push 時に `npm ci` → `npm run build` → `npm test` を走らせる",
-    "型があるなら `npm run typecheck` も追加",
-    "PR で failing check がマージブロックになるよう設定",
   ],
   noTestFrameworkTitle: "自動テストがまだありません",
   noTestFrameworkHint:
@@ -880,46 +822,6 @@ const EN: Copy = {
     "Run `git status` and confirm .env does NOT appear under 'Untracked files' (if it's already tracked, do the next step)",
     "If already tracked: `git rm --cached .env` to untrack it, then commit",
     "If already pushed to GitHub, treat everything in .env as leaked. **Rotate every API key / password immediately**",
-  ],
-  noBuildScriptTitle: "No `build` script defined",
-  noBuildScriptHint:
-    "`package.json` has no `scripts.build`, so there's no one-command way to produce a production build. Deploys will require re-figuring out the build command every time.",
-  noBuildScriptFix: [
-    "Add a build command to `scripts` in `package.json` (e.g. `\"build\": \"vite build\"` for Vite, `\"build\": \"next build\"` for Next.js)",
-    "Run `npm run build` and confirm it completes without errors",
-    "If you have CI, verify the build step passes there too",
-  ],
-  noTestScriptTitle: "No `test` script defined",
-  noTestScriptHint:
-    "`package.json` has no `scripts.test`, so tests (if any exist) can't be run consistently. CI can't call a stable entry point either.",
-  noTestScriptFix: [
-    "Add `\"test\": \"vitest\"` (or `jest`, etc.) to `scripts` in `package.json`",
-    "Confirm `npm test` runs all tests",
-  ],
-  noTypecheckScriptTitle: "No `typecheck` script (TypeScript project)",
-  noTypecheckScriptHint:
-    "This is a TypeScript project but no `scripts.typecheck` (or `tsc` invocation) exists, so type errors can't be caught mechanically in CI or pre-commit.",
-  noTypecheckScriptFix: [
-    "Add `\"typecheck\": \"tsc --noEmit\"` to `scripts` in `package.json`",
-    "Run `npm run typecheck` and confirm zero errors",
-    "Then wire this into CI so type errors block merges",
-  ],
-  noLockfileTitle: "No lockfile",
-  noLockfileHint:
-    "One of `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` should exist. Without it, different environments get different dependency versions — the \"works on my machine\" problem.",
-  noLockfileFix: [
-    "Run `npm install` (or yarn / pnpm) to generate the lockfile",
-    "**Commit the lockfile to git** (make sure it's not in `.gitignore`)",
-    "Use `npm ci` (installs exactly per lockfile) in production/CI deploys",
-  ],
-  noCiWorkflowTitle: "No CI workflow",
-  noCiWorkflowHint:
-    "No `.github/workflows/` (or equivalent CI config) was found. Without automatic build/test on every push, release checks depend on humans remembering to run them.",
-  noCiWorkflowFix: [
-    "Create `.github/workflows/ci.yml` (ask your AI \"make a Node/GitHub Actions CI\" for a template)",
-    "Minimum: on push, run `npm ci` → `npm run build` → `npm test`",
-    "If you have types, add `npm run typecheck` too",
-    "Configure PRs so failing checks block merge",
   ],
   noTestFrameworkTitle: "No automated tests yet",
   noTestFrameworkHint:

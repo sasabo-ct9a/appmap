@@ -951,6 +951,25 @@ function VerdictIcon({ verdict }: { verdict: Verdict }) {
       </svg>
     );
   }
+  if (verdict === "unknown") {
+    // 未完了/判定不能:? 付きの円。ready の盾チェックと視覚的に明確に区別する
+    // (Codex round 15 Low:unknown なのに OK に見える問題)。
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={stroke}
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="w-6 h-6"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="M9.5 9.5 A2.5 2.5 0 1 1 12 12.5 V14" />
+        <circle cx="12" cy="17" r="0.6" fill={stroke} />
+      </svg>
+    );
+  }
   // ready:shield check
   return (
     <svg

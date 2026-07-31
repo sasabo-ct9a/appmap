@@ -184,7 +184,7 @@ describe("computeOverallAssessment", () => {
   it("returns 'unknown' when scan ok but coverage was truncated", () => {
     const assessment = computeOverallAssessment([], "ja", "ok", true);
     expect(assessment.verdict).toBe("unknown");
-    expect(assessment.summary).toContain("打ち切り");
+    expect(assessment.summary).toContain("未走査");
   });
 
   it("returns 'ready' only when scan ok AND full coverage AND no findings", () => {
