@@ -1822,7 +1822,14 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
             //   コメント行でも検出する:コメントアウトされた本物のキー(`// old key: ghp_...`)は
             //   実運用では普通に漏洩なので見逃さない。README の短い例示は is_plausible_secret_hit
             //   が本体長/引用符/左境界で落とす(Codex round 15 Medium)。
+            //   ただし接続文字列(scheme://)だけはコメント行では検出しない。DB ライブラリの
+            //   説明で `postgres://user:pass@host` のような例示が普遍的で、コメントで拾うと
+            //   誤検出が多すぎる(本物の接続文字列漏洩は実コードにある)。既知トークン接頭辞は
+            //   例示が稀なのでコメント行でも維持する。
             for (needle, kind) in secret_needles {
+                if is_commentish && needle.ends_with("://") {
+                    continue;
+                }
                 if raw_line.contains(needle) && is_plausible_secret_hit(raw_line, needle) {
                     secrets.push(ScanHit {
                         file: rel.clone(),
