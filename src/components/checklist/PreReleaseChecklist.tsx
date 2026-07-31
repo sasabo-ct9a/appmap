@@ -235,8 +235,8 @@ function PreReleaseChecklist({
     : "This is a preview using sample data — not real findings. Analyze a folder to run the actual diagnosis.";
   const scannedNote = (n: number, truncated: boolean) =>
     isJa
-      ? `対象ファイル ${n} 件${truncated ? "(200 件で打切り)" : ""}を検査済み`
-      : `${n} files scanned${truncated ? " (capped at 200)" : ""}`;
+      ? `対象ファイル ${n} 件を検査済み${truncated ? "(プロジェクトが大きく一部は未走査)" : ""}`
+      : `${n} files scanned${truncated ? " (large project — some files not scanned)" : ""}`;
   // v0.1.9:このチェックが実際に何を見ているかの一覧(折り畳み)
   const scopeTitle = isJa
     ? "このチェックで確認していること"

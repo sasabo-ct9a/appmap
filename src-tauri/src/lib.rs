@@ -1491,13 +1491,15 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     ];
     // cs は Unity/.NET 向け。secret/TODO は言語非依存で効く(console.log 検出は JS 用の
     // ままなので C# には出ない=誤検出も出ない)。
-    // v0.1.10(Codex 指摘 Medium #6 対応):
-    //   - MAX_SCAN_FILES:ソース内容を読む上限(現状値を維持、パフォーマンス保護)
+    //   - MAX_SCAN_FILES:ソース内容を読む上限。
+    //     200 は低すぎて、少し大きめのプロジェクトで常に「未完了(打切り)」になり
+    //     "コード検査は完了していません" が出続けていた。実際の非エンジニアのアプリを
+    //     ほぼ全部読み切れるよう 2000 に引き上げる(小さいテキストファイルなら数千件の
+    //     読み込み + regex でも spawn_blocking 上で 1〜2 秒。極端に大きいツリーは
+    //     MAX_WALK_FILES/MAX_WALK_VISITS が上流で止める)。
     //   - MAX_WALK_FILES:ファイル名リストの上限(test framework/test file 検出は
-    //     名前だけ見るので大きめに)
-    //   分離することで monorepo で source が 200 件超えても test framework は
-    //   落とさない。
-    const MAX_SCAN_FILES: usize = 200;
+    //     名前だけ見るので大きめに)。source が cap を超えても test framework は落とさない。
+    const MAX_SCAN_FILES: usize = 2000;
     const MAX_WALK_FILES: usize = 10_000;
     // 訪問(stat)エントリ数の上限。既知の巨大キャッシュは is_skippable_dir で除外するが、
     // 未知の巨大ツリーに対する保険。この数に達したら partial 扱いで打ち切る。
@@ -1782,12 +1784,17 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         .take(MAX_SCAN_FILES)
         .collect();
     for path in content_targets {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            // 読めなかった対象(権限 / 非 UTF-8 バイナリ)は「未走査」扱いにして
-            // partial(unknown)へ倒す。素通りで ready に至り、読めない所の secret を
-            // 見逃す false-ready を防ぐ。
-            files_truncated = true;
-            continue;
+        // read_to_string は非 UTF-8(Shift-JIS/UTF-16 の .cs 等、日本語 Windows で普通に
+        // 起こる)で失敗する。それを「未走査=未完了」に数えると、実際は読める内容まで
+        // partial 扱いになる。bytes で読んで from_utf8_lossy にすれば文字コードに関係なく
+        // 走査でき、ASCII 部分(変数名 / console.log / TODO / secret 接頭辞)は保たれる。
+        // 本当に読めない(権限等)場合だけ未走査扱いにする。
+        let content = match std::fs::read(&path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(_) => {
+                files_truncated = true;
+                continue;
+            }
         };
         files_scanned += 1;
         let rel = path.strip_prefix(&folder_path).unwrap_or(&path)

@@ -852,7 +852,7 @@ const JA: Copy = {
   verdictUnknownUnavailableSummary:
     "コードスキャンがまだ実行されていません。フォルダを選ぶとスキャンが自動的に走ります。",
   verdictUnknownPartialSummary:
-    "対象ファイルが多すぎて 200 件で打ち切りました。優先度の高いディレクトリは先にスキャンしていますが、残りの部分は見れていません。「明らかな抜けなし」とは断定できない状態です。",
+    "プロジェクトが大きく、一部のファイルまでは見ていません。優先度の高いディレクトリを先にスキャンしていますが、残りは未走査です。そのため「明らかな抜けなし」とは断定できません(見た範囲では上の項目のとおりです)。",
   verdictUnknownSampleSummary:
     "サンプルデータを表示中です。実際のフォルダをまだスキャンしていないので、結論(準備 OK / 修正必要)は出せません。フォルダを選ぶと本番診断が走ります。",
   overallHeading: "全体評価",
@@ -1026,7 +1026,7 @@ const EN: Copy = {
   verdictUnknownUnavailableSummary:
     "The code scan has not run yet. Pick a folder and the scan will start automatically.",
   verdictUnknownPartialSummary:
-    "Too many files — scan was truncated at 200. Priority directories were scanned first, but the rest was skipped. Cannot conclude \"no gaps found\".",
+    "The project is large, so some files weren't inspected. Priority directories were scanned first, but the rest was skipped, so \"no gaps found\" can't be concluded (what was scanned is shown above).",
   verdictUnknownSampleSummary:
     "Showing sample data. No real folder has been scanned yet, so no verdict (ready / issues to fix) can be given. Pick a folder to run the real diagnosis.",
   overallHeading: "Overall assessment",
