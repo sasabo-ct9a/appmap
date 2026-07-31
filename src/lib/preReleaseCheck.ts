@@ -690,7 +690,7 @@ const JA: Copy = {
   ],
   noTestFrameworkTitle: "自動テストがまだありません",
   noTestFrameworkHint:
-    "自動テストとは、プログラムが「アプリが壊れていないか」を毎回自動で確かめてくれる仕組みです。今は手で触って確認できていれば大丈夫ですが、画面や機能が増えると手動だけでは追いつかなくなります。まずは「主要な画面がちゃんと開くか」を確かめる 1 件だけでも用意しておくと安心です(責めているわけではありません)。",
+    "自動テストとは、プログラムが「アプリが壊れていないか」を毎回自動で確かめてくれる仕組みです。今は手で触って確認できていれば大丈夫ですが、画面や機能が増えると手動だけでは追いつかなくなります。まずは「主要な画面がちゃんと開くか」を確かめる 1 件だけでも用意しておくと安心です。",
   noTestFrameworkFix: (stack) => {
     switch (stack) {
       case "node":
@@ -825,7 +825,7 @@ const EN: Copy = {
   ],
   noTestFrameworkTitle: "No automated tests yet",
   noTestFrameworkHint:
-    "Automated tests let a program check, every time, that your app hasn't broken. Manual clicking is fine for now, but as screens and features grow it gets hard to keep up. Even one test that confirms your main screen loads is a good start — this isn't a scolding.",
+    "Automated tests let a program check, every time, that your app hasn't broken. Manual clicking is fine for now, but as screens and features grow it gets hard to keep up. Even one test that confirms your main screen loads is a good start.",
   noTestFrameworkFix: (stack) => {
     switch (stack) {
       case "node":
