@@ -25,8 +25,11 @@ fn is_skippable_dir(name: &str) -> bool {
         "venv", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",
         // Rust / mobile / その他パッケージキャッシュ
         "target", "pods", ".gradle", ".dart_tool",
-        // Unity / .NET(巨大キャッシュ・生成物)
-        "library", "temp", "logs", "obj", "bin", "builds", "memorycaptures",
+        // Unity / .NET の巨大キャッシュ・生成物のみ。
+        // temp/logs/bin は通常プロジェクトで実コードを含みうる(src/temp/, tools/bin/ 等)ため
+        // 外した。誤って未走査のまま Ready に至るのを防ぐ。Unity の Temp/Logs は小さいので
+        // 走査コストも問題ない。library/obj/builds は生成物専用なので残す(Codex round 15 Medium)。
+        "library", "obj", "builds", "memorycaptures",
     ];
     let lower = name.to_lowercase();
     SKIP.contains(&lower.as_str())
@@ -1748,6 +1751,12 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         }
 
         'outer: for pkg_json in &pkg_paths {
+            // Unity パッケージ(UPM)の package.json は除外。Windows では `packages` が Unity の
+            // `Packages` に当たり、UPM 配下の package.json に "jest" 等があると
+            // 「Jest 導入済みだがテスト無し」と誤表示する(Codex round 15 Medium)。
+            if let Some(parent) = pkg_json.parent() {
+                if package_json_is_unity(parent) { continue; }
+            }
             let Ok(content) = std::fs::read_to_string(pkg_json) else { continue };
             for (needle, name) in candidates {
                 if content.contains(needle) {
@@ -1790,7 +1799,7 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         // 走査でき、ASCII 部分(変数名 / console.log / TODO / secret 接頭辞)は保たれる。
         // 本当に読めない(権限等)場合だけ未走査扱いにする。
         let content = match std::fs::read(&path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Ok(bytes) => decode_scan_bytes(&bytes),
             Err(_) => {
                 files_truncated = true;
                 continue;
@@ -1810,17 +1819,18 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
 
             // 1) シークレットのプレフィックス(自身のパターン定義や説明文を弾く強化版)。
             //   これが findings の secret 検出の唯一の経路(既知トークン + 接続文字列)。
-            if !is_commentish {
-                for (needle, kind) in secret_needles {
-                    if raw_line.contains(needle) && is_plausible_secret_hit(raw_line, needle) {
-                        secrets.push(ScanHit {
-                            file: rel.clone(),
-                            line: line_num,
-                            snippet: mask_snippet(raw_line),
-                            kind: kind.to_string(),
-                        });
-                        break;
-                    }
+            //   コメント行でも検出する:コメントアウトされた本物のキー(`// old key: ghp_...`)は
+            //   実運用では普通に漏洩なので見逃さない。README の短い例示は is_plausible_secret_hit
+            //   が本体長/引用符/左境界で落とす(Codex round 15 Medium)。
+            for (needle, kind) in secret_needles {
+                if raw_line.contains(needle) && is_plausible_secret_hit(raw_line, needle) {
+                    secrets.push(ScanHit {
+                        file: rel.clone(),
+                        line: line_num,
+                        snippet: mask_snippet(raw_line),
+                        kind: kind.to_string(),
+                    });
+                    break;
                 }
             }
 
@@ -3006,11 +3016,70 @@ fn is_inside_string_literal(line: &str, idx: usize) -> bool {
 
 /// 値そのものを晒さないための伏せ字化。
 /// クオート内の 8 字以上の値は "..." に置換する。
+/// ファイルの生バイトを走査用文字列にデコードする。UTF-8 に加え UTF-16(BOM 付き)と
+/// BOM 無し UTF-16LE(推定)を扱う。日本語 Windows の一部ツールが .cs 等を UTF-16 で保存
+/// することがあり、from_utf8_lossy だと ASCII が `A\0K\0…` となって needle 検出が全滅する
+/// (Codex round 15 Medium)。
+fn decode_scan_bytes(bytes: &[u8]) -> String {
+    // BOM 判定
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let u: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        return String::from_utf16_lossy(&u);
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let u: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        return String::from_utf16_lossy(&u);
+    }
+    // BOM 無し UTF-16LE 推定:ASCII テキストなら奇数バイト位置が NUL になる。
+    //   先頭最大 512 バイトで奇数位置 NUL が 6 割以上ならそう見なす(バイナリ誤判定を避けるため高めに)。
+    let sample = &bytes[..bytes.len().min(512)];
+    if sample.len() >= 8 {
+        let pairs = sample.len() / 2;
+        let odd_nuls = sample.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+        if pairs > 0 && odd_nuls * 100 / pairs >= 60 {
+            let u: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            return String::from_utf16_lossy(&u);
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// 既知トークン(SECRET_NEEDLES)が行に含まれていたら、変数名・引用符に関係なく
+/// トークン本体(接頭辞 + 続くキー文字)を伏字化する。
+///
+/// なぜ必要か:mask_bare_assignments は大文字キーしか伏せないため、
+/// `github_token=ghp_xxxx`(小文字 snake_case のクオート無し代入)は検出されるのに
+/// 値が平文でスニペットに残る漏洩があった(Codex round 15 High)。検出した秘密を
+/// 画面に晒さないため、既知接頭辞は無条件でトークンごと伏せる。
+fn mask_known_tokens(line: &str) -> String {
+    let mut out = line.to_string();
+    for (needle, _) in SECRET_NEEDLES {
+        // PEM / URL 接頭辞は別マスカ(mask_url_credentials 等)が扱う。ここは短い接頭辞トークンのみ。
+        if needle.starts_with("-----BEGIN") || needle.ends_with("://") {
+            continue;
+        }
+        // 同一行に複数出現しても全部潰す。置換文字列に needle は含まれないので無限ループしない。
+        while let Some(pos) = out.find(needle) {
+            let after = &out[pos + needle.len()..];
+            let body_len: usize = after
+                .chars()
+                .take_while(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '+' | '=' | '.')
+                })
+                .map(|c| c.len_utf8())
+                .sum();
+            out.replace_range(pos..pos + needle.len() + body_len, "*** (伏字) ***");
+        }
+    }
+    out
+}
+
 fn mask_snippet(line: &str) -> String {
     let quoted_masked = mask_quoted_values(line);
     let url_masked = mask_url_credentials(&quoted_masked);
     let bare_masked = mask_bare_assignments(&url_masked);
-    bare_masked.chars().take(200).collect()
+    let token_masked = mask_known_tokens(&bare_masked);
+    token_masked.chars().take(200).collect()
 }
 
 /// クオート内(`"..."` / `'...'`)の 8 文字以上の値を伏せ字化する。

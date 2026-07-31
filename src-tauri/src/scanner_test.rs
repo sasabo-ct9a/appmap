@@ -146,22 +146,53 @@ fn test_file_path_recognizes_csharp() {
 // ─── is_skippable_dir(Unity/.NET 巨大キャッシュ除外)──────────
 #[test]
 fn skippable_dir_covers_unity_and_dotnet() {
-    // Unity/.NET のキャッシュを大文字小文字問わず除外(3GB Library でタイムアウトの回帰)
+    // Unity/.NET の生成物専用キャッシュは大文字小文字問わず除外(3GB Library の回帰)
     assert!(is_skippable_dir("Library"));
     assert!(is_skippable_dir("library"));
-    assert!(is_skippable_dir("Temp"));
-    assert!(is_skippable_dir("Logs"));
     assert!(is_skippable_dir("obj"));
-    assert!(is_skippable_dir("bin"));
     // 従来の除外も維持
     assert!(is_skippable_dir("node_modules"));
     assert!(is_skippable_dir(".git"));
     assert!(is_skippable_dir("target"));
+    // temp/logs/bin は実コードを含みうるので除外しない(Codex round 15 Medium)
+    assert!(!is_skippable_dir("temp"));
+    assert!(!is_skippable_dir("Temp"));
+    assert!(!is_skippable_dir("logs"));
+    assert!(!is_skippable_dir("bin"));
     // ユーザーのコードは除外しない
     assert!(!is_skippable_dir("src"));
     assert!(!is_skippable_dir("Assets"));
     assert!(!is_skippable_dir("app"));
     assert!(!is_skippable_dir("components"));
+}
+
+// ─── mask_snippet(既知トークンの平文漏れ回帰:Codex round 15 High)────
+#[test]
+fn mask_snippet_hides_lowercase_bare_tokens() {
+    // 小文字 snake_case のクオート無し代入でもトークン値を伏せる(平文漏れの回帰)
+    let masked = mask_snippet("github_token=ghp_RtY7bQmz9WpKvN3xLsK5abcd");
+    assert!(!masked.contains("ghp_RtY7bQmz9WpKvN3xLsK5abcd"), "got: {}", masked);
+    let masked2 = mask_snippet("slack_token: xoxb-RtY7bQmz9WpKvN3xLsK5abcd");
+    assert!(!masked2.contains("xoxb-RtY7bQmz9WpKvN3xLsK5abcd"), "got: {}", masked2);
+    // クオート付きも従来通り伏せる
+    let masked3 = mask_snippet("const k = \"sk_live_RtY7bQmz9WpKvN3xLsK5\"");
+    assert!(!masked3.contains("sk_live_RtY7bQmz9WpKvN3xLsK5"), "got: {}", masked3);
+}
+
+// ─── decode_scan_bytes(UTF-16 検出:Codex round 15 Medium)──────────
+#[test]
+fn decode_handles_utf16() {
+    // UTF-16LE(BOM 付き)を正しくデコードして needle が拾えること
+    let text = "// TODO: remove ghp_secret";
+    let mut le: Vec<u8> = vec![0xFF, 0xFE];
+    for u in text.encode_utf16() {
+        le.extend_from_slice(&u.to_le_bytes());
+    }
+    let decoded = decode_scan_bytes(&le);
+    assert!(decoded.contains("TODO"));
+    assert!(decoded.contains("ghp_secret"));
+    // 通常の UTF-8 はそのまま
+    assert_eq!(decode_scan_bytes(b"hello world"), "hello world");
 }
 
 // ─── trailing_identifier(UTF-8 境界 panic 回帰)────────────────
