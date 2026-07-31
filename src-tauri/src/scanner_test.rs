@@ -524,6 +524,20 @@ fn collect_env_files_signals_truncation() {
     assert_eq!(out2.len(), 1);
 }
 
+// ─── is_private_key_file_name(鍵ファイルを走査対象に:Codex round 20 High)──────
+#[test]
+fn private_key_file_names_are_scannable() {
+    // .pem / .key / 拡張子なし OpenSSH 鍵は内容走査対象にして PEM ヘッダ検出を効かせる
+    assert!(is_private_key_file_name("private.pem"));
+    assert!(is_private_key_file_name("server.KEY")); // 大文字も
+    assert!(is_private_key_file_name("id_rsa"));
+    assert!(is_private_key_file_name("id_ed25519"));
+    // 通常ソース・バイナリ鍵ストア(PEM ヘッダ無し)は対象外
+    assert!(!is_private_key_file_name("app.ts"));
+    assert!(!is_private_key_file_name("keystore.p12"));
+    assert!(!is_private_key_file_name("README.md"));
+}
+
 // ─── is_plausible_secret_hit(URL credential 必須)─────────────
 #[test]
 fn plausible_secret_url_needs_at_sign() {

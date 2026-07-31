@@ -1387,6 +1387,18 @@ fn is_credential_file_path(rel: &str) -> bool {
     name.contains("credentials") || name.contains("secrets")
 }
 
+/// 秘密鍵っぽいファイル名か(`.pem` / `.key` / 拡張子なしの id_rsa 等)。
+/// これらを内容走査に含めないと、SECRET_NEEDLES の PEM ヘッダが本物の鍵ファイルに
+/// 当たらず取りこぼす(Codex round 20 High)。finding 自体は PEM ヘッダ一致時のみ
+/// 出すので、ここで走査対象を広げても誤検出は増えない(.p12/.pfx 等のバイナリ鍵は
+/// PEM ヘッダを持たないので対象外)。
+fn is_private_key_file_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || matches!(lower.as_str(), "id_rsa" | "id_ed25519" | "id_ecdsa" | "id_dsa")
+}
+
 /// v0.1.8:リリース前チェックのコードスキャン結果。
 /// LLM を呼ばずローカルで regex 相当の文字列マッチだけ実行。
 #[derive(serde::Serialize)]
@@ -1635,7 +1647,10 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                     }
                 } else {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                    if include_exts.contains(&ext.as_str()) {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    // 拡張子が対象、または秘密鍵ファイル名(.pem/.key/id_rsa 等)なら内容走査に含める。
+                    // 後者を外すと PEM ヘッダ検出が本物の鍵ファイルに当たらない(Codex round 20 High)。
+                    if include_exts.contains(&ext.as_str()) || is_private_key_file_name(name) {
                         if files.len() >= max_files {
                             had_more = true;
                             break 'outer;
