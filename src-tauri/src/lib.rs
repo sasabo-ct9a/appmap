@@ -2691,136 +2691,55 @@ fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize,
     }
 }
 
-/// .gitignore のパターン 1 行が、指定のファイル名にマッチするかを判定する(最小 glob 実装)。
+/// env ファイル(root 相対 POSIX パス)が `.gitignore` で無視されるかを判定する。
 ///
-/// サポート:
-///   - `*` ワイルドカード(任意文字列にマッチ、`/` も含む・シンプル)
-///   - 先頭 `/` 除去(root-relative パターン扱い)
-///   - 先頭 `**/` 除去(サブディレクトリ再帰、file 名判定なので実質同義)
-///   - 末尾 `/` 除去(ディレクトリ指定は今回無視)
-/// 制限:
-///   - `?` は非対応(実運用でほぼ使われない)
-///   - `[abc]` クラスは非対応
-///   - 否定ルール `!` は呼び出し側で事前に除外している前提
-/// env ファイル(ルート相対 POSIX パス)が、ルートからそのファイルの親までの
-/// 各階層の `.gitignore` のいずれかで無視されるかを判定する。
-///
-/// git は階層 `.gitignore` を持ち、深い方が優先・各ファイル内は last-match-wins。
-/// ここでは浅い→深いの順に評価し、最後に一致したルールの符号を採る(近似)。
-/// - 非固定パターン(`/` を含まない `.env` / `*.env`)はファイル名に任意の深さでマッチ。
-/// - 固定パターン(先頭/中間に `/`。`/.env` や `apps/.env`)はその `.gitignore` からの
-///   相対パスにのみマッチ(root の `/.env` は subdir の .env を保護しない)。
-/// - ディレクトリ丸ごと ignore(`deploy/` 等)は祖先ディレクトリに一致したら適用。
+/// v0.1.33(Codex round 17-18):手書きの近似 glob を廃止し、ripgrep と同じ `ignore`
+/// クレートに委譲する。末尾 `/`(ディレクトリ専用)・`**`・否定 `!`・アンカリングを
+/// すべて Git 互換で処理でき、手書き実装で繰り返し出ていたエッジケースの取りこぼし/
+/// 誤検出を恒久的に無くす。root からファイルの親までの各 `.gitignore` を深い方から
+/// 評価し(Git は対象に近い `.gitignore` が優先)、最初に確定した結果を採る。
 fn env_file_is_gitignored(root: &Path, rel_path: &str) -> bool {
+    use ignore::gitignore::GitignoreBuilder;
+    use ignore::Match;
+
     let parts: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() {
         return false;
     }
-    let file_name = parts[parts.len() - 1];
-    let mut ignored = false;
-    // depth = このファイルまでのディレクトリ段数。0 = ルート .gitignore。
-    for depth in 0..parts.len() {
+    // 深い階層の .gitignore から順に評価(Git は対象に近い .gitignore が優先)。
+    for depth in (0..parts.len()).rev() {
         let mut gi_dir = root.to_path_buf();
         for p in &parts[..depth] {
             gi_dir.push(p);
         }
-        let Ok(content) = std::fs::read_to_string(gi_dir.join(".gitignore")) else {
-            continue;
-        };
-        let rel_from_here = parts[depth..].join("/");
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let Some(first) = trimmed.split_whitespace().next() else { continue };
-            let (pattern, is_negation) = match first.strip_prefix('!') {
-                Some(s) => (s, true),
-                None => (first, false),
-            };
-            // git のアンカリング規則:パターンの先頭または中間に `/` があれば、その
-            // `.gitignore` の階層に固定(anchored)される。先頭 `**/` は「全階層」で非固定、
-            // 末尾のみの `/`(ディレクトリ指定)は固定扱いにしない。
-            //   例:root の `/.env` は root/.env だけ。`apps/web/.env` は対象外。
-            //       非固定の `.env` / `*.env` は任意の深さのファイル名にマッチ。
-            // 旧実装はこれを無視して file_name / 任意祖先セグメントにも照合していたため、
-            // root の `/.env` が subdir の .env まで「保護済み」にして漏洩を見逃していた
-            //(Codex round 17 High)。
-            let core = pattern.trim_end_matches('/');
-            let core_body = core.strip_prefix("**/").unwrap_or(core);
-            let anchored = core_body.contains('/');
-
-            // ディレクトリ丸ごと ignore(`deploy/` 等)の祖先一致判定。
-            let pat_dir = pattern.trim_start_matches('/').trim_end_matches('/');
-            let ancestors = &parts[depth..parts.len().saturating_sub(1)];
-            let dir_prefix_match = if anchored {
-                // 固定ディレクトリパターン:gi_dir から見た祖先パスの接頭辞に完全一致する時だけ。
-                //   `apps/secrets` は apps/secrets/... のみ。任意階層の `secrets` にはマッチしない。
-                let pat_segs: Vec<&str> =
-                    pat_dir.split('/').filter(|s| !s.is_empty()).collect();
-                !pat_segs.is_empty()
-                    && ancestors.len() >= pat_segs.len()
-                    && ancestors[..pat_segs.len()] == pat_segs[..]
-            } else {
-                // 非固定:任意階層のディレクトリ名に一致(git は非固定ディレクトリを全階層で無視)。
-                ancestors.iter().any(|seg| *seg == pat_dir)
-            };
-
-            // ファイル名(任意の深さ)への照合は非固定パターンのみ許す。
-            let name_match = !anchored && gitignore_pattern_matches(pattern, file_name);
-            // rel_from_here(この .gitignore からの相対パス)への照合は固定・非固定とも有効。
-            let rel_match = gitignore_pattern_matches(pattern, &rel_from_here);
-
-            if dir_prefix_match || name_match || rel_match {
-                ignored = !is_negation;
-            }
-        }
-    }
-    ignored
-}
-
-fn gitignore_pattern_matches(pattern: &str, filename: &str) -> bool {
-    let mut p = pattern;
-    p = p.strip_prefix('/').unwrap_or(p);
-    p = p.strip_prefix("**/").unwrap_or(p);
-    p = p.strip_suffix('/').unwrap_or(p);
-
-    if p == filename {
-        return true;
-    }
-    // `*` を含まないなら完全一致以外はマッチしない
-    if !p.contains('*') {
-        return false;
-    }
-
-    // `*` で分割して順序どおり出現するか確認
-    let parts: Vec<&str> = p.split('*').collect();
-    let mut pos = 0usize;
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            // 連続 * / 先頭 * / 末尾 * のダミー要素はスキップ
+        let gitignore_path = gi_dir.join(".gitignore");
+        if !gitignore_path.is_file() {
             continue;
         }
-        if i == 0 {
-            // 最初の非空 part は先頭マッチ
-            if !filename[pos..].starts_with(part) {
-                return false;
-            }
-            pos += part.len();
-        } else if i == parts.len() - 1 {
-            // 最後の非空 part は末尾マッチ(pos 以降が part で終わるか)
-            if !filename[pos..].ends_with(part) {
-                return false;
-            }
-        } else {
-            // 中間 part は pos 以降のどこかに出現
-            match filename[pos..].find(part) {
-                Some(idx) => pos += idx + part.len(),
-                None => return false,
-            }
+        let mut builder = GitignoreBuilder::new(&gi_dir);
+        // add はパースエラー時に Some(err) を返す。その階層は skip する。
+        if builder.add(&gitignore_path).is_some() {
+            continue;
+        }
+        let Ok(gi) = builder.build() else { continue };
+        let sub = &parts[depth..];
+        // git ルール:親ディレクトリが除外されていると、子は `!child` でも再 include できない。
+        //   この .gitignore から見た各祖先ディレクトリを is_dir=true で確認し、ignore されて
+        //   いれば即 ignored 確定(ファイル側の whitelist より優先)。
+        let ancestor_ignored = (1..sub.len()).any(|k| {
+            matches!(gi.matched(sub[..k].join("/"), true), Match::Ignore(_))
+        });
+        if ancestor_ignored {
+            return true;
+        }
+        // 祖先が除外されていなければ、ファイル自身の ignore/whitelist を採る。
+        match gi.matched(sub.join("/"), false) {
+            Match::Ignore(_) => return true,
+            Match::Whitelist(_) => return false,
+            Match::None => {}
         }
     }
-    true
+    false
 }
 
 /// v0.1.8:プレフィックス マッチが「実際の秘密キー」らしいか判定する。

@@ -33,6 +33,10 @@ tokio = { version = "1", features = ["full"] }
 #   notify-debouncer-mini: 保存時の連続イベントを 500ms でデバウンス
 notify = "6"
 notify-debouncer-mini = "0.4"
+# v0.1.33 .gitignore 判定:手書き近似 glob だと末尾 `/`・`**`・否定 `!`・アンカリングで
+#   エッジケースの取りこぼし/誤検出が繰り返し出た(Codex round 17-18)。ripgrep と同じ
+#   `ignore` クレートに委譲して Git 完全互換にし、この種のバグを恒久的に無くす。
+ignore = "0.4"
 
 [dev-dependencies]
 # fixture 化した実 FS を作って detect_project_meta などをテストする用途。

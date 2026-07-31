@@ -401,24 +401,6 @@ fn todo_owner_only_kept() {
     assert!(is_tag_in_real_comment("// TODO(@alice): implement", "TODO"));
 }
 
-// ─── gitignore_pattern_matches ─────────────────────────────────
-#[test]
-fn gitignore_exact_match() {
-    assert!(gitignore_pattern_matches(".env", ".env"));
-}
-
-#[test]
-fn gitignore_wildcard_star() {
-    assert!(gitignore_pattern_matches(".env*", ".env.local"));
-    assert!(gitignore_pattern_matches(".env.*", ".env.local"));
-    assert!(!gitignore_pattern_matches(".env.*", ".env"));
-}
-
-#[test]
-fn gitignore_globstar_prefix() {
-    assert!(gitignore_pattern_matches("**/.env", ".env"));
-}
-
 // ─── env_file_is_gitignored(アンカリング:Codex round 17 High)──────
 // root の固定 `/.env` は root/.env だけを保護する。subdir の .env まで保護扱いにすると
 // 未保護 subdir .env の漏洩を見逃す。逆に非固定 `.env` は全階層を保護する(こちらを
@@ -463,6 +445,39 @@ fn gitignore_anchored_dir_does_not_cover_deep_same_name() {
     assert!(!env_file_is_gitignored(root, "apps/secrets/.env")); // 固定なので深い secrets は対象外
     std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
     assert!(env_file_is_gitignored(root, "packages/ui/node_modules/.env")); // 非固定ディレクトリは全階層
+}
+
+// ─── env_file_is_gitignored(ignore クレート委譲:Codex round 18)──────
+// 手書き近似では扱えなかった Git 仕様(末尾 / のディレクトリ専用・**・否定と親除外)を
+// ignore クレートで正しく判定できることを固定する。
+#[test]
+fn gitignore_trailing_slash_is_dir_only() {
+    // `.env/` はディレクトリ専用パターン。`.env` ファイルは Git では無視されない
+    //(旧実装は末尾 / を剥がして .env ファイルを保護扱いし、漏洩を見逃していた)。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), ".env/\n").unwrap();
+    assert!(!env_file_is_gitignored(root, ".env"));
+}
+
+#[test]
+fn gitignore_globstar_middle_dir() {
+    // `**/secrets/**` は任意階層の secrets 以下を無視。apps/secrets/.env は保護済み
+    //(旧実装は先頭一致扱いでマッチせず、保護済みを未保護=誤検出にしていた)。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), "**/secrets/**\n").unwrap();
+    assert!(env_file_is_gitignored(root, "apps/secrets/.env"));
+}
+
+#[test]
+fn gitignore_negation_cannot_reinclude_under_ignored_dir() {
+    // 親 secrets/ が除外されていると !secrets/.env でも Git は再 include できない。
+    // よって secrets/.env は保護済みのまま(旧実装は last-match-wins で未保護=誤検出)。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), "secrets/\n!secrets/.env\n").unwrap();
+    assert!(env_file_is_gitignored(root, "secrets/.env"));
 }
 
 // ─── is_plausible_secret_hit(URL credential 必須)─────────────
