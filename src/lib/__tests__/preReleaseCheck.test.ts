@@ -124,7 +124,9 @@ describe("buildFindings", () => {
     expect(secret?.count).toBe(300);
   });
 
-  it("adds release-gate findings for missing infra", () => {
+  it("never emits Node/DevOps release-gate findings (scope charter, CLAUDE.md §6.5)", () => {
+    // build/test/typecheck script・lockfile・CI は対象外に決めた。manifest が全部
+    // 「欠落」でも、これらの gate finding は一切出さない。将来うっかり復活したらここで落ちる。
     const findings = buildFindings({
       screens: EMPTY_SCREENS,
       scan: cleanScan({
@@ -155,93 +157,15 @@ describe("buildFindings", () => {
       language: "ja",
     });
     const ids = findings.map((f) => f.id);
-    expect(ids).toContain("no-build-script");
-    expect(ids).toContain("no-test-script");
-    expect(ids).toContain("no-typecheck-script");
-    expect(ids).toContain("no-lockfile");
-    expect(ids).toContain("no-ci-workflow");
-  });
-
-  it("does not add Node-specific gates for Rust projects", () => {
-    const findings = buildFindings({
-      screens: EMPTY_SCREENS,
-      scan: cleanScan({
-        project_meta: {
-          project_type: "rust",
-          project_types: ["rust"],
-          has_build_script: true,
-          has_test_script: true,
-          has_typecheck_script: true,
-          has_lockfile: true, // Cargo.lock
-          has_tsconfig_file: false,
-          is_typescript_project: false,
-          has_ci_workflow: true,
-          manifests: [
-            {
-              manifest_type: "rust",
-              path: "Cargo.toml",
-              has_build: true,
-              has_test: true,
-              has_typecheck: true,
-              has_lockfile: true,
-              has_tsconfig_file: false,
-              is_typescript_project: false,
-            },
-          ],
-        },
-      }),
-      language: "ja",
-    });
-    const ids = findings.map((f) => f.id);
-    expect(ids).not.toContain("no-build-script");
-    expect(ids).not.toContain("no-typecheck-script");
-  });
-
-  it("Tauri layout (root package.json + src-tauri/Cargo.toml) emits gates for both", () => {
-    const findings = buildFindings({
-      screens: EMPTY_SCREENS,
-      scan: cleanScan({
-        project_meta: {
-          project_type: "node",
-          project_types: ["node", "rust"],
-          has_build_script: true,
-          has_test_script: true,
-          has_typecheck_script: true,
-          has_lockfile: true,
-          has_tsconfig_file: true,
-          is_typescript_project: true,
-          has_ci_workflow: true,
-          manifests: [
-            {
-              manifest_type: "node",
-              path: "package.json",
-              has_build: true,
-              has_test: false, // <— missing on node side
-              has_typecheck: true,
-              has_lockfile: true,
-              has_tsconfig_file: true,
-              is_typescript_project: true,
-            },
-            {
-              manifest_type: "rust",
-              path: "src-tauri/Cargo.toml",
-              has_build: true,
-              has_test: true,
-              has_typecheck: true,
-              has_lockfile: false, // <— missing Cargo.lock
-              has_tsconfig_file: false,
-              is_typescript_project: false,
-            },
-          ],
-        },
-      }),
-      language: "ja",
-    });
-    // node の test 欠落 + rust の lockfile 欠落、両方拾える
-    const missingTest = findings.find((f) => f.id === "no-test-script");
-    expect(missingTest?.examples?.[0].file).toBe("package.json");
-    const missingLock = findings.find((f) => f.id === "no-lockfile");
-    expect(missingLock?.examples?.[0].file).toBe("src-tauri/Cargo.toml");
+    for (const gate of [
+      "no-build-script",
+      "no-test-script",
+      "no-typecheck-script",
+      "no-lockfile",
+      "no-ci-workflow",
+    ]) {
+      expect(ids).not.toContain(gate);
+    }
   });
 });
 

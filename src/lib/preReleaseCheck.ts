@@ -522,89 +522,10 @@ export function buildFindings({
     });
   }
 
-  // ── 運用 gates:TODO 件数より重要な「本番前にあるべきインフラ」の欠落。
-  //   manifest 単位で見る(monorepo / Tauri 対応):
-  //     - Node manifest ごとに build/test script を確認
-  //     - lockfile は manifest 単位で確認(親 package.json に子 lockfile あり など)
-  //     - CI ワークフローと tsconfig はプロジェクト全体で 1 回だけ判定
-  //   同種の finding が複数 manifest で出る場合は 1 件にまとめ、影響 path を列挙する。
-  const meta = scan?.project_meta;
-  if (meta) {
-    const nodeManifests = meta.manifests.filter((m) => m.manifest_type === "node");
-    const missingBuild = nodeManifests.filter((m) => !m.has_build).map((m) => m.path);
-    const missingTest = nodeManifests.filter((m) => !m.has_test).map((m) => m.path);
-    const missingLock = meta.manifests.filter((m) => !m.has_lockfile).map((m) => m.path);
-
-    if (missingBuild.length > 0) {
-      findings.push({
-        id: "no-build-script",
-        severity: "medium",
-        category: "release-gates",
-        title: t.noBuildScriptTitle,
-        hint: t.noBuildScriptHint,
-        fixSteps: t.noBuildScriptFix,
-        examples: missingBuild.map((path) => ({ file: path })),
-        count: missingBuild.length,
-      });
-    }
-    if (missingTest.length > 0) {
-      findings.push({
-        id: "no-test-script",
-        severity: "medium",
-        category: "release-gates",
-        title: t.noTestScriptTitle,
-        hint: t.noTestScriptHint,
-        fixSteps: t.noTestScriptFix,
-        examples: missingTest.map((path) => ({ file: path })),
-        count: missingTest.length,
-      });
-    }
-    // typecheck script は per-manifest 判定にする(root だけの has_typecheck_script を見ると
-    //   root は OK、apps/web が欠落、のような monorepo 事情を落とす)。
-    //   TS project 判定は is_typescript_project(tsconfig OR typescript 依存)を採用。
-    //   純粋な tsconfig ファイル欠落は別 gate で扱う(has_tsconfig_file)。
-    const tsManifestsMissingTypecheck = nodeManifests
-      .filter((m) => m.is_typescript_project && !m.has_typecheck)
-      .map((m) => m.path);
-    if (tsManifestsMissingTypecheck.length > 0) {
-      findings.push({
-        id: "no-typecheck-script",
-        // TS プロジェクトで型チェックコマンドが無い = 型エラーを機械的に検出できない。
-        // これを low(Ready 許容)にすると「型崩れのまま出荷」を見逃すので medium。
-        severity: "medium",
-        category: "release-gates",
-        title: t.noTypecheckScriptTitle,
-        hint: t.noTypecheckScriptHint,
-        fixSteps: t.noTypecheckScriptFix,
-        examples: tsManifestsMissingTypecheck.map((path) => ({ file: path })),
-        count: tsManifestsMissingTypecheck.length,
-      });
-    }
-    if (missingLock.length > 0) {
-      findings.push({
-        id: "no-lockfile",
-        severity: "medium",
-        category: "release-gates",
-        title: t.noLockfileTitle,
-        hint: t.noLockfileHint,
-        fixSteps: t.noLockfileFix,
-        examples: missingLock.map((path) => ({ file: path })),
-        count: missingLock.length,
-      });
-    }
-    if (meta.manifests.length > 0 && !meta.has_ci_workflow) {
-      findings.push({
-        id: "no-ci-workflow",
-        // CI が無い = push のたびの自動検証が人力頼み。「リリース前チェック」を
-        // 名乗る以上、build/test を人間が忘れても気づけない状態は medium にする。
-        severity: "medium",
-        category: "release-gates",
-        title: t.noCiWorkflowTitle,
-        hint: t.noCiWorkflowHint,
-        fixSteps: t.noCiWorkflowFix,
-      });
-    }
-  }
+  // ── 運用ゲート(build/test script・typecheck・lockfile・CI)は撤去した。
+  //   CLAUDE.md §6.5 スコープ憲章の判断基準に反するため:非エンジニアには専門用語で
+  //   「なぜ大事か」が伝わらず、直すのに DevOps 知識が要り、かつスタック固有(Unity/C# には
+  //   package.json も lockfile も無関係)で誤検出の温床だった。ここには追加しない。
 
   // v0.1.10 スリム化:以下 4 項目を削除(価値疑問 or 誤検知多発のため)
   //   - no-entry / multi-entry:マップから直接見える情報、finding として重複
@@ -825,9 +746,9 @@ const JA: Copy = {
     "型があるなら `npm run typecheck` も追加",
     "PR で failing check がマージブロックになるよう設定",
   ],
-  noTestFrameworkTitle: "テストフレームワークが検出できませんでした",
+  noTestFrameworkTitle: "自動テストがまだありません",
   noTestFrameworkHint:
-    "Jest / Vitest / Pytest などのテスト環境が見つかりません。本番運用するなら最低限、主要画面遷移を検証するテストを 1 つ用意することを強く推奨します。",
+    "自動テストとは、プログラムが「アプリが壊れていないか」を毎回自動で確かめてくれる仕組みです。今は手で触って確認できていれば大丈夫ですが、画面や機能が増えると手動だけでは追いつかなくなります。まずは「主要な画面がちゃんと開くか」を確かめる 1 件だけでも用意しておくと安心です(責めているわけではありません)。",
   noTestFrameworkFix: (stack) => {
     switch (stack) {
       case "node":
@@ -1000,9 +921,9 @@ const EN: Copy = {
     "If you have types, add `npm run typecheck` too",
     "Configure PRs so failing checks block merge",
   ],
-  noTestFrameworkTitle: "No test framework detected",
+  noTestFrameworkTitle: "No automated tests yet",
   noTestFrameworkHint:
-    "No Jest / Vitest / Pytest was found. We strongly recommend at least one integration test that covers the main user flow before production.",
+    "Automated tests let a program check, every time, that your app hasn't broken. Manual clicking is fine for now, but as screens and features grow it gets hard to keep up. Even one test that confirms your main screen loads is a good start — this isn't a scolding.",
   noTestFrameworkFix: (stack) => {
     switch (stack) {
       case "node":
