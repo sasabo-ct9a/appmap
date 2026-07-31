@@ -48,19 +48,6 @@ fn secret_var_name_default_prefixed_still_detected() {
     assert!(is_secret_variable_name("EXAMPLE_API_KEY"));
 }
 
-// ─── is_placeholder_value(R13-#1 値側 placeholder 判定)──────────
-#[test]
-fn placeholder_values_recognized() {
-    assert!(is_placeholder_value("your-secret-here"));
-    assert!(is_placeholder_value("changeme-please-x"));
-    assert!(is_placeholder_value("xxxxxxxxxxxxxxxx"));
-    assert!(is_placeholder_value("<your-api-key>"));
-    assert!(is_placeholder_value("0000000000000000"));
-    // 本物っぽい値は placeholder 扱いしない
-    assert!(!is_placeholder_value("sk_live_51KfooBarBaz"));
-    assert!(!is_placeholder_value("aB3xQ9zLmP2wReal"));
-}
-
 // ─── line_contains_secret(R13-#7 Q&A/localLLM mask 判定)────────
 #[test]
 fn line_secret_detection_for_masking() {
@@ -75,49 +62,6 @@ fn line_secret_detection_for_masking() {
     // 通常の UI 文言・SQL は mask しない
     assert!(!line_contains_secret("const label = \"ようこそ、ログインしてください\""));
     assert!(!line_contains_secret("SELECT * FROM users WHERE active = true"));
-}
-
-// ─── hardcoded_secret_value(コード式の誤検出回帰)────────────
-#[test]
-fn code_expression_rhs_is_not_a_secret() {
-    // dogfooding で発覚した誤検出:コードファイルのクオート無し右辺は拾わない
-    assert_eq!(hardcoded_secret_value("tokenize_var_name(lhs);", "rs"), None);
-    assert_eq!(hardcoded_secret_value("loginCompletedAt !== null;", "tsx"), None);
-    assert_eq!(hardcoded_secret_value("someVeryLongFunctionName()", "ts"), None);
-    assert_eq!(hardcoded_secret_value("anotherLongVariableName", "js"), None);
-}
-
-#[test]
-fn natural_language_value_is_not_a_secret() {
-    // i18n の UI 文言:変数名に auth/token 等が入っていても、値が自然言語なら secret でない
-    //   (AppMap 自身の authRecoveryTitle 等の誤検出回帰)
-    assert_eq!(hardcoded_secret_value("\"セッションが切れました\"", "ts"), None); // 日本語(非 ASCII)
-    assert_eq!(hardcoded_secret_value("\"再ログインしてください\"", "ts"), None);
-    assert_eq!(hardcoded_secret_value("\"Session expired, please sign in again\"", "ts"), None); // 空白入り英文
-    assert_eq!(hardcoded_secret_value("\"Your login has been recovered\"", "ts"), None);
-}
-
-#[test]
-fn real_hardcoded_secret_still_detected() {
-    // コードでも「クオート付き」の本物 secret は拾う。
-    // (テスト値は placeholder マーカー "abcdef"/"1234567890" を避けたランダム風文字列)
-    assert_eq!(
-        hardcoded_secret_value("\"sk_live_RtY7bQmz9WpKvN3xLsK5\"", "ts").as_deref(),
-        Some("sk_live_RtY7bQmz9WpKvN3xLsK5")
-    );
-    // env/config/shell のクオート無し KEY=value は本物形式なので拾う
-    assert_eq!(
-        hardcoded_secret_value("RtY7bQmz9WpKvN3xLsK5", "env").as_deref(),
-        Some("RtY7bQmz9WpKvN3xLsK5")
-    );
-    assert_eq!(
-        hardcoded_secret_value("RtY7bQmz9WpKvN3xLsK5", "sh").as_deref(),
-        Some("RtY7bQmz9WpKvN3xLsK5")
-    );
-    // env 参照・placeholder・短い値は拾わない
-    assert_eq!(hardcoded_secret_value("process.env.API_KEY", "ts"), None);
-    assert_eq!(hardcoded_secret_value("\"your-secret-here\"", "ts"), None);
-    assert_eq!(hardcoded_secret_value("\"short\"", "ts"), None);
 }
 
 // ─── package_json_is_unity(Unity パッケージ除外)──────────────

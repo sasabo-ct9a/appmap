@@ -1792,8 +1792,6 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         files_scanned += 1;
         let rel = path.strip_prefix(&folder_path).unwrap_or(&path)
             .to_string_lossy().replace('\\', "/");
-        // 拡張子は secret 変数検出の「: を区切り子として受け入れるか」の判定に使う。
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
 
         for (line_idx, raw_line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
@@ -1803,11 +1801,8 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
             let is_commentish = trimmed.starts_with("//") || trimmed.starts_with('#')
                 || trimmed.starts_with('*') || trimmed.starts_with("<!--");
 
-            // 同一行の重複検出を防ぐフラグ。prefix 検出と変数名検出が同じ行を拾って
-            // 2 回 push するのを避ける(件数水増しと修正プロンプトのノイズを防ぐ)。
-            let mut line_secret_recorded = false;
-
-            // 1) シークレットのプレフィックス(自身のパターン定義や説明文を弾く強化版)
+            // 1) シークレットのプレフィックス(自身のパターン定義や説明文を弾く強化版)。
+            //   これが findings の secret 検出の唯一の経路(既知トークン + 接続文字列)。
             if !is_commentish {
                 for (needle, kind) in secret_needles {
                     if raw_line.contains(needle) && is_plausible_secret_hit(raw_line, needle) {
@@ -1817,63 +1812,17 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
                             snippet: mask_snippet(raw_line),
                             kind: kind.to_string(),
                         });
-                        line_secret_recorded = true;
                         break;
                     }
                 }
             }
 
-            // 2) 変数名 = 値 パターン。
-            //   LHS 側の識別子を separator(`=` と `:` の両方)ごとに切り出し、
-            //   `is_secret_variable_name` で「明らかに secret っぽいキー名」かを判定する。
-            //   `:` は全ファイルで受け入れる:コードの `apiKey: "secret"`(オブジェクト
-            //   リテラル)を拾うため。誤検出は hardcoded_secret_value がガードする
-            //   (コードのクオート無し右辺は None → `token: string` 型注釈や `a ? b : c`
-            //   三項演算子は拾わない。bare 値は env/設定/シェルのみ)。
-            //   prefix 検出で既に同じ行が記録済みなら重複させない(重複 push 回避)。
-            if !is_commentish && !line_secret_recorded {
-                // separator 位置を集める。ただし文字列リテラル内(URL クエリの `?token=` 等)は除外。
-                //   `callbackUrl: "https://...?token=aaaa"` の URL 内 `token=` を LHS と誤認しない。
-                //   1 行複数 assignment(minified JSON など)は複数 separator を許容。
-                let sep_positions: Vec<usize> = raw_line
-                    .char_indices()
-                    .filter_map(|(i, c)| {
-                        if (c == '=' || c == ':') && !is_inside_string_literal(raw_line, i) {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                'sep_loop: for sep_pos in sep_positions {
-                    // LHS 切り出し:separator の直前から identifier chars を後ろ向きに拾う。
-                    let before = &raw_line[..sep_pos];
-                    let before_trimmed = before.trim_end();
-                    // JSON key 形式 `"apiKey":` の閉じ quote を除去
-                    let key_body = before_trimmed
-                        .strip_suffix('"')
-                        .or_else(|| before_trimmed.strip_suffix('\''))
-                        .unwrap_or(before_trimmed);
-                    // identifier chars(英数字 + _-)を末尾から取る
-                    let lhs = trailing_identifier(key_body);
-                    if lhs.is_empty() { continue; }
-                    if !is_secret_variable_name(lhs) { continue; }
-
-                    // RHS 評価:hardcoded_secret_value が「直書き secret 値」か判定して値を返す。
-                    // コードファイルのクオート無し右辺(関数呼び出し・変数比較)は None で弾く。
-                    let after = &raw_line[sep_pos + 1..];
-                    let rest = after.trim_start();
-                    if hardcoded_secret_value(rest, ext.as_str()).is_none() { continue; }
-
-                    secrets.push(ScanHit {
-                        file: rel.clone(),
-                        line: line_num,
-                        snippet: mask_snippet(raw_line),
-                        kind: format!("hardcoded {}", lhs),
-                    });
-                    break 'sep_loop;
-                }
-            }
+            // 2) 変数名ヒューリスティック(変数名が secret っぽい + 値が長い)は撤去した。
+            //   CLAUDE.md §6.5:これが誤検出(author / publicKey / authRecoveryTitle 等)の
+            //   唯一の温床だった。「誤検出は許されない」方針に従い、findings は確実な検出
+            //   (下の block 1 = 既知トークン接頭辞 + 接続文字列 + .env)だけにする。
+            //   見逃す分は SECRET_NEEDLES に既知パターンを足して安全に補う(誤検出リスク無しで
+            //   recall を上げられる)。ここには曖昧判定を戻さない。
 
             // 3) TODO / FIXME(コメント内かつ文字列リテラル外に限定)
             for tag in todo_needles {
@@ -2675,99 +2624,6 @@ fn is_secret_variable_name(lhs: &str) -> bool {
         }
     }
     false
-}
-
-/// 値が「明示的な placeholder」なら真(検出から除外)。
-///   your-secret-here / changeme / xxxxxxxx / <your-key> / TODO / example 等。
-fn is_placeholder_value(value: &str) -> bool {
-    let lower = value.to_lowercase();
-    // 全部同じ文字の繰り返し(xxxx / **** / ....)は placeholder
-    if let Some(first) = lower.chars().next() {
-        if lower.chars().all(|c| c == first) {
-            return true;
-        }
-    }
-    const WORD_MARKERS: &[&str] = &[
-        "your-", "your_", "yourkey", "yoursecret", "changeme", "change-me",
-        "placeholder", "example", "dummy", "xxxx", "todo", "fixme",
-        "<", "insert-", "replace-", "put-your", "my-secret", "sk_test_xxx",
-    ];
-    if WORD_MARKERS.iter().any(|m| lower.contains(m)) {
-        return true;
-    }
-    // 連番/連続文字は「値が短くその並びが支配的」な時だけ placeholder 扱い。
-    // 本物の長いキーが偶然 "abcdef" を含むだけで捨てない
-    // (例:django-insecure-abcdef... や base64 キーの一部)。
-    const SEQ_MARKERS: &[&str] = &["0000000000", "1234567890", "abcdef"];
-    if lower.chars().count() <= 20 && SEQ_MARKERS.iter().any(|m| lower.contains(m)) {
-        return true;
-    }
-    false
-}
-
-/// 代入の右辺(`=`/`:` の後、trim 済み)が「直書き secret 値」として妥当かを判定し、値を返す。
-/// None を返したら secret ではない(env 参照 / 空 / placeholder / コード式)。
-///
-/// **なぜ ext を見るか(誤検出の核心):**
-/// コードファイル(.rs/.ts/.tsx/.js/.py/.cs …)では、秘密情報は必ず文字列リテラル
-/// (クオート付き)で書かれる。クオート無しの右辺は関数呼び出しや変数参照などの
-/// 「コード式」であって値ではない。例:
-///   - `let tokens = tokenize_var_name(lhs);`(変数名に token → 右辺は関数呼び出し)
-///   - `const authOk = loginCompletedAt !== null;`(auth → 右辺は変数比較)
-/// これらを 16 文字超の「値」と誤認して秘密情報扱いしていた(dogfooding で発覚)。
-///
-/// 一方 env / 設定 / シェルファイルでは `KEY=value`(クオート無し)が本物の secret 形式
-/// なので、そこだけ bare 値を許可する。
-fn hardcoded_secret_value(rest: &str, ext: &str) -> Option<String> {
-    if rest.is_empty()
-        || rest.starts_with("process.env")
-        || rest.starts_with("env.")
-        || rest.starts_with("import.meta.env")
-        || rest.starts_with("Deno.env")
-        || rest.starts_with("System.getenv")
-        || rest.starts_with("${")
-        || rest.starts_with('$')
-    {
-        return None;
-    }
-
-    let quoted = rest.starts_with('"') || rest.starts_with('\'');
-    // bare(クオート無し)値を secret として拾ってよいファイル種別
-    let bare_ok = matches!(
-        ext,
-        "env" | "yaml" | "yml" | "toml" | "json" | "ini" | "properties"
-            | "sh" | "bash" | "zsh" | "ps1"
-    );
-
-    let value: String = if quoted {
-        let quote_char = rest.chars().next().unwrap();
-        rest[1..].chars().take_while(|c| *c != quote_char).collect()
-    } else if bare_ok {
-        rest.chars()
-            .take_while(|c| {
-                !c.is_whitespace() && !matches!(c, '#' | ';' | '`' | ',' | ']' | '}' | ')')
-            })
-            .collect()
-    } else {
-        // コードファイルのクオート無し右辺 = コード式。secret ではない。
-        return None;
-    };
-
-    // 自然言語(UI 文言・メッセージ)は secret ではない。秘密トークンは空白を含まない
-    // ASCII の連続。空白 or 非 ASCII(日本語・全角記号等)を含む値は UI テキストとして
-    // 除外する。例:`authRecoveryTitle: "セッションが切れました"`(i18n 翻訳。変数名に
-    // "auth" が入っているだけで値は表示文字列)。既知トークン形式は block 1 が別途拾うので
-    // ここで落としても本物 secret は取りこぼさない。
-    if value.contains(' ') || !value.is_ascii() {
-        return None;
-    }
-    if value.chars().count() < 16 {
-        return None;
-    }
-    if is_placeholder_value(&value) {
-        return None;
-    }
-    Some(value)
 }
 
 /// プロジェクト内の `.env*` ファイルを再帰的に収集する。
