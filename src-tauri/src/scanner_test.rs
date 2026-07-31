@@ -480,6 +480,50 @@ fn gitignore_negation_cannot_reinclude_under_ignored_dir() {
     assert!(env_file_is_gitignored(root, "secrets/.env"));
 }
 
+// ─── env_file_is_gitignored(cross-level 親除外:Codex round 19 High)──────
+#[test]
+fn gitignore_parent_ignored_overrides_deeper_whitelist() {
+    // root が親ディレクトリ apps/ を除外していると、深い apps/web/.gitignore の !.env でも
+    // Git は再 include できない → apps/web/.env は保護済み。深い whitelist で即断しないこと。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), "apps/\n").unwrap();
+    std::fs::create_dir_all(root.join("apps/web")).unwrap();
+    std::fs::write(root.join("apps/web/.gitignore"), "!.env\n").unwrap();
+    assert!(env_file_is_gitignored(root, "apps/web/.env"));
+}
+
+#[test]
+fn gitignore_deeper_whitelist_wins_without_parent_exclusion() {
+    // 親が除外されていなければ、深い !.env は正しく再 include する → 未保護(finding を出す)。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".gitignore"), ".env\n").unwrap(); // 全階層の .env を無視
+    std::fs::create_dir_all(root.join("apps/web")).unwrap();
+    std::fs::write(root.join("apps/web/.gitignore"), "!.env\n").unwrap(); // ここだけ戻す
+    assert!(!env_file_is_gitignored(root, "apps/web/.env"));
+}
+
+// ─── collect_env_files(打ち切りシグナル:Codex round 19 Medium)──────
+#[test]
+fn collect_env_files_signals_truncation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join(".env"), "").unwrap();
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::write(root.join("a/.env.local"), "").unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    std::fs::write(root.join("b/.env.prod"), "").unwrap();
+    // 上限に満たなければ打ち切りは起きず、全部集まる
+    let mut out = Vec::new();
+    assert!(!collect_env_files(root, root, &mut out, 100, 0));
+    assert_eq!(out.len(), 3);
+    // 上限に達したら打ち切り(true)を返す
+    let mut out2 = Vec::new();
+    assert!(collect_env_files(root, root, &mut out2, 1, 0));
+    assert_eq!(out2.len(), 1);
+}
+
 // ─── is_plausible_secret_hit(URL credential 必須)─────────────
 #[test]
 fn plausible_secret_url_needs_at_sign() {

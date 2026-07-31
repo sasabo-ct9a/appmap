@@ -1537,13 +1537,14 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     // 対象ごとに、そのファイルからの相対パスを見て root/.gitignore で評価する。
     // .env.example / .env.sample は「意図的に共有される非秘密ファイル」なので除外。
     let env_walk_start = folder_path.clone();
-    let existing_env_files: Vec<String> = tauri::async_runtime::spawn_blocking(move || {
-        let mut out: Vec<String> = Vec::new();
-        collect_env_files(&env_walk_start, &env_walk_start, &mut out, 512, 0);
-        out
-    })
-    .await
-    .map_err(|e| format!("join error: {}", e))?;
+    let (existing_env_files, env_collection_truncated): (Vec<String>, bool) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut out: Vec<String> = Vec::new();
+            let truncated = collect_env_files(&env_walk_start, &env_walk_start, &mut out, 512, 0);
+            (out, truncated)
+        })
+        .await
+        .map_err(|e| format!("join error: {}", e))?;
     let env_files_present = !existing_env_files.is_empty();
     let env_covered_by_gitignore = if !env_files_present {
         // 対象ファイルが無ければ「守るものが無い」→ true 扱いで finding は発火しない
@@ -1556,6 +1557,12 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
             .iter()
             .all(|rel_path| env_file_is_gitignored(&folder_path, rel_path))
     };
+    // env 収集が上限で打ち切られ、かつ見つかった範囲は全部保護済みだった場合、未走査の
+    // .env が未保護かもしれない。Ready と断定しないよう partial(files_truncated)に倒す
+    //(Codex round 19 Medium)。未保護が既に見つかっていれば finding が出るのでそのまま。
+    if env_collection_truncated && env_covered_by_gitignore {
+        files_truncated = true;
+    }
 
     /// 優先ディレクトリ名。walk 時にこれらを含むディレクトリを先に辿る。
     /// generated/fixtures/node_modules 相当が先頭 10k を食い潰して src/ に到達
@@ -2656,14 +2663,20 @@ fn is_secret_variable_name(lhs: &str) -> bool {
 ///   - `.env.example` `.env.sample` `.env.template` は意図的に共有される非秘密なので除外
 ///   - node_modules / .git / target / dist / build 等はスキップ
 ///   - out には base からの相対パス(POSIX 区切り)を入れる
-fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize, depth: usize) {
+/// 戻り値 = 打ち切りが起きたか(上限 max 到達 or 深さ上限)。true なら「未走査の .env が
+/// 残っているかもしれない」ことを呼び出し側に伝え、Ready 断定を避ける材料にする
+///(Codex round 19 Medium:静かに打ち切ると 513 個目以降の未保護 .env を見逃す)。
+fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize, depth: usize) -> bool {
     // 深さ上限:ディレクトリ symlink の循環や異常に深いツリーでの無限再帰
     // (= スタックオーバーフローによる強制クラッシュ)を防ぐ保険。
     const MAX_DEPTH: usize = 24;
-    if out.len() >= max || depth > MAX_DEPTH { return; }
-    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    if out.len() >= max || depth > MAX_DEPTH { return true; }
+    // read_dir エラー(権限等)は稀で、通常は skip 対象の system dir。ここを打ち切り扱いに
+    // すると正常なプロジェクトまで partial に倒れて UX が悪化するため false のままにする。
+    let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+    let mut truncated = false;
     for entry in entries.flatten() {
-        if out.len() >= max { return; }
+        if out.len() >= max { return true; }
         // file_type() は symlink を辿らない。path.is_dir() は symlink を辿るため、
         // `a/b -> a` のような循環でスタックオーバーフローし得た。
         let Ok(ft) = entry.file_type() else { continue };
@@ -2673,7 +2686,9 @@ fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize,
             // Unity/.NET の巨大キャッシュも除外(is_skippable_dir に一元化)。これが無いと
             // .env 探索だけで Library 配下 2 万ファイルを走査してしまう。
             if !is_skippable_dir(name) {
-                collect_env_files(&path, base, out, max, depth + 1);
+                if collect_env_files(&path, base, out, max, depth + 1) {
+                    truncated = true;
+                }
             }
         } else if ft.is_file() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -2689,6 +2704,7 @@ fn collect_env_files(dir: &Path, base: &Path, out: &mut Vec<String>, max: usize,
             }
         }
     }
+    truncated
 }
 
 /// env ファイル(root 相対 POSIX パス)が `.gitignore` で無視されるかを判定する。
@@ -2707,6 +2723,10 @@ fn env_file_is_gitignored(root: &Path, rel_path: &str) -> bool {
         return false;
     }
     // 深い階層の .gitignore から順に評価(Git は対象に近い .gitignore が優先)。
+    // 深い whitelist は「候補」として保持する。上位で祖先ディレクトリが除外されていれば
+    // 子は `!child` でも再 include できないため、深い whitelist だけで未保護と断定しない
+    //(Codex round 19 High:root=`apps/` + apps/web/.gitignore=`!.env` の取りこぼし)。
+    let mut whitelisted_by_deeper = false;
     for depth in (0..parts.len()).rev() {
         let mut gi_dir = root.to_path_buf();
         for p in &parts[..depth] {
@@ -2733,9 +2753,11 @@ fn env_file_is_gitignored(root: &Path, rel_path: &str) -> bool {
             return true;
         }
         // 祖先が除外されていなければ、ファイル自身の ignore/whitelist を採る。
+        //   深い階層で whitelist 済みなら、この階層の Ignore では上書きしない(深い方が優先)。
         match gi.matched(sub.join("/"), false) {
-            Match::Ignore(_) => return true,
-            Match::Whitelist(_) => return false,
+            Match::Ignore(_) if !whitelisted_by_deeper => return true,
+            Match::Ignore(_) => {}
+            Match::Whitelist(_) => whitelisted_by_deeper = true,
             Match::None => {}
         }
     }
