@@ -114,151 +114,9 @@ function today(): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
-/**
- * フィールド名から DB 型・制約・説明を推測(v0.1.7 ビジネス用途化)
- * 完全一致・部分一致の順に評価。ハズレの可能性はあるので、ユーザーが後で修正できることが前提。
- */
-function guessFieldSpec(field: string): {
-  dataType: string;
-  constraint: string;
-  note: string;
-} {
-  const f = field.toLowerCase().replace(/[\s`]/g, "");
-  // 完全一致優先
-  if (f === "id")
-    return {
-      dataType: "INTEGER / UUID",
-      constraint: "PRIMARY KEY, NOT NULL",
-      note: "主キー",
-    };
-  if (f === "created_at" || f === "createdat")
-    return {
-      dataType: "TIMESTAMP",
-      constraint: "NOT NULL, DEFAULT now()",
-      note: "作成日時",
-    };
-  if (f === "updated_at" || f === "updatedat")
-    return {
-      dataType: "TIMESTAMP",
-      constraint: "NOT NULL",
-      note: "最終更新日時",
-    };
-  if (f === "deleted_at" || f === "deletedat")
-    return {
-      dataType: "TIMESTAMP",
-      constraint: "NULL 可",
-      note: "論理削除日時(NULL なら未削除)",
-    };
-  // 部分一致
-  if (f.endsWith("_id") || (f.endsWith("id") && f.length > 2))
-    return {
-      dataType: "INTEGER / UUID",
-      constraint: "FOREIGN KEY, NOT NULL",
-      note: "関連レコードへの参照キー",
-    };
-  if (f.endsWith("_at") || f.endsWith("at"))
-    return {
-      dataType: "TIMESTAMP",
-      constraint: "NOT NULL",
-      note: "日時",
-    };
-  if (f.includes("email") || f.includes("mail"))
-    return {
-      dataType: "VARCHAR(255)",
-      constraint: "UNIQUE, NOT NULL",
-      note: "メールアドレス",
-    };
-  if (f.includes("password") || f.includes("passwd"))
-    return {
-      dataType: "VARCHAR(255)",
-      constraint: "NOT NULL",
-      note: "ハッシュ化されたパスワード(平文は保存しない)",
-    };
-  if (f.includes("username") || f.includes("user_name"))
-    return {
-      dataType: "VARCHAR(50)",
-      constraint: "UNIQUE, NOT NULL",
-      note: "ユーザー名(表示・ログイン用)",
-    };
-  if (
-    f.startsWith("is_") ||
-    f.startsWith("has_") ||
-    f === "enabled" ||
-    f === "active" ||
-    f === "disabled"
-  )
-    return {
-      dataType: "BOOLEAN",
-      constraint: "NOT NULL, DEFAULT false",
-      note: "真偽フラグ",
-    };
-  if (f.includes("status") || f.includes("state"))
-    return {
-      dataType: "VARCHAR(30) / ENUM",
-      constraint: "NOT NULL",
-      note: "ステータス",
-    };
-  if (f.includes("type") || f.includes("kind") || f.includes("category"))
-    return {
-      dataType: "VARCHAR(30)",
-      constraint: "NOT NULL",
-      note: "種別",
-    };
-  if (f.includes("price") || f.includes("amount") || f.includes("total"))
-    return {
-      dataType: "DECIMAL(10, 2)",
-      constraint: "NOT NULL",
-      note: "金額",
-    };
-  if (f.includes("count") || f.endsWith("num") || f.includes("_count"))
-    return {
-      dataType: "INTEGER",
-      constraint: "NOT NULL, DEFAULT 0",
-      note: "数量",
-    };
-  if (f.includes("url") || f.includes("link") || f.includes("uri"))
-    return {
-      dataType: "TEXT",
-      constraint: "任意",
-      note: "URL",
-    };
-  if (
-    f.includes("body") ||
-    f.includes("content") ||
-    f.includes("description") ||
-    f.includes("note") ||
-    f.includes("memo")
-  )
-    return {
-      dataType: "TEXT",
-      constraint: "任意",
-      note: "本文・説明",
-    };
-  if (f.includes("name") || f.includes("title") || f.includes("label"))
-    return {
-      dataType: "VARCHAR(255)",
-      constraint: "NOT NULL",
-      note: "名称・タイトル",
-    };
-  if (f.includes("token") || f.includes("secret") || f.includes("apikey"))
-    return {
-      dataType: "VARCHAR(255)",
-      constraint: "NOT NULL",
-      note: "認証トークン(暗号化推奨)",
-    };
-  if (f.includes("image") || f.includes("photo") || f.includes("avatar"))
-    return {
-      dataType: "TEXT",
-      constraint: "任意",
-      note: "画像 URL / パス",
-    };
-  // 汎用
-  return {
-    dataType: "VARCHAR(255)",
-    constraint: "任意",
-    note: "業務要件に合わせて設定",
-  };
-}
+// v0.1.33:フィールド名から DB 型・主キー・暗号化・論理削除を推測する guessFieldSpec は撤去した。
+//   DB があるとは限らないのに「嘘の DB 設計」を出す元凶だった(Codex 辛口 #3)。§6 は「扱う情報」
+//   の平易な列挙に置き換え済み。
 
 /** dataTech の要素を { name, fields[] } に正規化 */
 function normalizeTech(
@@ -313,6 +171,10 @@ export function buildSpecDoc(opts: BuildOptions): string {
   // v0.1.8:対象読者に応じて用語を切り替える
   const audienceLabel =
     audience === "noCode" ? "ノーコード経験者向け" : "エンジニア向け";
+  // v0.1.33:エンジニア向けだけに出す「重い章」と、実データが無いと嘘になる作文を分岐する。
+  //   noCode 向けは SDLC フルテンプレを捨て、マップ由来の実データ(目的/画面/流れ/操作/
+  //   扱う情報/分からないこと)だけに絞る(Codex 辛口レビュー・CLAUDE.md §1/§3.3)。
+  const eng = audience === "engineer";
   const { outgoing, incoming } = indexEdges(screens.edges);
   const nodeById = indexNodes(screens.nodes);
   const nowIso = today();
@@ -370,29 +232,25 @@ export function buildSpecDoc(opts: BuildOptions): string {
   lines.push("### 1.3 用語定義");
   lines.push("| 用語 | 定義 |");
   lines.push("|---|---|");
-  const termMap = new Map<string, string>();
+  // dataUsed(人間向けの情報名)だけを列挙する。以前は dataUsed[i] と dataTech[i](型名)を
+  //   同じ添字で対応付けていたが、両者は対応が保証されず用語↔型がズレて壊れていた
+  //   (Codex 辛口 #7)。コードの型名(ScreenNode 等)は noCode 読者に無意味なので出さない(§3.3)。
+  const terms = new Set<string>();
   for (const n of sortedNodes) {
-    const dataUsed = n.detail.dataUsed ?? [];
-    const dataTech = (n.detail.dataTech ?? []).map(normalizeTech);
-    const upto = Math.max(dataUsed.length, dataTech.length);
-    for (let i = 0; i < upto; i++) {
-      const jp =
-        i < dataUsed.length ? pickLocalized(dataUsed[i], language) : "";
-      const tech = i < dataTech.length ? dataTech[i].name : "";
-      if (!jp && !tech) continue;
-      const key = jp || tech;
-      if (termMap.has(key)) continue;
-      const def = tech ? `\`${tech}\`` : "(業務用語、技術的な対応名なし)";
-      termMap.set(key, def);
+    for (const d of n.detail.dataUsed ?? []) {
+      const jp = pickLocalized(d, language).trim();
+      if (jp) terms.add(jp);
     }
   }
-  if (termMap.size === 0) {
+  if (terms.size === 0) {
     lines.push(
       `| (該当なし) | 分析対象コードから固有の用語は抽出されませんでした。プロジェクト固有の業務用語をここに追記してください。 |`,
     );
   } else {
-    for (const [term, def] of termMap) {
-      lines.push(`| ${escTable(term)} | ${def} |`);
+    for (const term of terms) {
+      lines.push(
+        `| ${escTable(term)} | (この仕様書で扱う情報。必要なら意味を追記) |`,
+      );
     }
   }
   lines.push("");
@@ -407,7 +265,7 @@ export function buildSpecDoc(opts: BuildOptions): string {
     `- 想定ユーザー(§2.1)が初回起動から 5 分以内に主要機能を利用開始できること`,
   );
   lines.push(
-    `- §4 の非機能要件(応答時間・可用性・セキュリティ)を満たすこと`,
+    `- 応答の速さ・使い勝手など、決めた品質目標を満たすこと`,
   );
   lines.push(
     `- 想定される異常系(§9)で、ユーザーがデータを失わずに操作を再開できること`,
@@ -552,31 +410,26 @@ export function buildSpecDoc(opts: BuildOptions): string {
   lines.push("");
 
   // ========== 4. 非機能要件 ==========
-  lines.push("## 4. 非機能要件");
-  lines.push("");
-  lines.push("| 項目 | 要件 |");
-  lines.push("|---|---|");
-  lines.push(
-    `| パフォーマンス | 主要操作は 2 秒以内に応答。一覧表示は 100 件で 1 秒以内。バッチ処理は 5,000 件 / 分以上を目安 |`,
-  );
-  lines.push(
-    `| 可用性 | 稼働率 99%(月間ダウンタイム 7 時間以内)。計画メンテナンスは事前告知の上、深夜帯に実施。障害復旧目標(RTO)4 時間 |`,
-  );
-  lines.push(
-    `| セキュリティ | 全通信 HTTPS(TLS 1.2 以上)。パスワードは最低 8 文字・記号必須で保存はハッシュ化。セッション有効期間 24 時間。個人情報は暗号化保管し、アクセスログを 90 日保持 |`,
-  );
-  lines.push(
-    `| スケーラビリティ | 初期想定:同時利用 100 名、データ 10 万件。増加時はステートレスな構成による水平スケール、DB は読取レプリカで分散 |`,
-  );
-  lines.push(
-    `| 保守性 | エラーログは構造化(JSON)形式で 30 日保持。監視ダッシュボードで主要メトリクス(応答時間・エラー率・キュー滞留)を可視化。週次自動バックアップ、保持 90 日 |`,
-  );
-  lines.push(
-    `| 対応環境 | Chrome / Edge / Safari の最新版および 1 世代前。モバイルは iOS 15 以上 / Android 10 以上。デスクトップアプリは Windows 10 以上 / macOS 12 以上 |`,
-  );
-  lines.push("");
-  lines.push("---");
-  lines.push("");
+  // 非機能要件はコードから検出できない(このアプリに稼働率/認証/DB があるとは限らない)。
+  //   以前は HTTPS・パスワードハッシュ化・稼働率99% 等を断定で出していたが、実体と違う
+  //   「嘘の仕様」だった(Codex 辛口 #1)。engineer にだけ「実装時に決める観点」として出す。
+  if (eng) {
+    lines.push("## 4. 非機能要件");
+    lines.push("");
+    lines.push(
+      "以下はコードからは確認できない運用の観点です。**このアプリに実際に当てはまるものだけ**、値を決めて記入してください(該当しない項目は削除)。",
+    );
+    lines.push("");
+    lines.push("- パフォーマンス: 主要操作の目標応答時間、扱うデータ量の目安");
+    lines.push("- 対応環境: 動作対象の OS / ブラウザ(このアプリの実際の対象)");
+    lines.push(
+      "- セキュリティ: 秘密情報(API キー等)の保管方法、外部に送るデータの扱い。※サーバー / ログイン / DB がある場合のみ、通信の暗号化・認証・個人情報保護を追記",
+    );
+    lines.push("- 可用性 / 保守性: 障害時の挙動、ログ、バックアップ(必要な場合のみ)");
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
 
   // ========== 5. システム構成 ==========
   lines.push("## 5. システム構成");
@@ -593,22 +446,20 @@ export function buildSpecDoc(opts: BuildOptions): string {
     ctxStack?.external && ctxStack.external.length > 0
       ? ctxStack.external
       : stackDetected.extra;
-  lines.push("| レイヤー | 技術 | 選定理由 |");
-  lines.push("|---|---|---|");
+  // バックエンド / DB / 外部サービス / クラウドは「検出できた時だけ」出す。以前は AWS/GCP/Azure の
+  //   固定行や、根拠のない「選定理由」を捏造していた(Codex 辛口 #2)。実値のある層だけ列挙する。
+  const isDetected = (v?: string) =>
+    !!v && !v.includes("未検出") && !v.includes("該当なし");
+  lines.push("| レイヤー | 技術 |");
+  lines.push("|---|---|");
+  lines.push(`| フロントエンド / アプリ | ${frontendCell} |`);
+  if (isDetected(backendCell)) lines.push(`| バックエンド | ${backendCell} |`);
+  if (isDetected(dbCell)) lines.push(`| データベース | ${dbCell} |`);
+  if (externalList.length > 0)
+    lines.push(`| 外部サービス | ${externalList.join(" / ")} |`);
+  lines.push("");
   lines.push(
-    `| フロントエンド | ${frontendCell} | エコシステムが成熟、情報量が多く保守しやすい。コンポーネント再利用でUI開発を効率化 |`,
-  );
-  lines.push(
-    `| バックエンド | ${backendCell} | 業務要件・パフォーマンス・保守性のバランスを重視して選定 |`,
-  );
-  lines.push(
-    `| データベース | ${dbCell} | データ規模・参照パターン・トランザクション要件に適合 |`,
-  );
-  lines.push(
-    `| インフラ | クラウドマネージド(AWS / GCP / Azure から選定) | 運用負荷を抑え、需要に応じた拡張性を確保 |`,
-  );
-  lines.push(
-    `| 外部サービス | ${externalList.length > 0 ? externalList.join(" / ") : "(該当なし)"} | 業務要件を短期間で満たすため、自前実装を避けて既存サービスを活用 |`,
+    "※ バックエンド / DB / 外部サービスはコードから検出できた場合のみ記載。空欄はこのアプリでは確認されていません(ローカルで完結するアプリでは通常空です)。",
   );
   lines.push("");
 
@@ -635,75 +486,62 @@ export function buildSpecDoc(opts: BuildOptions): string {
   }
   lines.push("");
 
-  lines.push("### 5.3 環境構成");
-  lines.push(
-    "開発 / ステージング / 本番の分離方針。環境変数はキー名のみ記載。",
-  );
-  lines.push("");
-  lines.push(
-    `- 開発環境: ローカル端末上で動作。環境変数は \`.env.local\`。モックデータ / スタブ API を利用可能`,
-  );
-  lines.push(
-    `- ステージング: 本番同構成のクラウド環境。テストデータで受入確認。環境変数は \`.env.staging\`。デプロイは main ブランチマージで自動`,
-  );
-  lines.push(
-    `- 本番環境: クラウド運用、監視・アラート有効。シークレットは Secrets Manager 相当で管理し、コードや設定ファイルには含めない。デプロイは承認フロー経由`,
-  );
-  lines.push("");
+  // 環境構成(ステージング / 本番 / Secrets Manager 等)はコードから検出できず、固定作文だった
+  //   (Codex 辛口 #2)。engineer にだけ正直な注記として出し、noCode には出さない。
+  if (eng) {
+    lines.push("### 5.3 環境構成");
+    lines.push(
+      "環境の分け方はコードからは確認できません。クラウドやサーバーを使う場合のみ、開発 / 本番の分け方・秘密情報(API キー等)の保管場所をここに記載してください。ローカルだけで動くアプリなら該当なしです。",
+    );
+    lines.push("");
+  }
   lines.push("---");
   lines.push("");
 
-  // ========== 6. データ設計 ==========
-  lines.push("## 6. データ設計");
+  // ========== 6. 扱うデータ / 情報 ==========
+  // 以前は dataTech(TypeScript の型)を「DB テーブル」として主キー / 暗号化 / 論理削除まで
+  //   捏造していた(guessFieldSpec)。DB があるとは限らないのに嘘の DB 設計を出していた
+  //   (Codex 辛口 #3)。ここは「アプリが扱う情報」を平易に並べるだけにする。DB 用語は
+  //   実際に DB を検出した時だけ使う。
+  lines.push("## 6. 扱うデータ / 情報");
   lines.push("");
-  lines.push("### 6.1 ER図・テーブル定義");
-  lines.push("");
-  lines.push("| テーブル | カラム | 型 | 制約 | 説明 |");
-  lines.push("|---|---|---|---|---|");
-  const seenTables = new Set<string>();
+  const infoTerms = new Set<string>();
   for (const n of sortedNodes) {
-    for (const rawT of n.detail.dataTech ?? []) {
-      const t = normalizeTech(rawT);
-      if (seenTables.has(t.name)) continue;
-      seenTables.add(t.name);
-      if (t.fields.length === 0) {
-        lines.push(
-          `| \`${t.name}\` | \`id\` | INTEGER / UUID | PRIMARY KEY, NOT NULL | 主キー(フィールドは分析未検出、実装時に追記) |`,
-        );
-      } else {
-        t.fields.forEach((f, i) => {
-          const tableCol = i === 0 ? `\`${t.name}\`` : "";
-          const spec = guessFieldSpec(f);
-          lines.push(
-            `| ${tableCol} | \`${f}\` | ${spec.dataType} | ${spec.constraint} | ${spec.note} |`,
-          );
-        });
-      }
+    for (const d of n.detail.dataUsed ?? []) {
+      const jp = pickLocalized(d, language).trim();
+      if (jp) infoTerms.add(jp);
     }
   }
-  if (seenTables.size === 0) {
+  if (infoTerms.size > 0) {
+    lines.push("このアプリで扱う情報:");
+    lines.push("");
+    for (const t of infoTerms) lines.push(`- ${t}`);
+  } else {
     lines.push(
-      `| (該当なし) | — | — | — | 分析対象コード内にデータモデルが検出されませんでした。ローカル状態のみで動作する場合は「該当なし」、DB を利用する場合はこの表に追記してください |`,
+      "分析対象コードから、扱う情報は特定できませんでした。各画面で入力・表示・保存する情報をここに追記してください。",
     );
   }
   lines.push("");
-
-  lines.push("### 6.2 データライフサイクル");
-  lines.push("生成・更新・削除・保持期間。個人情報を含む場合は明記。");
-  lines.push("");
-  lines.push(
-    `- 生成: ユーザーの入力・登録操作、または外部連携(API / インポート)によって生成される`,
-  );
-  lines.push(
-    `- 更新: 所有ユーザーまたは管理者のみが変更可能。重要データは変更履歴(監査ログ)を保持`,
-  );
-  lines.push(
-    `- 削除: 論理削除(deleted_at フラグ)を推奨。物理削除は 90 日後に一括バッチで実施`,
-  );
-  lines.push(
-    `- 保持期間: サービス利用中は無期限。退会後は 90 日以内に匿名化 / 削除(個人情報保護法・GDPR に準拠)`,
-  );
-  lines.push("");
+  // engineer 向けにだけ、内部のデータ構造名(dataTech)を参考として出す。DB 用語(テーブル /
+  //   主キー等)は、実際に DB が検出された時だけ使う。捏造した型・制約は出さない。
+  if (eng) {
+    const techNames = new Set<string>();
+    for (const n of sortedNodes) {
+      for (const rawT of n.detail.dataTech ?? []) {
+        techNames.add(normalizeTech(rawT).name);
+      }
+    }
+    if (techNames.size > 0) {
+      lines.push(
+        isDetected(dbCell)
+          ? `参考:検出された DB(${dbCell})上のデータ構造(実際のスキーマは要確認):`
+          : "参考:アプリ内部で扱うデータ構造(DB とは限りません。型・状態の名前):",
+      );
+      lines.push("");
+      for (const t of techNames) lines.push(`- \`${t}\``);
+      lines.push("");
+    }
+  }
   lines.push("---");
   lines.push("");
 
@@ -732,6 +570,9 @@ export function buildSpecDoc(opts: BuildOptions): string {
   }
   lines.push("");
 
+  // §7.2 / §7.3 は API が実在する時だけ出す。以前は未検出でも REST 例・OAuth 等を
+  //   固定作文していた(Codex 辛口 #4, #5)。API が無いアプリでは §7.1 の「検出されず」で終わる。
+  if (endpoints.length > 0) {
   lines.push("### 7.2 API詳細");
   lines.push("");
   lines.push(
@@ -759,6 +600,7 @@ export function buildSpecDoc(opts: BuildOptions): string {
     `- 障害時のフォールバック: 指数バックオフでの自動リトライ(最大 3 回、初回 500ms)。連続失敗時はユーザーに通知し、キャッシュされた最終値を返却。連携先の SLA を Runbook に記載`,
   );
   lines.push("");
+  } // API が実在する時だけ §7.2/§7.3 を出す
   lines.push("---");
   lines.push("");
 
@@ -793,28 +635,24 @@ export function buildSpecDoc(opts: BuildOptions): string {
   lines.push("## 9. 異常系・エッジケース");
   lines.push("");
   const edgeCases = screens.context?.edgeCases ?? [];
-  if (edgeCases.length === 0) {
-    lines.push(
-      `- ネットワーク断・タイムアウト: 30 秒でタイムアウト。指数バックオフで最大 3 回リトライ。連続失敗時は「オフラインです」と表示して直近のキャッシュを返却`,
-    );
-    lines.push(
-      `- 外部サービス障害時の挙動: 部分縮退で継続可能な機能は維持。連携必須機能はエラー画面へ誘導し、代替手段(サポート連絡先など)を案内`,
-    );
-    lines.push(
-      `- 重複送信・冪等性: 送信ボタンは押下直後に無効化。API はリクエスト単位の idempotency-key を検査して重複を排除`,
-    );
-    lines.push(
-      `- 権限外アクセス: サーバーサイドで再検証(クライアント側のガードは補助)。権限外は 403 と共に汎用エラー画面を表示、機密情報の露出を避ける`,
-    );
-    lines.push(
-      `- 同時編集・競合: 楽観ロック(updated_at 比較)を採用。競合検出時は差分を提示して手動マージを促す`,
-    );
-  } else {
-    // v0.1.7 拡張:AI が読み取れたエッジケースを列挙、既定の観点は後ろに残す
+  if (edgeCases.length > 0) {
+    // AI が読み取れた実際のエッジケースを列挙
     for (const ec of edgeCases) {
       lines.push(`- ${ec.replace(/\n/g, " ")}`);
     }
-    lines.push(`- その他観点(未検証): 権限外アクセス / 同時編集・競合`);
+  } else {
+    // 検出できない時は、このアプリ(ローカルで動く)で実際に起こる異常系だけを挙げる。
+    //   以前は 楽観ロック / 403 / idempotency-key など、サーバー・認証・DB がある前提の
+    //   作文だった(Codex 辛口 #6)。
+    lines.push("- 入力・フォルダが読めない / 見つからない");
+    lines.push("- ファイルが大きすぎる / 数が多すぎて処理しきれない");
+    lines.push("- AI 分析に失敗した(応答なし・エラー・タイムアウト)");
+    lines.push("- 外部 AI サービスの API キーが未設定 / ネット接続がない");
+    if (eng) {
+      lines.push(
+        "- ※ サーバー・ログイン・DB を持つアプリの場合は、権限外アクセス・同時編集の競合・通信断なども別途検討",
+      );
+    }
   }
   lines.push("");
   lines.push("---");
@@ -842,7 +680,7 @@ export function buildSpecDoc(opts: BuildOptions): string {
     `| 単体テスト | 個別関数・コンポーネント | 主要分岐 100%、境界値・エッジケース網羅、CI で自動実行 |`,
   );
   lines.push(
-    `| 結合テスト | 画面間遷移・API 連携・DB アクセス | §2.2 の全ユースケースをカバー、想定エラーで代替フローが動作する |`,
+    `| 結合テスト | 画面間の移動・主要な操作の流れ(分析 → 表示、PDF / コピー出力 等) | §2.2 の全ユースケースをカバー、想定エラーで代替フローが動作する |`,
   );
   lines.push(
     `| 受入テスト | エンドユーザー視点の主要シナリオ | 成功条件(1.4)と対応 |`,
@@ -860,7 +698,7 @@ export function buildSpecDoc(opts: BuildOptions): string {
     `| Phase 1 | MVP 開発(§3 の Must 機能を実装、主要ユースケースを完走可能に) | 想定ユーザーが基本フローを完了できる、受入テスト(§10)合格 | 開発着手から 4 週間 |`,
   );
   lines.push(
-    `| Phase 2 | 拡張機能(Should / Could 対応)+ UI 改善 + 運用整備 | 全ユースケース網羅、ユーザーテスト完了、監視・バックアップ稼働 | Phase 1 完了から 4 週間 |`,
+    `| Phase 2 | 拡張機能(Should / Could 対応)+ UI 改善 | 全ユースケース網羅、ユーザーテスト完了 | Phase 1 完了から 4 週間 |`,
   );
   lines.push("");
   lines.push("---");
@@ -871,14 +709,16 @@ export function buildSpecDoc(opts: BuildOptions): string {
   lines.push("");
   lines.push("| # | 内容 | 決定期限 | 担当 |");
   lines.push("|---|---|---|---|");
+  // この仕様書は AI がマップから自動生成したもの。未決事項は「実データ由来で本当に確認が要る」
+  //   ことに絞る(以前は消した §4/§5.3/§7.3 を参照する固定作文だった)。
   lines.push(
-    `| 1 | 非機能要件(§4)の具体値精査(想定ユーザー数・データ量に応じた閾値) | Phase 1 開発着手前 | プロダクトオーナー |`,
+    `| 1 | 画面名・機能名が、実際のアプリでの呼び方と合っているか | — | — |`,
   );
   lines.push(
-    `| 2 | 環境構成(§5.3)の具体的なクラウド事業者・リージョン選定 | Phase 1 開発着手前 | インフラ担当 |`,
+    `| 2 | 画面のつながり(遷移)が、実際の操作順と合っているか | — | — |`,
   );
   lines.push(
-    `| 3 | 外部連携(§7.3)の連携先契約状況・SLA 確認 | 本番リリース前 | プロダクトオーナー |`,
+    `| 3 | 「扱うデータ / 情報」(§6)に、抜け漏れや不要なものがないか | — | — |`,
   );
   lines.push("");
   lines.push("---");
