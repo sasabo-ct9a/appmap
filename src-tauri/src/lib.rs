@@ -2753,6 +2753,14 @@ fn hardcoded_secret_value(rest: &str, ext: &str) -> Option<String> {
         return None;
     };
 
+    // 自然言語(UI 文言・メッセージ)は secret ではない。秘密トークンは空白を含まない
+    // ASCII の連続。空白 or 非 ASCII(日本語・全角記号等)を含む値は UI テキストとして
+    // 除外する。例:`authRecoveryTitle: "セッションが切れました"`(i18n 翻訳。変数名に
+    // "auth" が入っているだけで値は表示文字列)。既知トークン形式は block 1 が別途拾うので
+    // ここで落としても本物 secret は取りこぼさない。
+    if value.contains(' ') || !value.is_ascii() {
+        return None;
+    }
     if value.chars().count() < 16 {
         return None;
     }

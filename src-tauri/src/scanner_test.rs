@@ -88,6 +88,16 @@ fn code_expression_rhs_is_not_a_secret() {
 }
 
 #[test]
+fn natural_language_value_is_not_a_secret() {
+    // i18n の UI 文言:変数名に auth/token 等が入っていても、値が自然言語なら secret でない
+    //   (AppMap 自身の authRecoveryTitle 等の誤検出回帰)
+    assert_eq!(hardcoded_secret_value("\"セッションが切れました\"", "ts"), None); // 日本語(非 ASCII)
+    assert_eq!(hardcoded_secret_value("\"再ログインしてください\"", "ts"), None);
+    assert_eq!(hardcoded_secret_value("\"Session expired, please sign in again\"", "ts"), None); // 空白入り英文
+    assert_eq!(hardcoded_secret_value("\"Your login has been recovered\"", "ts"), None);
+}
+
+#[test]
 fn real_hardcoded_secret_still_detected() {
     // コードでも「クオート付き」の本物 secret は拾う。
     // (テスト値は placeholder マーカー "abcdef"/"1234567890" を避けたランダム風文字列)
