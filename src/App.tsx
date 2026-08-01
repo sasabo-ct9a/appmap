@@ -1343,7 +1343,7 @@ function buildTourSteps(language: Language): TourStep[] {
       {
         target: "nav-checklist",
         title: "④ コードチェック",
-        body: "公開前に確認したい「うっかり残し」を 5 つチェックします:\n・APIキー / パスワードの直書き(公開すると誰でも使えてしまう)\n・自動テストの仕組みの有無\n・テストコードの有無\n・console.log の消し忘れ\n・TODO の見落とし\nコードを直して保存すると、AppMap が自動でチェックし直します。",
+        body: "公開前に確認したい「うっかり残し」を 4 つチェックします:\n・APIキー / パスワードなど秘密情報の直書き(.env の漏れも。公開すると誰でも使えてしまう)\n・自動テストがあるか(テストの仕組み・テストコードの有無)\n・console.log の消し忘れ\n・TODO の見落とし\nコードを直して保存すると、AppMap が自動でチェックし直します。",
       },
       {
         target: "export",
@@ -1387,7 +1387,7 @@ function buildTourSteps(language: Language): TourStep[] {
     {
       target: "nav-checklist",
       title: "4. Code check",
-      body: "Scans for 5 common leftovers to clean up before shipping:\n・API keys / passwords hardcoded (anyone can use them once published)\n・Whether a test framework is set up\n・Whether any test code exists\n・Forgotten console.log prints\n・Missed TODO notes\nRe-checks automatically when you save your code.",
+      body: "Scans for 4 common leftovers to clean up before shipping:\n・Hardcoded secrets like API keys / passwords (incl. exposed .env; anyone can use them once published)\n・Whether automated tests exist (test setup or test code)\n・Forgotten console.log prints\n・Missed TODO notes\nRe-checks automatically when you save your code.",
     },
     {
       target: "export",
