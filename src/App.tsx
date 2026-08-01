@@ -779,7 +779,7 @@ function App() {
     : "AI で作ったアプリの全体像を可視化";
 
   return (
-    <div className="h-screen flex bg-canvas overflow-hidden">
+    <div className="h-screen flex bg-canvas overflow-hidden app-shell">
       {/* 左サイドバー */}
       <Sidebar
         activeNav={activeNav}
@@ -826,7 +826,9 @@ function App() {
 
         <div className="flex-1 flex overflow-hidden">
         <main className="flex-1 overflow-auto px-8 py-6">
-          <div className="mx-auto max-w-6xl">
+          {/* 広い画面(全画面表示)ではコンテンツ幅を広げてマップを大きく見せる。
+              狭い窓では従来どおり max-w-6xl(1152px)で読みやすさを保つ。 */}
+          <div className="mx-auto max-w-6xl xl:max-w-[88rem] 2xl:max-w-[104rem]">
             {setupWizard}
 
             {/* v0.1.8:上部の重複タブバーは撤去。サイドバー「開いているプロジェクト」に一本化 */}
@@ -1319,43 +1321,43 @@ function buildTourSteps(language: Language): TourStep[] {
     return [
       {
         title: "AppMap へようこそ",
-        body: "AI で作ったアプリの中身を、1 枚の地図で把握できるツールです。この案内では 6 個の主要機能を順に紹介します(所要 1〜2 分)。",
+        body: "AI で作ったアプリの中身を 1 枚の地図で把握できます。主要 6 機能を順に紹介します(1〜2 分)。",
         placement: "center",
       },
       {
         target: "folder-picker",
         title: "① 自分のアプリを読み込む",
-        body: "アプリのフォルダ(たとえば Cursor や Claude Code で開いているプロジェクトフォルダ)を選ぶと、AI がコードを読んで「どんな画面があって、どうつながっているか」を 1 枚のマップに描きます。今表示されているのは、機能を試してもらうためのサンプル(ダミー)です。",
+        body: "アプリのフォルダを選ぶと、AI がコードを読んで「どんな画面があって、どうつながっているか」をマップに描きます。今表示中のものはお試し用のサンプルです。",
       },
       {
         target: "map-canvas",
         title: "② マップで全体像を見る",
-        body: "アプリの画面が丸いカードで、画面同士のつながりが線で描かれます。カードをクリックすると右側にその画面の説明が開き、AI に「この画面は何をする?」などを質問できます。マップの外側をクリックしている間は固定モードで、マップを 1 回クリックすると拡大縮小・ドラッグ移動が有効になります(再度マップ外をクリックで固定に戻る)。",
+        body: "マップの 1 つ 1 つが、アプリの要素です。線が要素同士のつながりを表します。要素をクリックすると右に説明が開き、AI に質問もできます。マップを 1 回クリックすると拡大・移動が有効に(外側クリックで固定に戻る)。",
         placement: "center",
       },
       {
         target: "mode-toggle",
         title: "③ かんたん / 詳細モード切替",
-        body: "「かんたん」は日常の言葉で表示します(例:「ログイン画面」「ユーザー登録画面」)。「詳細」に切り替えると、エンジニアが使う技術名や、その画面が読み書きしているデータ(テーブル名など)も一緒に表示されます。",
+        body: "「かんたん」は日常の言葉(例:ログイン画面)。「詳細」にすると技術名や、その要素が扱うデータも表示します。",
       },
       {
         target: "nav-checklist",
         title: "④ コードチェック",
-        body: "アプリを公開する前に必ず確認したい「うっかり残し」を 5 種類チェックします:\n・APIキー / パスワードをコードに書いていないか(そのまま公開すると誰でも使えてしまう)\n・自動テストの仕組みが入っているか\n・テストコードが書かれているか\n・console.log(開発中のデバッグ表示)の消し忘れ\n・TODO(あとで直すメモ)の見落とし\nエディタでコードを保存すると自動で再スキャンされるので、開発中でも今の状態がすぐ分かります。",
+        body: "公開前に確認したい「うっかり残し」を 5 つチェックします:\n・APIキー / パスワードの直書き(公開すると誰でも使えてしまう)\n・自動テストの仕組みの有無\n・テストコードの有無\n・console.log の消し忘れ\n・TODO の見落とし\nコードを直して保存すると、AppMap が自動でチェックし直します。",
       },
       {
         target: "export",
         title: "⑤ 仕様書 / 共有 HTML を出力",
-        body: "アプリの構造を 2 つの形式で書き出せます:\n・仕様書(PDF):クライアントや上司に渡せる正式ドキュメント\n・共有 HTML:相手が AppMap をインストールしなくても、ブラウザで開くだけでマップを見られる 1 つのファイル",
+        body: "アプリの構造を 2 形式で出力できます:\n・仕様書(PDF):クライアントや上司に渡せる正式ドキュメント\n・共有 HTML:相手はブラウザで開くだけ(AppMap のインストール不要)",
       },
       {
         target: "engine-switch",
         title: "⑥ AI エンジン切替",
-        body: "解析に使う AI を切り替えられます:\n・Claude(クラウド):高精度。Anthropic 社の API 利用料(従量制)がかかる\n・ローカル AI:あなたの PC 上で動く。完全無料・オフラインで使えるが、精度は Claude より劣る\n設定画面から表示言語(日本語 / 英語)や、コードを開くエディタ(VS Code / Cursor など)の選択もできます。",
+        body: "解析に使う AI を切り替えられます:\n・Claude(クラウド):高精度。API 利用料(従量制)\n・ローカル AI:PC 上で動く。無料・オフライン、精度は劣る\n設定では表示言語やエディタも選べます。",
       },
       {
         title: "以上です",
-        body: "この案内はサイドバー左下の「ガイド付きツアー」からいつでも再表示できます。触って試してみてください。",
+        body: "この案内は左下の「ガイド付きツアー」からいつでも見られます。触って試してみてください。",
         placement: "center",
       },
     ];
@@ -1363,43 +1365,43 @@ function buildTourSteps(language: Language): TourStep[] {
   return [
     {
       title: "Welcome to AppMap",
-      body: "A tool to understand AI-generated apps as a single map. This tour walks you through 6 key features (1-2 minutes).",
+      body: "Understand AI-generated apps as a single map. A quick tour of 6 key features (1-2 min).",
       placement: "center",
     },
     {
       target: "folder-picker",
       title: "1. Load your app",
-      body: "Pick the folder containing your app (e.g. a project folder you have open in Cursor or Claude Code). The AI reads the code and draws a map of what screens exist and how they connect. What you see now is sample data — a dummy so you can try the features.",
+      body: "Pick your app's folder and the AI reads the code and draws a map of what screens exist and how they connect. What you see now is sample data for trying things out.",
     },
     {
       target: "map-canvas",
       title: "2. See the whole picture",
-      body: "Each screen is a rounded card, and lines show how they connect. Click a card to open its details on the right, where you can also ask the AI questions like 'What does this screen do?'. The map is locked by default — click it once to enable pan and zoom (click outside to lock it again).",
+      body: "Each item on the map is an element of your app; lines show how they connect. Click an element for its details on the right, where you can also ask the AI questions. Click the map once to enable pan and zoom (click outside to lock).",
       placement: "center",
     },
     {
       target: "mode-toggle",
       title: "3. Easy / Detailed mode",
-      body: "'Easy' uses everyday labels (e.g. 'Login screen', 'Signup screen'). 'Detailed' switches to engineer-facing names and also shows the data (tables, fields) each screen reads or writes.",
+      body: "'Easy' uses everyday labels (e.g. 'Login screen'). 'Detailed' adds engineer names and the data each element reads or writes.",
     },
     {
       target: "nav-checklist",
       title: "4. Code check",
-      body: "Scans your code for 5 common leftovers you'll want to clean up before shipping:\n・API keys / passwords hardcoded in your code (anyone can use them if you publish)\n・Whether a test framework is set up\n・Whether any test code exists\n・Forgotten console.log debug prints\n・Unhandled TODO notes\nAuto-refreshes when you save in any editor, so you can check the state anytime during development — not just before shipping.",
+      body: "Scans for 5 common leftovers to clean up before shipping:\n・API keys / passwords hardcoded (anyone can use them once published)\n・Whether a test framework is set up\n・Whether any test code exists\n・Forgotten console.log prints\n・Missed TODO notes\nRe-checks automatically when you save your code.",
     },
     {
       target: "export",
       title: "5. Export spec doc / share HTML",
-      body: "Export the app's structure in two formats:\n・Spec doc (PDF): a formal document you can hand to a client or manager\n・Share HTML: a single file recipients can open in a browser — no AppMap install needed",
+      body: "Export the app's structure in two formats:\n・Spec doc (PDF): a formal document for a client or manager\n・Share HTML: recipients just open it in a browser (no AppMap install needed)",
     },
     {
       target: "engine-switch",
       title: "6. Switch AI engine",
-      body: "Switch the AI used for analysis:\n・Claude (cloud): high accuracy. Uses Anthropic's API (pay-per-use)\n・Local AI: runs on your PC — free and offline, but less accurate than Claude\nSettings also lets you change display language (English / Japanese) and which editor to open files in (VS Code / Cursor / etc.).",
+      body: "Switch the AI used for analysis:\n・Claude (cloud): high accuracy. Uses Anthropic's API (pay-per-use)\n・Local AI: runs on your PC — free and offline, but less accurate\nSettings also let you change language and editor.",
     },
     {
       title: "That's it",
-      body: "You can reopen this tour anytime from 'Guided tour' at the bottom of the sidebar. Now try clicking around.",
+      body: "Reopen this tour anytime from 'Guided tour' at the bottom of the sidebar. Now try clicking around.",
       placement: "center",
     },
   ];

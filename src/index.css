@@ -75,17 +75,56 @@ html, body {
     background: #ffffff !important;
     color: #111827 !important;
   }
+  /* アプリ本体(Sidebar / main)と、モーダルの chrome(ヘッダ / フッタ / 編集 textarea)は
+     display:none で「場所ごと」畳む。以前は visibility:hidden で隠していたが、隠した要素の
+     レイアウト(高さ)が残るため印刷対象が下にずれ、さらに .spec-doc-printable が
+     position:absolute だったせいで絶対配置ゆえページ分割されず 1 ページで切れていた。 */
+  .app-shell {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .app-shell > *:not(.spec-doc-modal-overlay) {
+    display: none !important;
+  }
+  .spec-doc-panel > header,
+  .spec-doc-panel > footer,
+  .spec-doc-printable textarea {
+    display: none !important;
+  }
+  /* 迷子要素(portal 等)対策で全体を不可視化し、印刷対象だけ見せる */
   body * {
     visibility: hidden;
   }
   .spec-doc-printable,
-  .spec-doc-printable * {
+  .spec-doc-printable *,
+  .spec-doc-watermark,
+  .spec-doc-watermark * {
     visibility: visible;
   }
+  /* overlay / panel / printable を通常フローに戻す(fixed/absolute だと複数ページに流れない) */
+  .spec-doc-modal-overlay {
+    position: static !important;
+    display: block !important;
+    background: none !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .spec-doc-panel {
+    position: static !important;
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
   .spec-doc-printable {
-    position: absolute !important;
-    left: 0 !important;
-    top: 0 !important;
+    position: static !important;
     width: 100% !important;
     height: auto !important;
     padding: 0 !important;

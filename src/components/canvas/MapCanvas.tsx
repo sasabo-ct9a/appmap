@@ -737,7 +737,9 @@ function MapCanvas({
         style={
           tall
             ? { height: "min(calc(100vh - 280px), 780px)", minHeight: 560 }
-            : { height: Math.round(H * 0.62) }
+            : // 全画面時にマップを大きく見せるため、内容高さに対する係数を少し上げる
+              // (0.62 だと引き気味だった)。幅拡張(App.tsx の max-w)と合わせて効く。
+              { height: Math.round(H * 0.72) }
         }
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -1069,7 +1071,7 @@ function MapCanvas({
           )}
 
           {/* === 5. 主枝ノード(クリック可能)=== */}
-          <g aria-label={language === "ja" ? "画面一覧" : "screen list"}>
+          <g aria-label={language === "ja" ? "要素一覧" : "element list"}>
             {nodes.map((node) => {
               const baseB = branchPositions.get(node.id);
               if (!baseB) return null;
