@@ -158,8 +158,8 @@ function SpecDocModal({
 
   // v0.1.8:「エンドユーザー」は実質未実装だったため削除。2 択に絞ってそれぞれ実際に切り替える
   const audienceOptions: { key: SpecAudience; label: string }[] = [
-    { key: "engineer", label: T.audienceEngineer },
     { key: "noCode", label: T.audienceNoCode },
+    { key: "engineer", label: T.audienceEngineer },
   ];
 
   return (
@@ -172,7 +172,7 @@ function SpecDocModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[min(1240px,96vw)] h-[min(820px,94vh)] bg-paper rounded-[16px] border border-border-soft shadow-2xl flex flex-col overflow-hidden"
+        className="w-[min(1240px,96vw)] h-[min(820px,94vh)] bg-paper rounded-[16px] border border-border-soft shadow-2xl flex flex-col overflow-hidden spec-doc-panel"
       >
         {/* ヘッダー */}
         <header className="relative px-6 pt-5 pb-4 border-b border-border-soft flex-shrink-0">
@@ -204,8 +204,8 @@ function SpecDocModal({
           <h2 className="text-xl font-bold text-ink-strong">{T.modalTitle}</h2>
           <p className="text-xs text-ink-soft mt-1">
             {language === "ja"
-              ? "想定読者に合わせて表記を切り替えられます。"
-              : "Switch wording to suit your audience."}
+              ? "用途で詳しさを切り替え(やさしい=共有・理解 / 正式=納品・要件定義との突き合わせ)。"
+              : "Switch depth by purpose (Simple = share & understand · Formal = delivery & comparison)."}
           </p>
 
           {/* audience セグメントピル */}
