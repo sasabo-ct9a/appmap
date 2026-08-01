@@ -268,7 +268,7 @@ function InspectorPanel({
               style={{ background: palette.fill, color: "#fff" }}
             >
               <PlayTriangleIcon className="w-2 h-2" />
-              {tx("はじまりの画面", "Starting point")}
+              {tx("はじまりの要素", "Starting point")}
             </span>
           )}
           {changeHint && (
@@ -311,7 +311,7 @@ function InspectorPanel({
 
         {/* この画面でできること */}
         {bullets.length > 0 && (
-          <Section title={tx("この画面でできること", "What you can do here")}>
+          <Section title={tx("この要素でできること", "What you can do here")}>
             <ul className="flex flex-wrap gap-1.5">
               {bullets.map((b, i) => (
                 <li

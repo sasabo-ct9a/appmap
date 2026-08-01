@@ -225,7 +225,7 @@ function DatabaseView({ nodes, language, onSelectNode }: DatabaseViewProps) {
           </h1>
           <p className="text-sm text-ink-soft mt-1">
             {tx(
-              "左のデータ(エンティティ)と右の画面のつながりです。ホイールで拡大/縮小、ドラッグで移動できます。",
+              "左のデータ(エンティティ)と右の要素のつながりです。ホイールで拡大/縮小、ドラッグで移動できます。",
               "Data (left) ↔ screens (right). Wheel to zoom, drag to pan.",
             )}
           </p>
@@ -246,7 +246,7 @@ function DatabaseView({ nodes, language, onSelectNode }: DatabaseViewProps) {
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-3 h-3 rounded-full" style={{ background: "#F0FDFA", border: "1px solid #5EEAD4" }} />
-              {tx("画面", "screens")}
+              {tx("要素", "elements")}
             </span>
           </div>
           <ZoomControls
@@ -392,7 +392,7 @@ function DatabaseView({ nodes, language, onSelectNode }: DatabaseViewProps) {
                         dominantBaseline="middle"
                       >
                         {tx(
-                          `${e.screens.length} 画面で使用`,
+                          `${e.screens.length} 要素で使用`,
                           `used by ${e.screens.length}`,
                         )}
                       </text>
@@ -402,7 +402,7 @@ function DatabaseView({ nodes, language, onSelectNode }: DatabaseViewProps) {
               </g>
 
               {/* 画面ボックス(クリックで Inspector 起動)*/}
-              <g aria-label={tx("画面一覧", "screens")}>
+              <g aria-label={tx("要素一覧", "elements")}>
                 {usedScreens.map((s) => {
                   const pos = screenPos.get(s.id);
                   if (!pos) return null;

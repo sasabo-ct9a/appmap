@@ -42,15 +42,15 @@ export const TECH_TERM_GLOSSARY: Record<string, GlossaryEntry> = {
     analogy: "Bubble の User account / Notion の Workspace member 周りと同じ",
   },
   ルーティング: {
-    brief: "どの URL でどの画面を出すかを決める対応表",
+    brief: "どの URL でどの要素を出すかを決める対応表",
     analogy: "Bubble の Page navigation / Notion の Pages の階層に近い",
   },
   状態管理: {
-    brief: "画面の「いまの状態」(開いてる / 入力中 / 読込中)を保持する仕組み",
+    brief: "要素の「いまの状態」(開いてる / 入力中 / 読込中)を保持する仕組み",
     analogy: "Bubble の Custom states / Notion のページ内 toggle 状態に対応",
   },
   コンポーネント: {
-    brief: "画面を組み立てる再利用可能な部品",
+    brief: "要素を組み立てる再利用可能な部品",
     analogy: "Bubble の Reusable element / Notion の Synced block に対応",
   },
   ライブラリ: {
@@ -78,7 +78,7 @@ export const TECH_TERM_GLOSSARY: Record<string, GlossaryEntry> = {
     analogy: "Bubble の Backend workflow / Notion の API 経由 server 処理に対応",
   },
   フロントエンド: {
-    brief: "ユーザーが直接見る画面側の処理",
+    brief: "ユーザーが直接見る要素側の処理",
     analogy: "Bubble の Design tab / Notion の Page view 部分",
   },
   ビルド: {

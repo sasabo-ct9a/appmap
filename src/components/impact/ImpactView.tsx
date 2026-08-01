@@ -43,7 +43,7 @@ const SAFETY_META: Record<Safety, SafetyMeta> = {
   easy: {
     label: { ja: "安全に変えられる", en: "Safe to change" },
     desc: {
-      ja: "文言や表示順だけなら、他の画面に影響しません。",
+      ja: "文言や表示順だけなら、他の要素に影響しません。",
       en: "Wording or order changes don't ripple.",
     },
     color: "#0d9488",
@@ -63,7 +63,7 @@ const SAFETY_META: Record<Safety, SafetyMeta> = {
   risky: {
     label: { ja: "慎重に", en: "Be careful" },
     desc: {
-      ja: "他の画面まで壊れる可能性があります。",
+      ja: "他の要素まで壊れる可能性があります。",
       en: "May break other screens too.",
     },
     color: "#BE185D",
@@ -72,7 +72,7 @@ const SAFETY_META: Record<Safety, SafetyMeta> = {
   },
   unknown: {
     label: { ja: "未判定", en: "Not assessed" },
-    desc: { ja: "AI が判断しなかった画面", en: "AI didn't assess" },
+    desc: { ja: "AI が判断しなかった要素", en: "AI didn't assess" },
     color: "#64748b",
     bg: "#f1f5f9",
     border: "#cbd5e1",
@@ -442,7 +442,7 @@ function ImpactView({
             <thead className="bg-canvas border-b border-border-soft">
               <tr>
                 <th className="text-left px-4 py-3 text-[11px] font-bold text-ink-soft uppercase tracking-wide">
-                  {tx("画面", "Screen")}
+                  {tx("要素", "Element")}
                 </th>
                 <th className="text-left px-4 py-3 text-[11px] font-bold text-ink-soft uppercase tracking-wide">
                   {tx("変えやすさ", "Ease")}

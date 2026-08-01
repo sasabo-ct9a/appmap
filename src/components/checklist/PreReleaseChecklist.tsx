@@ -234,7 +234,7 @@ function PreReleaseChecklist({
     ? "コード全体をスキャン中…"
     : "Scanning the codebase…";
   const scanErrorPrefix = isJa
-    ? "スキャン失敗(画面情報だけで判定します):"
+    ? "スキャン失敗(要素情報だけで判定します):"
     : "Scan failed (using screen data only):";
   const sampleNote = isJa
     ? "これはサンプルデータの参考表示です。実際のリスクではありません。フォルダを選んで分析すると本番診断が走ります。"

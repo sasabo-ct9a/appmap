@@ -378,7 +378,7 @@ export function ProjectSettings({
       <SettingRow
         title={tx("表示の詳しさ", "Detail level")}
         desc={tx(
-          "かんたん = 主要な要素のみ。詳細 = サブ画面・エラー画面も含めて全部。",
+          "かんたん = 主要な要素のみ。詳細 = サブ要素・エラー系も含めて全部。",
           "Simple = main screens only. Detailed = sub-screens and edge cases too.",
         )}
       >

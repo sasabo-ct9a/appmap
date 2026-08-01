@@ -11,7 +11,7 @@ import type { Language } from "../lib/i18n";
  *
  * 配置方針(機能拡張で N 階層対応 + 単一 SVG レイアウトに合わせて修正):
  *   - depth 0(主フロー)= フォルダ選択 / 分析中 / マップ俯瞰
- *   - depth 1(サブ画面)= 詳細パネル / 設定
+ *   - depth 1(サブ要素)= 詳細パネル / 設定
  *   - y 座標は MapCanvas 側で depth から自動計算するので、ここで指定する y 値は意味無し。
  */
 
@@ -26,7 +26,7 @@ const bi = (ja: string, en: string): Bilingual => ({ ja, en });
 
 const sampleScreensBilingual: SampleData = {
   appSummary: bi(
-    "これは「AI で作ったアプリ」を 1 枚の地図に変換するデスクトップアプリです。フォルダを選ぶと AI が画面構造を読み取り、画面同士の繋がりとそれぞれの説明をマップ表示します。",
+    "これは「AI で作ったアプリ」を 1 枚の地図に変換するデスクトップアプリです。フォルダを選ぶと AI が要素構造を読み取り、要素同士の繋がりとそれぞれの説明をマップ表示します。",
     "This is a desktop app that turns an AI-built application into a single map. Pick a folder and the AI reads the screen structure, then renders the screens and the links between them with short descriptions.",
   ),
   nodes: [
@@ -45,13 +45,13 @@ const sampleScreensBilingual: SampleData = {
         bi("読み込み開始", "Start reading"),
       ],
       detail: {
-        title: bi("フォルダ選択画面", "Pick-folder screen"),
+        title: bi("フォルダ選択要素", "Pick-folder screen"),
         body: bi(
           "ローカルのフォルダを選んで AppMap に読み込ませる入り口。Tauri のファイル API でディレクトリを開く。",
           "Entry point. Pick a local folder and hand it to AppMap. Uses the Tauri file API to open the directory.",
         ),
         bodyNoCode: bi(
-          "解析したいフォルダを選んで AppMap に読ませる入口の画面です。Bubble や Notion でファイルをアップロードする感覚に似ていますが、ファイル単体ではなくフォルダ全体を渡します。",
+          "解析したいフォルダを選んで AppMap に読ませる入口の要素です。Bubble や Notion でファイルをアップロードする感覚に似ていますが、ファイル単体ではなくフォルダ全体を渡します。",
           "The starting screen, where you pick a folder for AppMap to read. It's similar to uploading a file in Bubble or Notion, except you hand over a whole folder, not a single file.",
         ),
         files: ["src/lib/folderPicker.ts", "src/components/ui/Button.tsx"],
@@ -91,11 +91,11 @@ const sampleScreensBilingual: SampleData = {
       detail: {
         title: bi("分析中(ローディング)", "Analysis (loading)"),
         body: bi(
-          "選んだフォルダを Claude API に送り、マップ用の JSON が返ってくるのを待つ画面。プログレスと推定残り時間を表示。",
+          "選んだフォルダを Claude API に送り、マップ用の JSON が返ってくるのを待つ要素。プログレスと推定残り時間を表示。",
           "Sends the chosen folder to the Claude API and waits for the map JSON to come back. Shows progress and an estimated time remaining.",
         ),
         bodyNoCode: bi(
-          "選んだフォルダを AI に渡し、画面構造の解析結果が返ってくるのを待つ画面です。進行中はぐるぐるマークと経過時間が表示されます。Bubble でワークフローが走っているときの待ち画面と同じ役割です。",
+          "選んだフォルダを AI に渡し、要素構造の解析結果が返ってくるのを待つ要素です。進行中はぐるぐるマークと経過時間が表示されます。Bubble でワークフローが走っているときの待ち要素と同じ役割です。",
           "After you hand a folder to the AI, this screen waits for the analysis to come back. While it runs you see a spinner and the elapsed time. It's the same role as the waiting screen while a workflow runs in Bubble.",
         ),
         files: [
@@ -116,7 +116,7 @@ const sampleScreensBilingual: SampleData = {
         changeHint: {
           safety: "neutral",
           note: bi(
-            "表示の見た目は変えやすいですが、AI との通信ロジックを触ると全画面に影響します。",
+            "表示の見た目は変えやすいですが、AI との通信ロジックを触ると全要素に影響します。",
             "The visuals are easy to tweak, but touching the AI communication logic affects every screen.",
           ),
         },
@@ -130,20 +130,20 @@ const sampleScreensBilingual: SampleData = {
       depth: 0,
       detailLevel: 0,
       subActions: [
-        bi("画面をクリック", "Click a screen"),
+        bi("要素をクリック", "Click a screen"),
         bi("つながりを辿る", "Follow links"),
         bi("ズーム", "Zoom"),
         bi("全体を再表示", "Reset view"),
         bi("仕様書を作る", "Make a spec"),
       ],
       detail: {
-        title: bi("マップ俯瞰画面(中心)", "Map overview (center)"),
+        title: bi("マップ俯瞰要素(中心)", "Map overview (center)"),
         body: bi(
-          "AppMap の本体。画面ノードと関係線で構造を一望できる。気になるノードをクリックすると詳細パネルが開く。",
+          "AppMap の本体。要素ノードと関係線で構造を一望できる。気になるノードをクリックすると詳細パネルが開く。",
           "The core of AppMap. See the whole structure as screen nodes and relation lines. Click a node to open the detail panel.",
         ),
         bodyNoCode: bi(
-          "アプリ全体の画面構成を 1 枚で見渡せるメイン画面です。気になる画面をクリックすると右側に詳細が開きます。Bubble や Notion でアプリ全体を俯瞰するときの感覚に近い使い方になります。",
+          "アプリ全体の要素構成を 1 枚で見渡せるメイン要素です。気になる要素をクリックすると右側に詳細が開きます。Bubble や Notion でアプリ全体を俯瞰するときの感覚に近い使い方になります。",
           "The main screen where you see the whole app's structure on one page. Click any screen and a detail panel opens on the right. The feeling is close to surveying an app at a glance in Bubble or Notion.",
         ),
         files: [
@@ -153,8 +153,8 @@ const sampleScreensBilingual: SampleData = {
           "src/App.tsx",
         ],
         dataUsed: [
-          bi("画面の一覧", "Screen list"),
-          bi("画面同士の繋がり", "Links between screens"),
+          bi("要素の一覧", "Screen list"),
+          bi("要素同士の繋がり", "Links between screens"),
           bi("アプリ概要", "App summary"),
         ],
         dataTech: [
@@ -168,7 +168,7 @@ const sampleScreensBilingual: SampleData = {
         changeHint: {
           safety: "risky",
           note: bi(
-            "ここはアプリの中心。レイアウトを変えると他のほぼ全画面に影響します。",
+            "ここはアプリの中心。レイアウトを変えると他のほぼ全要素に影響します。",
             "This is the heart of the app. Layout changes here ripple into almost every other screen.",
           ),
         },
@@ -177,25 +177,25 @@ const sampleScreensBilingual: SampleData = {
     {
       id: 4,
       label: bi("詳細パネル", "Detail panel"),
-      userIntent: bi("1 画面を深く見る", "Look at one screen in depth"),
+      userIntent: bi("1 要素を深く見る", "Look at one screen in depth"),
       position: { x: 190, y: 230 },
       depth: 1,
       detailLevel: 1,
       subActions: [
         bi("説明を読む", "Read the description"),
         bi("関わるファイル", "See related files"),
-        bi("つながる画面", "See linked screens"),
+        bi("つながる要素", "See linked screens"),
         bi("変更の影響を見る", "Check impact"),
         bi("閉じる", "Close panel"),
       ],
       detail: {
-        title: bi("画面の詳細パネル", "Screen detail panel"),
+        title: bi("要素の詳細パネル", "Screen detail panel"),
         body: bi(
           "ノードクリックで右端に開くパネル。タイトル・説明・関連ノードを表示。閉じるとマップ俯瞰に戻る。",
           "Opens on the right when you click a node. Shows title, description, and related nodes. Close it to go back to the overview.",
         ),
         bodyNoCode: bi(
-          "メインマップで選んだ画面の中身を、画面の右側に詳しく表示するパネルです。説明・関わるファイル・つながる画面が見えます。Bubble や Notion で項目を選んだときに右側に出る詳細欄と同じ役割です。",
+          "メインマップで選んだ要素の中身を、要素の右側に詳しく表示するパネルです。説明・関わるファイル・つながる要素が見えます。Bubble や Notion で項目を選んだときに右側に出る詳細欄と同じ役割です。",
           "Shows the details of the screen you picked on the main map, on the right side. You see a description, the files involved, and the screens it links to. It plays the same role as the detail pane that opens on the right when you select an item in Bubble or Notion.",
         ),
         files: [
@@ -204,8 +204,8 @@ const sampleScreensBilingual: SampleData = {
           "src/lib/glossary.ts",
         ],
         dataUsed: [
-          bi("選んだ画面の詳細", "Detail for the picked screen"),
-          bi("つながる画面の一覧", "Related screens"),
+          bi("選んだ要素の詳細", "Detail for the picked screen"),
+          bi("つながる要素の一覧", "Related screens"),
           bi("対応ファイル", "Matching files"),
         ],
         dataTech: [
@@ -238,11 +238,11 @@ const sampleScreensBilingual: SampleData = {
       detail: {
         title: bi("設定画面", "Settings screen"),
         body: bi(
-          "ノーコード語切替トグル、API キー、表示テーマなど。マップから出入りする独立した画面。",
+          "ノーコード語切替トグル、API キー、表示テーマなど。マップから出入りする独立した要素。",
           "Plain-words toggle, API key, display theme, and so on. A standalone screen you enter and leave from the map.",
         ),
         bodyNoCode: bi(
-          "アプリ全体の挙動を調整する画面です。ノーコード語の ON / OFF、表示テーマ、過去の分析履歴などを切り替えられます。Bubble や Notion の設定画面に相当する場所です。",
+          "アプリ全体の挙動を調整する要素です。ノーコード語の ON / OFF、表示テーマ、過去の分析履歴などを切り替えられます。Bubble や Notion の設定画面に相当する場所です。",
           "A screen for adjusting how the whole app behaves. You can toggle plain-words mode, switch the display theme, browse past analyses, and so on. It's the same kind of place as the settings page in Bubble or Notion.",
         ),
         files: [
@@ -271,7 +271,7 @@ const sampleScreensBilingual: SampleData = {
         changeHint: {
           safety: "neutral",
           note: bi(
-            "設定項目を増減すると、その項目を使う画面にも合わせて手を入れる必要があります。",
+            "設定項目を増減すると、その項目を使う要素にも合わせて手を入れる必要があります。",
             "Adding or removing settings means you also have to touch the screens that use them.",
           ),
         },
