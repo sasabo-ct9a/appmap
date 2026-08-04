@@ -1,0 +1,132 @@
+import { describe, expect, it } from "vitest";
+import { computeReplaySteps } from "../happyPath";
+import type { ScreenMapResult } from "../claudeCli";
+import type { ScreenNode, ScreenEdge } from "../../types/screen";
+
+function node(
+  id: number,
+  opts: { entry?: boolean; depth?: number } = {},
+): ScreenNode {
+  return {
+    id,
+    label: `N${id}`,
+    isEntryPoint: opts.entry,
+    depth: opts.depth,
+    position: { x: 0, y: 0 },
+    detail: { title: `N${id}`, body: "", bodyNoCode: "" },
+  };
+}
+function edge(from: number, to: number, bidi = false): ScreenEdge {
+  return { id: `${from}-${to}`, from, to, bidirectional: bidi };
+}
+function result(nodes: ScreenNode[], edges: ScreenEdge[]): ScreenMapResult {
+  return { nodes, edges };
+}
+
+describe("computeReplaySteps", () => {
+  it("一本道は 1 要素ずつのステージになる(流れ外なし)", () => {
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3)],
+      [edge(1, 2), edge(2, 3)],
+    );
+    expect(computeReplaySteps(r)).toEqual({
+      stages: [[1], [2], [3]],
+      detached: [],
+    });
+  });
+
+  it("枝分かれは同じステージにまとまる(捨てない)", () => {
+    // 1 → 2、2 から 3 と 4 に分岐 → 3 と 4 は同じステージ [3,4]
+    // ユーザーの実例(データ取得 → 動画取得 Pexels / Pixabay)そのもの。
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3), node(4)],
+      [edge(1, 2), edge(2, 3), edge(2, 4)],
+    );
+    expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3, 4]]);
+  });
+
+  it("分岐後に合流しても最短距離でまとまる", () => {
+    // 2 で分岐(3,4)→ 5 で合流。5 は入口から距離 3。
+    const r = result(
+      [
+        node(1, { entry: true }),
+        node(2),
+        node(3),
+        node(4),
+        node(5),
+      ],
+      [edge(1, 2), edge(2, 3), edge(2, 4), edge(3, 5), edge(4, 5)],
+    );
+    expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3, 4], [5]]);
+  });
+
+  it("双方向エッジは両向きに通れる", () => {
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3)],
+      [edge(1, 2), edge(2, 3, true)],
+    );
+    expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3]]);
+  });
+
+  it("entry 未指定なら入次数 0 の要素を入口にする", () => {
+    const r = result(
+      [node(3), node(1), node(2)],
+      [edge(1, 2), edge(2, 3)],
+    );
+    expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3]]);
+  });
+
+  it("ループがあっても無限に回らない", () => {
+    const r = result(
+      [node(1, { entry: true }), node(2)],
+      [edge(1, 2), edge(2, 1)],
+    );
+    expect(computeReplaySteps(r).stages).toEqual([[1], [2]]);
+  });
+
+  it("入口からたどり着けない要素は detached に分ける(本流に混ぜない)", () => {
+    // 3 はどこともつながらない孤立要素 → stages に入れず detached に。
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3)],
+      [edge(1, 2)],
+    );
+    const plan = computeReplaySteps(r);
+    expect(plan.stages).toEqual([[1], [2]]);
+    expect(plan.detached).toEqual([3]);
+    expect(plan.stages.flat()).not.toContain(3);
+  });
+
+  it("入口へ向かう一方通行しか無い要素も detached(逆流を捏造しない)", () => {
+    // 3 → 1(entry)。入口から 3 へ前向きに行く道は無い → detached。
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3)],
+      [edge(1, 2), edge(3, 1)],
+    );
+    const plan = computeReplaySteps(r);
+    expect(plan.stages).toEqual([[1], [2]]);
+    expect(plan.detached).toEqual([3]);
+  });
+
+  it("単一要素・エッジ無しでも壊れない", () => {
+    expect(computeReplaySteps(result([node(1)], []))).toEqual({
+      stages: [[1]],
+      detached: [],
+    });
+    expect(
+      computeReplaySteps(result([node(1, { entry: true }), node(2)], [])),
+    ).toEqual({ stages: [[1]], detached: [2] });
+    expect(computeReplaySteps(result([], []))).toEqual({
+      stages: [],
+      detached: [],
+    });
+  });
+
+  it("サンプル型(入口→2ステップ→双方向のサブ)で入口が先頭に来る", () => {
+    // 1(entry)→2→3、3<->4、3<->5 → 4 と 5 は同じ距離でまとまる
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3), node(4), node(5)],
+      [edge(1, 2), edge(2, 3), edge(3, 4, true), edge(3, 5, true)],
+    );
+    expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3], [4, 5]]);
+  });
+});

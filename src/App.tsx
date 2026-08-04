@@ -6,6 +6,8 @@ import Sidebar, { type NavKey } from "./components/layout/Sidebar";
 import GuidedTour, { type TourStep } from "./components/tour/GuidedTour";
 import TopBar from "./components/layout/TopBar";
 import MapCanvas from "./components/canvas/MapCanvas";
+import HappyPathReplay from "./components/canvas/HappyPathReplay";
+import { computeReplaySteps } from "./lib/happyPath";
 import FeatureCardGrid from "./components/canvas/FeatureCardGrid";
 import BottomSection from "./components/canvas/BottomSection";
 import InspectorPanel from "./components/inspector/InspectorPanel";
@@ -85,6 +87,8 @@ type ClaudeAvailability =
 
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
+  // ハッピーパス再生:何ステップ目か(null = 再生していない)
+  const [replayIndex, setReplayIndex] = useState<number | null>(null);
   // v0.1.8:ノートの変更を検知して MapCanvas のバッジを再描画するための単純カウンタ
   const [notesTick, setNotesTick] = useState<number>(0);
   const [noCodeMode, setNoCodeMode] = useState<boolean>(false);
@@ -152,6 +156,15 @@ function App() {
   useEffect(() => {
     setNodeOffsets(new Map());
   }, [lastAnalyzedFolder]);
+
+  // 読み込んだマップ(aiResult)が変わったら流れの再生を中断する。
+  //   replayIndex は「今のマップの何ステージ目か」なので、別アプリ・再スキャン後に
+  //   持ち越すと、別の(または作り直した)マップを途中から再生表示してしまう。
+  //   aiResult をキーにすると切替も再スキャンも捕まえられ、かつ言語・詳細レベルの
+  //   切替(aiResult は不変)では発火しないので、無駄に再生を切らない。
+  useEffect(() => {
+    setReplayIndex(null);
+  }, [aiResult]);
 
   /** v0.1.7: 詳細レベルを変更しつつ localStorage に永続化。 */
   const handleDetailLevelChange = (next: DetailLevel) => {
@@ -778,6 +791,31 @@ function App() {
       ).slice(0, 80)
     : "AI で作ったアプリの全体像を可視化";
 
+  // 流れの再生:入口からの流れを 1 ステージずつ手動で送る(Codex 戦略レビュー「理解完了の
+  //   一本道」を、枝分かれを捨てない形に発展させたもの)。同じ距離の要素は 1 ステージに
+  //   まとまるので、分岐はそのステージで複数要素が同時に光る。入口からたどり着けない要素は
+  //   detached として最後に「流れ外」補足ステップで見せる(薄いまま放置=不親切を避ける)。
+  const { stages: replayStages, detached: replayDetached } =
+    computeReplaySteps(screens);
+  const replayHasDetached = replayDetached.length > 0;
+  const replayTotal = replayStages.length + (replayHasDetached ? 1 : 0);
+  const isDetachedStep =
+    replayIndex != null &&
+    replayHasDetached &&
+    replayIndex === replayStages.length;
+  const replayActiveIds =
+    replayIndex == null
+      ? null
+      : isDetachedStep
+        ? new Set(replayDetached)
+        : new Set(replayStages[replayIndex] ?? []);
+  const replayPassedIds =
+    replayIndex == null
+      ? null
+      : isDetachedStep
+        ? new Set(replayStages.flat())
+        : new Set(replayStages.slice(0, replayIndex).flat());
+
   return (
     <div className="h-screen flex bg-canvas overflow-hidden app-shell">
       {/* 左サイドバー */}
@@ -1169,6 +1207,27 @@ function App() {
                   className="mb-6 transition-opacity duration-200"
                   style={{ minHeight: "320px" }}
                 >
+                  {replayIndex === null && replayTotal >= 2 && (
+                    <div className="flex justify-end mb-2">
+                      <button
+                        type="button"
+                        onClick={() => setReplayIndex(0)}
+                        className="flex items-center gap-1.5 rounded-[10px] px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
+                        style={{ background: "var(--color-feature-teal)" }}
+                      >
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          aria-hidden="true"
+                        >
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                        {language === "ja" ? "流れを再生" : "Replay flow"}
+                      </button>
+                    </div>
+                  )}
                   <MapCanvas
                     nodes={screens.nodes}
                     edges={screens.edges}
@@ -1190,7 +1249,31 @@ function App() {
                       showDiff ? mapDiff.addedEdges : undefined
                     }
                     isSample={aiResult === null}
+                    replayActiveIds={replayActiveIds}
+                    replayPassedIds={replayPassedIds}
+                    replayDetachedActive={isDetachedStep}
                   />
+
+                  {replayIndex !== null && (
+                    <div className="mt-3">
+                      <HappyPathReplay
+                        stages={replayStages}
+                        detached={replayDetached}
+                        index={replayIndex}
+                        nodes={screens.nodes}
+                        language={language}
+                        onPrev={() =>
+                          setReplayIndex((i) => Math.max(0, (i ?? 0) - 1))
+                        }
+                        onNext={() =>
+                          setReplayIndex((i) =>
+                            Math.min(replayTotal - 1, (i ?? 0) + 1),
+                          )
+                        }
+                        onClose={() => setReplayIndex(null)}
+                      />
+                    </div>
+                  )}
 
                   <div className="mt-4">
                     <BottomSection

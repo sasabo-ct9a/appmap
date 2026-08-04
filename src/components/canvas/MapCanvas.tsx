@@ -62,6 +62,14 @@ type MapCanvasProps = {
   diffAddedEdgeIds?: Set<string>;
   /** v0.1.8:サンプル表示中(未分析)フラグ。true のとき見出し横にバッジ表示 */
   isSample?: boolean;
+  /** 流れの再生:いま光らせるステージの要素 id 集合(null = 再生していない)。
+   *  分岐すると複数入るので Set。同時に teal 強調して枝分かれを正直に見せる。 */
+  replayActiveIds?: Set<number> | null;
+  /** 流れの再生:ここまでに通り過ぎた要素 id 集合。teal で淡く残す(流れの軌跡)。 */
+  replayPassedIds?: Set<number> | null;
+  /** 流れの再生:現在ステップが「流れ外(入口からたどり着けない)」要素の補足かどうか。
+   *  true のとき active 要素を teal でなく灰・破線で強調し「本流の外」を示す。 */
+  replayDetachedActive?: boolean;
 };
 
 const ZOOM_MIN = 0.4;
@@ -104,6 +112,9 @@ function MapCanvas({
   diffAddedNodeIds,
   diffAddedEdgeIds,
   isSample = false,
+  replayActiveIds = null,
+  replayPassedIds = null,
+  replayDetachedActive = false,
 }: MapCanvasProps) {
   const [hoveredId, setHoveredId] = useState<number | null>(null);
   // v0.1.7 色統一:安定インデックスから引くローカル palette 関数
@@ -113,6 +124,35 @@ function MapCanvas({
   );
   const paletteFor = (id: number) =>
     paletteAt(stableColorIndex.get(id) ?? 0);
+
+  // 流れの再生:要素の状態を 4 つに分ける。
+  //   active = 現在ステージ(明るく teal 強調)、passed = 通過済み(teal で淡く残す)、
+  //   dim = まだ先(強く減光)、off = 再生していない(通常表示)。
+  const replayOn = replayActiveIds != null;
+  const replayState = (id: number): "active" | "passed" | "dim" | "off" => {
+    if (!replayOn) return "off";
+    if (replayActiveIds!.has(id)) return "active";
+    if (replayPassedIds?.has(id)) return "passed";
+    return "dim";
+  };
+  const replayOpacity = (id: number): number => {
+    switch (replayState(id)) {
+      case "active":
+      case "off":
+        return 1;
+      case "passed":
+        return 0.55;
+      case "dim":
+        return 0.16;
+    }
+  };
+  const isReached = (id: number) =>
+    (replayActiveIds?.has(id) ?? false) || (replayPassedIds?.has(id) ?? false);
+  // 流れ外(detached)ステップは灰トーン、本流ステージは teal で強調する。
+  const replayActiveColor = replayDetachedActive ? "#94a3b8" : "#14b8a6";
+  const replayActiveGlow = replayDetachedActive
+    ? "drop-shadow(0 0 10px #94a3b8aa)"
+    : "drop-shadow(0 0 12px #14b8a6cc)";
   // v0.1.8:このフォルダの全付箋を Map で持つ(notesTick が上がる度に再読込)
   const nodeNotes = useMemo(
     () => loadAllNotes(folderPath),
@@ -797,15 +837,31 @@ function MapCanvas({
               const emphasis = involved || selectedInvolved;
               // v0.1.8 差分マップ:新規追加エッジは橙色で強調
               const isDiffAdded = diffAddedEdgeIds?.has(edge.id) ?? false;
+              // 流れの再生:両端が「到達済み」の線を軌跡として teal で描く。
+              //   現在ステージへ入る線(to が active)を最も明るくして「今ここに来た」を示す。
+              const flowEdge =
+                replayOn && isReached(edge.from) && isReached(edge.to);
+              const flowArriving =
+                flowEdge && (replayActiveIds?.has(edge.to) ?? false);
+              let stroke = isDiffAdded ? "#f97316" : fromP.accent;
+              let strokeOpacity = isDiffAdded ? 0.9 : emphasis ? 0.8 : 0.32;
+              let strokeWidth = isDiffAdded ? 2.4 : emphasis ? 2.2 : 1.4;
+              let dash: string | undefined = isDiffAdded ? "5 3" : undefined;
+              if (replayOn) {
+                stroke = flowEdge ? "#14b8a6" : fromP.accent;
+                strokeOpacity = flowArriving ? 0.95 : flowEdge ? 0.45 : 0.06;
+                strokeWidth = flowArriving ? 3.4 : flowEdge ? 2 : 1;
+                dash = undefined;
+              }
               return (
                 <path
                   key={edge.id}
                   d={`M ${fromB.x} ${fromB.y} Q ${pullX} ${pullY} ${toB.x} ${toB.y}`}
                   fill="none"
-                  stroke={isDiffAdded ? "#f97316" : fromP.accent}
-                  strokeOpacity={isDiffAdded ? 0.9 : emphasis ? 0.8 : 0.32}
-                  strokeWidth={isDiffAdded ? 2.4 : emphasis ? 2.2 : 1.4}
-                  strokeDasharray={isDiffAdded ? "5 3" : undefined}
+                  stroke={stroke}
+                  strokeOpacity={strokeOpacity}
+                  strokeWidth={strokeWidth}
+                  strokeDasharray={dash}
                   strokeLinecap="round"
                   style={{ transition: "stroke-opacity 0.15s, stroke-width 0.15s" }}
                 />
@@ -841,7 +897,7 @@ function MapCanvas({
                     d={`M ${branchEdgeX} ${branchEdgeY} Q ${midX} ${midY} ${leafEdgeX} ${leafEdgeY}`}
                     fill="none"
                     stroke={p.accent}
-                    strokeOpacity={0.5}
+                    strokeOpacity={0.5 * replayOpacity(node.id)}
                     strokeWidth={1.4}
                     strokeDasharray="3 4"
                     strokeLinecap="round"
@@ -866,6 +922,7 @@ function MapCanvas({
                     key={`leafchip-${node.id}-${i}`}
                     onClick={() => handleNodeClickSafe(node.id)}
                     className="cursor-pointer"
+                    style={{ opacity: replayOpacity(node.id) }}
                   >
                     <rect
                       x={lx - leaf.w / 2}
@@ -930,7 +987,7 @@ function MapCanvas({
                         d={`M ${startX} ${startY} C ${midX} ${startY} ${midX} ${endY} ${endX} ${endY}`}
                         fill="none"
                         stroke={p.accent}
-                        strokeOpacity={0.35}
+                        strokeOpacity={0.35 * replayOpacity(node.id)}
                         strokeWidth={1.2}
                         strokeDasharray="2 4"
                         strokeLinecap="round"
@@ -955,6 +1012,7 @@ function MapCanvas({
                         key={`dchip-${node.id}-${i}`}
                         onClick={() => handleNodeClickSafe(node.id)}
                         className="cursor-pointer"
+                        style={{ opacity: replayOpacity(node.id) }}
                       >
                         {/* テーブル本体 */}
                         <rect
@@ -1082,6 +1140,9 @@ function MapCanvas({
               const isHovered = node.id === hoveredId;
               const isActive = isSelected || isHovered;
               const isBeingDragged = nodeDragRef.current?.id === node.id;
+              const rState = replayState(node.id);
+              const isReplayActive = rState === "active";
+              const isReplayPassed = rState === "passed";
               // 詳細モード = 技術者向け:label(短い画面名)を優先、
               // サブタイトルは主要ファイルのベース名。かんたんモードは従来通り userIntent。
               const labelSource = showDataDetails
@@ -1111,10 +1172,17 @@ function MapCanvas({
                   onPointerCancel={handleNodePointerUp}
                   className="cursor-grab active:cursor-grabbing"
                   style={{
-                    filter: isActive || isBeingDragged
-                      ? `drop-shadow(0 6px 16px ${p.accent}33)`
-                      : "drop-shadow(0 2px 6px rgba(15,23,42,0.08))",
-                    transition: isBeingDragged ? "none" : "filter 0.15s",
+                    opacity: replayOpacity(node.id),
+                    filter: isReplayActive
+                      ? replayActiveGlow
+                      : isReplayPassed
+                        ? "drop-shadow(0 0 6px #14b8a655)"
+                        : isActive || isBeingDragged
+                          ? `drop-shadow(0 6px 16px ${p.accent}33)`
+                          : "drop-shadow(0 2px 6px rgba(15,23,42,0.08))",
+                    transition: isBeingDragged
+                      ? "none"
+                      : "opacity 0.2s, filter 0.15s",
                   }}
                 >
                   {/* 主枝ピル */}
@@ -1126,14 +1194,29 @@ function MapCanvas({
                     rx={BRANCH_H / 2}
                     fill={p.soft}
                     stroke={
-                      diffAddedNodeIds?.has(node.id)
-                        ? "#10b981" // 差分:新規追加は緑外枠で強調
-                        : isActive
-                          ? p.accent
-                          : p.border
+                      isReplayActive
+                        ? replayActiveColor // 流れの再生:本流は teal、流れ外は灰で強調
+                        : isReplayPassed
+                          ? "#5eead4" // 通過済み:淡い teal で軌跡を残す
+                          : diffAddedNodeIds?.has(node.id)
+                            ? "#10b981" // 差分:新規追加は緑外枠で強調
+                            : isActive
+                              ? p.accent
+                              : p.border
                     }
                     strokeWidth={
-                      diffAddedNodeIds?.has(node.id) ? 3 : isActive ? 2.5 : 2
+                      isReplayActive
+                        ? 4
+                        : isReplayPassed
+                          ? 2.5
+                          : diffAddedNodeIds?.has(node.id)
+                            ? 3
+                            : isActive
+                              ? 2.5
+                              : 2
+                    }
+                    strokeDasharray={
+                      isReplayActive && replayDetachedActive ? "7 5" : undefined
                     }
                   />
                   {/* v0.1.8 差分マップ:新規追加ノードに「+ 新規」バッジ */}
