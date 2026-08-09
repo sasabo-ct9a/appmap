@@ -76,6 +76,13 @@ describe("computeReplaySteps", () => {
     expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3]]);
   });
 
+  it("entry 未指定・全て双方向で入次数 0 が無くても depth/id 最小を入口にする", () => {
+    // 2 <-> 1(双方向)。前方向だけ数えると 2 が入次数 0 に見えるが、双方向なので
+    // 実質どちらも流入あり → 配列順(先頭 2)でなく depth/id 最小の 1 を入口にする。
+    const r = result([node(2), node(1)], [edge(2, 1, true)]);
+    expect(computeReplaySteps(r).stages).toEqual([[1], [2]]);
+  });
+
   it("ループがあっても無限に回らない", () => {
     const r = result(
       [node(1, { entry: true }), node(2)],

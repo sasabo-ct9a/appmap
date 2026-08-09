@@ -37,19 +37,27 @@ export function computeReplaySteps(screens: ScreenMapResult): ReplayPlan {
   const byId = new Map(nodes.map((n) => [n.id, n]));
 
   // 入次数(どれだけ他から遷移されてくるか)。入口候補の判定に使う。
+  //   双方向エッジは逆向きの流入も数える(BFS 本体と揃える)。数えないと、双方向の片端が
+  //   「入次数 0」に見えて誤って入口に選ばれてしまう。
   const incoming = new Map<number, number>();
   for (const e of screens.edges) {
-    if (!byId.has(e.to)) continue;
-    incoming.set(e.to, (incoming.get(e.to) ?? 0) + 1);
+    if (byId.has(e.to)) {
+      incoming.set(e.to, (incoming.get(e.to) ?? 0) + 1);
+    }
+    if (e.bidirectional && byId.has(e.from)) {
+      incoming.set(e.from, (incoming.get(e.from) ?? 0) + 1);
+    }
   }
 
-  // 出発点を決める:明示 entry → 入次数 0 → depth/id 最小。
+  // 出発点を決める:明示 entry → 入次数 0 の要素(depth/id 最小)→ それも無ければ depth/id
+  //   最小。全て双方向/循環で入次数 0 が無い場合も、配列順でなく depth/id 最小で決定的に選ぶ。
+  const byDepthId = [...nodes].sort(
+    (a, b) => (a.depth ?? 0) - (b.depth ?? 0) || a.id - b.id,
+  );
   const start =
     nodes.find((n) => n.isEntryPoint) ??
-    [...nodes]
-      .sort((a, b) => (a.depth ?? 0) - (b.depth ?? 0) || a.id - b.id)
-      .find((n) => (incoming.get(n.id) ?? 0) === 0) ??
-    nodes[0];
+    byDepthId.find((n) => (incoming.get(n.id) ?? 0) === 0) ??
+    byDepthId[0];
 
   // 隣接リスト:片方向は前向きのみ、双方向は両向きに通れる。
   const adj = new Map<number, number[]>();
