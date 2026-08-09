@@ -96,3 +96,35 @@ export function computeReplaySteps(screens: ScreenMapResult): ReplayPlan {
 
   return { stages, detached };
 }
+
+/** エッジが「前ステージ → 今ステージ」を繋ぐ到達線かどうかと、描画の向き。 */
+export type EdgeFlowRole = {
+  /** 片端が passed・もう片端が active の「到達線」なら true。 */
+  arriving: boolean;
+  /** active 端が from 側(逆向き格納・双方向)なので、描画を逆向きにすべきなら true。 */
+  reversed: boolean;
+};
+
+/**
+ * 流れの再生:あるエッジが現在ステージへ「入ってくる線」かを純粋関数で判定する。
+ *
+ * 到達線 = 片端が passed(通過済み)・もう片端が active(今のステージ)。
+ *   - 両端 active(同じステージ内の横リンク)は到達線にしない(前段→今段ではないため)。
+ *   - 未到達(まだ先)の端を含む線も到達線にしない。
+ *   - active が from 側にある(= 線がデータの流れと逆向きに格納/双方向)場合は reversed=true。
+ *     呼び出し側は path の始点/終点を入れ替えて「passed 端 → active 端」へ描き伸ばす。
+ */
+export function edgeFlowRole(
+  from: number,
+  to: number,
+  activeIds: Set<number> | null | undefined,
+  passedIds: Set<number> | null | undefined,
+): EdgeFlowRole {
+  const fromActive = activeIds?.has(from) ?? false;
+  const toActive = activeIds?.has(to) ?? false;
+  const fromPassed = passedIds?.has(from) ?? false;
+  const toPassed = passedIds?.has(to) ?? false;
+  const arriving = (fromPassed && toActive) || (toPassed && fromActive);
+  const reversed = arriving && fromActive && toPassed;
+  return { arriving, reversed };
+}

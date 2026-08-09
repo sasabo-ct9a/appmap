@@ -8,6 +8,7 @@ import type {
 import { pickLocalized, type Language } from "../../lib/i18n";
 import { computeStableColorIndex, paletteAt } from "../../lib/nodeColors";
 import { loadAllNotes, type NodeTag } from "../../lib/nodeNotes";
+import { edgeFlowRole } from "../../lib/happyPath";
 
 /**
  * v0.1.7 マインドマップ化:中心ノード + 放射状の主枝 + 葉チップ。
@@ -70,6 +71,9 @@ type MapCanvasProps = {
   /** 流れの再生:現在ステップが「流れ外(入口からたどり着けない)」要素の補足かどうか。
    *  true のとき active 要素を teal でなく灰・破線で強調し「本流の外」を示す。 */
   replayDetachedActive?: boolean;
+  /** 流れの再生:現在のステップ番号(index)。この値が変わると到達エッジの描画
+   *  アニメーションを再実行する(key に混ぜて remount させるため)。 */
+  replayStep?: number | null;
 };
 
 const ZOOM_MIN = 0.4;
@@ -115,6 +119,7 @@ function MapCanvas({
   replayActiveIds = null,
   replayPassedIds = null,
   replayDetachedActive = false,
+  replayStep = null,
 }: MapCanvasProps) {
   const [hoveredId, setHoveredId] = useState<number | null>(null);
   // v0.1.7 色統一:安定インデックスから引くローカル palette 関数
@@ -838,32 +843,58 @@ function MapCanvas({
               // v0.1.8 差分マップ:新規追加エッジは橙色で強調
               const isDiffAdded = diffAddedEdgeIds?.has(edge.id) ?? false;
               // 流れの再生:両端が「到達済み」の線を軌跡として teal で描く。
-              //   現在ステージへ入る線(to が active)を最も明るくして「今ここに来た」を示す。
               const flowEdge =
                 replayOn && isReached(edge.from) && isReached(edge.to);
-              const flowArriving =
-                flowEdge && (replayActiveIds?.has(edge.to) ?? false);
+              // 「前ステージ → 今ステージ」を繋ぐ到達線か(+ 描画向き)を純粋関数で判定。
+              //   双方向/逆向き格納でも active 端へ向けて描き、同ステージ内の横リンクは除く。
+              const { arriving, reversed } = replayOn
+                ? edgeFlowRole(
+                    edge.from,
+                    edge.to,
+                    replayActiveIds,
+                    replayPassedIds,
+                  )
+                : { arriving: false, reversed: false };
               let stroke = isDiffAdded ? "#f97316" : fromP.accent;
               let strokeOpacity = isDiffAdded ? 0.9 : emphasis ? 0.8 : 0.32;
               let strokeWidth = isDiffAdded ? 2.4 : emphasis ? 2.2 : 1.4;
               let dash: string | undefined = isDiffAdded ? "5 3" : undefined;
               if (replayOn) {
                 stroke = flowEdge ? "#14b8a6" : fromP.accent;
-                strokeOpacity = flowArriving ? 0.95 : flowEdge ? 0.45 : 0.06;
-                strokeWidth = flowArriving ? 3.4 : flowEdge ? 2 : 1;
+                strokeOpacity = arriving ? 0.95 : flowEdge ? 0.45 : 0.06;
+                strokeWidth = arriving ? 3.4 : flowEdge ? 2 : 1;
                 dash = undefined;
               }
+              // 到達線は active 端へ向かって「描き伸ばす」(データが流れる表現)。
+              //   pathLength=1 に正規化して長さ非依存の dash アニメにし、reversed の時は
+              //   始点/終点を入れ替えて passed 端 → active 端の向きに描く。key に replayStep を
+              //   混ぜ、ステージが進む度に remount させて描画を最初からやり直す。
+              const animateDraw = arriving;
               return (
                 <path
-                  key={edge.id}
-                  d={`M ${fromB.x} ${fromB.y} Q ${pullX} ${pullY} ${toB.x} ${toB.y}`}
+                  key={
+                    animateDraw ? `flow-${edge.id}-${replayStep ?? 0}` : edge.id
+                  }
+                  d={
+                    reversed
+                      ? `M ${toB.x} ${toB.y} Q ${pullX} ${pullY} ${fromB.x} ${fromB.y}`
+                      : `M ${fromB.x} ${fromB.y} Q ${pullX} ${pullY} ${toB.x} ${toB.y}`
+                  }
                   fill="none"
                   stroke={stroke}
                   strokeOpacity={strokeOpacity}
                   strokeWidth={strokeWidth}
-                  strokeDasharray={dash}
+                  strokeDasharray={animateDraw ? "1" : dash}
                   strokeLinecap="round"
-                  style={{ transition: "stroke-opacity 0.15s, stroke-width 0.15s" }}
+                  pathLength={animateDraw ? 1 : undefined}
+                  style={
+                    animateDraw
+                      ? { animation: "edge-draw 1.5s ease-out both" }
+                      : {
+                          transition:
+                            "stroke-opacity 0.15s, stroke-width 0.15s",
+                        }
+                  }
                 />
               );
             })}

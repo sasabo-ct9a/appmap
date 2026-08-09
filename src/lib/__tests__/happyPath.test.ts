@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeReplaySteps } from "../happyPath";
+import { computeReplaySteps, edgeFlowRole } from "../happyPath";
 import type { ScreenMapResult } from "../claudeCli";
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 
@@ -128,5 +128,45 @@ describe("computeReplaySteps", () => {
       [edge(1, 2), edge(2, 3), edge(3, 4, true), edge(3, 5, true)],
     );
     expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3], [4, 5]]);
+  });
+});
+
+describe("edgeFlowRole", () => {
+  const active = new Set([2, 3]); // 今のステージ
+  const passed = new Set([1]); // 通過済み
+
+  it("前段→今段(順方向)は到達線・逆向きでない", () => {
+    expect(edgeFlowRole(1, 2, active, passed)).toEqual({
+      arriving: true,
+      reversed: false,
+    });
+  });
+
+  it("今段→前段(逆向き格納/双方向)は到達線・逆向きで描く", () => {
+    expect(edgeFlowRole(2, 1, active, passed)).toEqual({
+      arriving: true,
+      reversed: true,
+    });
+  });
+
+  it("同ステージどうし(両端 active)は到達線にしない", () => {
+    expect(edgeFlowRole(2, 3, active, passed)).toEqual({
+      arriving: false,
+      reversed: false,
+    });
+  });
+
+  it("まだ先の要素(未到達)を含む線は到達線にしない", () => {
+    expect(edgeFlowRole(2, 9, active, passed)).toEqual({
+      arriving: false,
+      reversed: false,
+    });
+  });
+
+  it("集合が null / undefined でも壊れない", () => {
+    expect(edgeFlowRole(1, 2, null, null)).toEqual({
+      arriving: false,
+      reversed: false,
+    });
   });
 });

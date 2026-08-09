@@ -56,6 +56,18 @@ html, body {
   color: var(--color-ink-strong);
 }
 
+/* 流れの再生:要素を繋ぐ線を「描き伸ばす」アニメーション(データが流れる表現)。
+   path に pathLength=1 + stroke-dasharray=1 を付け、offset を 1→0 に動かして
+   線が始点(前のステージ)から終点(今のステージ)へ伸びるように見せる(長さ非依存)。 */
+@keyframes edge-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
 /*
  * v0.1.7 仕様書 PDF 出力:window.print() で OS の印刷ダイアログを開き、
  * 「PDF として保存」を選んでもらう。
