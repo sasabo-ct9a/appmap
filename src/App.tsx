@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ask, save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import Header from "./components/layout/Header";
@@ -89,6 +89,12 @@ function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
   // ハッピーパス再生:何ステップ目か(null = 再生していない)
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
+  // 自動再生中かどうか。true の間、一定間隔で次のステージへ自動で進む。
+  const [replayPlaying, setReplayPlaying] = useState<boolean>(false);
+  // 自動再生の停止判定に使う総ステップ数。描画時に最新値を書き込み、effect は ref 経由で読む。
+  //   こうすると自動再生 effect の依存を replayPlaying / replayIndex だけに保て、
+  //   総数の算出(早期 return より後)と hook 宣言順の制約がぶつからない。
+  const replayTotalRef = useRef<number>(0);
   // v0.1.8:ノートの変更を検知して MapCanvas のバッジを再描画するための単純カウンタ
   const [notesTick, setNotesTick] = useState<number>(0);
   const [noCodeMode, setNoCodeMode] = useState<boolean>(false);
@@ -157,14 +163,33 @@ function App() {
     setNodeOffsets(new Map());
   }, [lastAnalyzedFolder]);
 
-  // 読み込んだマップ(aiResult)が変わったら流れの再生を中断する。
-  //   replayIndex は「今のマップの何ステージ目か」なので、別アプリ・再スキャン後に
-  //   持ち越すと、別の(または作り直した)マップを途中から再生表示してしまう。
-  //   aiResult をキーにすると切替も再スキャンも捕まえられ、かつ言語・詳細レベルの
-  //   切替(aiResult は不変)では発火しないので、無駄に再生を切らない。
+  // マップの中身が変わったら流れの再生を中断する。
+  //   replayIndex は「今のマップの何ステージ目か」なので、要素の集合が変わった後に
+  //   持ち越すと別のマップを途中から再生表示してしまう(範囲外なら全体が薄いまま固まる)。
+  //   キーは aiResult(別アプリ切替・再スキャン)+ detailLevel(かんたん/詳細で表示要素が
+  //   増減しステージ数が変わる)。言語は要素数を変えない(ラベルだけ)ので依存に入れない。
   useEffect(() => {
     setReplayIndex(null);
-  }, [aiResult]);
+    setReplayPlaying(false);
+  }, [aiResult, detailLevel]);
+
+  // 自動再生:再生中は一定間隔で次のステージへ進み、最後まで来たら止まる。
+  //   setTimeout チェーン(replayIndex が変わる度に effect 再実行 → 次を予約)なので、
+  //   ステージごとの CSS トランジションと合わさって「最初から最後まで」流れて見える。
+  useEffect(() => {
+    if (!replayPlaying || replayIndex === null) return;
+    const total = replayTotalRef.current;
+    if (replayIndex >= total - 1) {
+      setReplayPlaying(false); // 末尾に到達したら停止
+      return;
+    }
+    const id = setTimeout(() => {
+      setReplayIndex((i) =>
+        i === null ? i : Math.min(replayTotalRef.current - 1, i + 1),
+      );
+    }, 1900);
+    return () => clearTimeout(id);
+  }, [replayPlaying, replayIndex]);
 
   /** v0.1.7: 詳細レベルを変更しつつ localStorage に永続化。 */
   const handleDetailLevelChange = (next: DetailLevel) => {
@@ -799,22 +824,28 @@ function App() {
     computeReplaySteps(screens);
   const replayHasDetached = replayDetached.length > 0;
   const replayTotal = replayStages.length + (replayHasDetached ? 1 : 0);
+  replayTotalRef.current = replayTotal; // 自動再生 effect が最新の総数を読めるように
+  // detailLevel 変更等でステージ数が縮み replayIndex が範囲外になったら、描画上は
+  //   「再生していない」扱いにする(全体が薄いまま固まるのを防ぐ)。state 自体の
+  //   クリーンアップは上の中断 effect([aiResult, detailLevel])が次の描画で行う。
+  const activeReplayIndex =
+    replayIndex !== null && replayIndex < replayTotal ? replayIndex : null;
   const isDetachedStep =
-    replayIndex != null &&
+    activeReplayIndex != null &&
     replayHasDetached &&
-    replayIndex === replayStages.length;
+    activeReplayIndex === replayStages.length;
   const replayActiveIds =
-    replayIndex == null
+    activeReplayIndex == null
       ? null
       : isDetachedStep
         ? new Set(replayDetached)
-        : new Set(replayStages[replayIndex] ?? []);
+        : new Set(replayStages[activeReplayIndex] ?? []);
   const replayPassedIds =
-    replayIndex == null
+    activeReplayIndex == null
       ? null
       : isDetachedStep
         ? new Set(replayStages.flat())
-        : new Set(replayStages.slice(0, replayIndex).flat());
+        : new Set(replayStages.slice(0, activeReplayIndex).flat());
 
   return (
     <div className="h-screen flex bg-canvas overflow-hidden app-shell">
@@ -1207,11 +1238,15 @@ function App() {
                   className="mb-6 transition-opacity duration-200"
                   style={{ minHeight: "320px" }}
                 >
-                  {replayIndex === null && replayTotal >= 2 && (
+                  {activeReplayIndex === null && replayTotal >= 2 && (
                     <div className="flex justify-end mb-2">
                       <button
                         type="button"
-                        onClick={() => setReplayIndex(0)}
+                        data-tour="replay"
+                        onClick={() => {
+                          setReplayIndex(0);
+                          setReplayPlaying(true); // ボタンで即・自動再生を開始
+                        }}
                         className="flex items-center gap-1.5 rounded-[10px] px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
                         style={{ background: "var(--color-feature-teal)" }}
                       >
@@ -1226,6 +1261,48 @@ function App() {
                         </svg>
                         {language === "ja" ? "流れを再生" : "Replay flow"}
                       </button>
+                    </div>
+                  )}
+                  {/* 流れの再生バー:マップの上(再生ボタンと同じ位置)に置く。
+                      再生中はボタンが消え、このバーがその枠を引き継ぐ。 */}
+                  {activeReplayIndex !== null && (
+                    <div className="mb-2">
+                      <HappyPathReplay
+                        stages={replayStages}
+                        detached={replayDetached}
+                        index={activeReplayIndex}
+                        nodes={screens.nodes}
+                        language={language}
+                        playing={replayPlaying}
+                        onTogglePlay={() => {
+                          if (replayPlaying) {
+                            setReplayPlaying(false);
+                            return;
+                          }
+                          // 末尾なら最初から、それ以外は現在地から再生
+                          if (
+                            replayIndex !== null &&
+                            replayIndex >= replayTotal - 1
+                          ) {
+                            setReplayIndex(0);
+                          }
+                          setReplayPlaying(true);
+                        }}
+                        onPrev={() => {
+                          setReplayPlaying(false); // 手動操作は自動再生を止める
+                          setReplayIndex((i) => Math.max(0, (i ?? 0) - 1));
+                        }}
+                        onNext={() => {
+                          setReplayPlaying(false);
+                          setReplayIndex((i) =>
+                            Math.min(replayTotal - 1, (i ?? 0) + 1),
+                          );
+                        }}
+                        onClose={() => {
+                          setReplayPlaying(false);
+                          setReplayIndex(null);
+                        }}
+                      />
                     </div>
                   )}
                   <MapCanvas
@@ -1252,28 +1329,8 @@ function App() {
                     replayActiveIds={replayActiveIds}
                     replayPassedIds={replayPassedIds}
                     replayDetachedActive={isDetachedStep}
+                    replayStep={activeReplayIndex}
                   />
-
-                  {replayIndex !== null && (
-                    <div className="mt-3">
-                      <HappyPathReplay
-                        stages={replayStages}
-                        detached={replayDetached}
-                        index={replayIndex}
-                        nodes={screens.nodes}
-                        language={language}
-                        onPrev={() =>
-                          setReplayIndex((i) => Math.max(0, (i ?? 0) - 1))
-                        }
-                        onNext={() =>
-                          setReplayIndex((i) =>
-                            Math.min(replayTotal - 1, (i ?? 0) + 1),
-                          )
-                        }
-                        onClose={() => setReplayIndex(null)}
-                      />
-                    </div>
-                  )}
 
                   <div className="mt-4">
                     <BottomSection
@@ -1404,7 +1461,7 @@ function buildTourSteps(language: Language): TourStep[] {
     return [
       {
         title: "AppMap へようこそ",
-        body: "AI で作ったアプリの中身を 1 枚の地図で把握できます。主要 6 機能を順に紹介します(1〜2 分)。",
+        body: "AI で作ったアプリの中身を 1 枚の地図で把握できます。主要 7 機能を順に紹介します(1〜2 分)。",
         placement: "center",
       },
       {
@@ -1419,23 +1476,28 @@ function buildTourSteps(language: Language): TourStep[] {
         placement: "center",
       },
       {
+        target: "replay",
+        title: "③ 流れを再生",
+        body: "「▶ 流れを再生」を押すと、入口から順に要素が 1 ステップずつ光ります。アプリがどの順で動くかを、戻る / 次へでゆっくり追えます。枝分かれする所は、関わる要素がまとめて光ります。",
+      },
+      {
         target: "mode-toggle",
-        title: "③ かんたん / 詳細モード切替",
+        title: "④ かんたん / 詳細モード切替",
         body: "「かんたん」は日常の言葉(例:ログイン画面)。「詳細」にすると技術名や、その要素が扱うデータも表示します。",
       },
       {
         target: "nav-checklist",
-        title: "④ コードチェック",
+        title: "⑤ コードチェック",
         body: "公開前に確認したい「うっかり残し」を 4 つチェックします:\n・APIキー / パスワードなど秘密情報の直書き(.env の漏れも。公開すると誰でも使えてしまう)\n・自動テストがあるか(テストの仕組み・テストコードの有無)\n・console.log の消し忘れ\n・TODO の見落とし\nコードを直して保存すると、AppMap が自動でチェックし直します。",
       },
       {
         target: "export",
-        title: "⑤ 仕様書 / 共有 HTML を出力",
+        title: "⑥ 仕様書 / 共有 HTML を出力",
         body: "アプリの構造を 2 形式で出力できます:\n・仕様書(PDF):クライアントや上司に渡せる正式ドキュメント\n・共有 HTML:相手はブラウザで開くだけ(AppMap のインストール不要)",
       },
       {
         target: "engine-switch",
-        title: "⑥ AI エンジン切替",
+        title: "⑦ AI エンジン切替",
         body: "解析に使う AI を切り替えられます:\n・Claude(クラウド):高精度。API 利用料(従量制)\n・ローカル AI:PC 上で動く。無料・オフライン、精度は劣る\n設定では表示言語やエディタも選べます。",
       },
       {
@@ -1448,7 +1510,7 @@ function buildTourSteps(language: Language): TourStep[] {
   return [
     {
       title: "Welcome to AppMap",
-      body: "Understand AI-generated apps as a single map. A quick tour of 6 key features (1-2 min).",
+      body: "Understand AI-generated apps as a single map. A quick tour of 7 key features (1-2 min).",
       placement: "center",
     },
     {
@@ -1463,23 +1525,28 @@ function buildTourSteps(language: Language): TourStep[] {
       placement: "center",
     },
     {
+      target: "replay",
+      title: "3. Replay the flow",
+      body: "Press '▶ Replay flow' to light up elements one step at a time from the entry. Follow the order the app runs in with Back / Next; where the flow branches, the related elements light up together.",
+    },
+    {
       target: "mode-toggle",
-      title: "3. Easy / Detailed mode",
+      title: "4. Easy / Detailed mode",
       body: "'Easy' uses everyday labels (e.g. 'Login screen'). 'Detailed' adds engineer names and the data each element reads or writes.",
     },
     {
       target: "nav-checklist",
-      title: "4. Code check",
+      title: "5. Code check",
       body: "Scans for 4 common leftovers to clean up before shipping:\n・Hardcoded secrets like API keys / passwords (incl. exposed .env; anyone can use them once published)\n・Whether automated tests exist (test setup or test code)\n・Forgotten console.log prints\n・Missed TODO notes\nRe-checks automatically when you save your code.",
     },
     {
       target: "export",
-      title: "5. Export spec doc / share HTML",
+      title: "6. Export spec doc / share HTML",
       body: "Export the app's structure in two formats:\n・Spec doc (PDF): a formal document for a client or manager\n・Share HTML: recipients just open it in a browser (no AppMap install needed)",
     },
     {
       target: "engine-switch",
-      title: "6. Switch AI engine",
+      title: "7. Switch AI engine",
       body: "Switch the AI used for analysis:\n・Claude (cloud): high accuracy. Uses Anthropic's API (pay-per-use)\n・Local AI: runs on your PC — free and offline, but less accurate\nSettings also let you change language and editor.",
     },
     {

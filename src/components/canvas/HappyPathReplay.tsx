@@ -10,6 +10,10 @@ type Props = {
   index: number;
   nodes: ScreenNode[];
   language: Language;
+  /** 自動再生中か。true なら一時停止ボタン、false なら再生ボタンを出す。 */
+  playing: boolean;
+  /** 再生 / 一時停止の切替。 */
+  onTogglePlay: () => void;
   onPrev: () => void;
   onNext: () => void;
   onClose: () => void;
@@ -37,6 +41,8 @@ function HappyPathReplay({
   index,
   nodes,
   language,
+  playing,
+  onTogglePlay,
   onPrev,
   onNext,
   onClose,
@@ -48,6 +54,8 @@ function HappyPathReplay({
         prev: "戻る",
         next: "次へ",
         close: "終了",
+        play: "自動再生",
+        pause: "一時停止",
         step: (n: number, t: number) => `ステップ ${n} / ${t}`,
         split: (n: number) => `ここで ${n} つに分かれます`,
         detached: (n: number) => `入口からたどり着けない要素(${n} 件)`,
@@ -58,6 +66,8 @@ function HappyPathReplay({
         prev: "Back",
         next: "Next",
         close: "Close",
+        play: "Auto-play",
+        pause: "Pause",
         step: (n: number, t: number) => `Step ${n} / ${t}`,
         split: (n: number) => `Splits into ${n} here`,
         detached: (n: number) => `Not reachable from the start (${n})`,
@@ -180,6 +190,24 @@ function HappyPathReplay({
       </div>
 
       <div className="flex items-center gap-2 flex-shrink-0">
+        <button
+          type="button"
+          onClick={onTogglePlay}
+          aria-label={playing ? L.pause : L.play}
+          title={playing ? L.pause : L.play}
+          className="flex items-center justify-center w-8 h-8 rounded-md border border-border-soft text-ink bg-paper hover:bg-canvas transition-colors"
+        >
+          {playing ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="5" width="4" height="14" rx="1" />
+              <rect x="14" y="5" width="4" height="14" rx="1" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          )}
+        </button>
         <button
           type="button"
           onClick={onPrev}
