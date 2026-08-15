@@ -1647,12 +1647,13 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
     //   - MAX_SCAN_FILES:ソース内容を読む上限。
     //     200 は低すぎて、少し大きめのプロジェクトで常に「未完了(打切り)」になり
     //     "コード検査は完了していません" が出続けていた。実際の非エンジニアのアプリを
-    //     ほぼ全部読み切れるよう 2000 に引き上げる(小さいテキストファイルなら数千件の
-    //     読み込み + regex でも spawn_blocking 上で 1〜2 秒。極端に大きいツリーは
-    //     MAX_WALK_FILES/MAX_WALK_VISITS が上流で止める)。
+    //     大きいアプリでも「未走査」を減らすため 8000 まで読む。内容読み込み + regex は
+    //     spawn_blocking 上。件数上限に加え、下の content scan ループに時間上限(6 秒)を
+    //     付け、極端に重いプロジェクトでも走査時間を抑える(先読みの時間上限と同じ考え)。
+    //     極端に大きいツリーは MAX_WALK_FILES/MAX_WALK_VISITS が上流で止める。
     //   - MAX_WALK_FILES:ファイル名リストの上限(test framework/test file 検出は
     //     名前だけ見るので大きめに)。source が cap を超えても test framework は落とさない。
-    const MAX_SCAN_FILES: usize = 2000;
+    const MAX_SCAN_FILES: usize = 8000;
     const MAX_WALK_FILES: usize = 10_000;
     // 訪問(stat)エントリ数の上限。既知の巨大キャッシュは is_skippable_dir で除外するが、
     // 未知の巨大ツリーに対する保険。この数に達したら partial 扱いで打ち切る。
@@ -1962,7 +1963,14 @@ async fn pre_release_scan(folder: String) -> Result<PreReleaseScanResult, String
         .filter(|p| !is_test_file_path(p))
         .take(MAX_SCAN_FILES)
         .collect();
+    // 内容読み込みの時間上限。上限を 8000 に上げたので、極端に重いプロジェクトでも走査が
+    //   長引かないよう 6 秒で打ち切り、未走査分は partial(files_truncated)に倒す。
+    let scan_start = Instant::now();
     for path in content_targets {
+        if scan_start.elapsed() > Duration::from_secs(6) {
+            files_truncated = true;
+            break;
+        }
         // read_to_string は非 UTF-8(Shift-JIS/UTF-16 の .cs 等、日本語 Windows で普通に
         // 起こる)で失敗する。それを「未走査=未完了」に数えると、実際は読める内容まで
         // partial 扱いになる。bytes で読んで from_utf8_lossy にすれば文字コードに関係なく
