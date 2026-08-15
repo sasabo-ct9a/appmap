@@ -219,7 +219,8 @@ function MapCanvas({
     const M = others.length;
 
     // 葉数の上限:多ノード時はチップ密度を抑える
-    const leafCap = N >= 10 ? 4 : N >= 7 ? 5 : 7;
+    // ノードが多い(大きいアプリ)ほど葉チップを減らして密度を抑える(大規模時の保険)。
+    const leafCap = N >= 14 ? 3 : N >= 10 ? 4 : N >= 7 ? 5 : 7;
     const leafCountsCapped = others.map((n) => {
       const src = n.subActions ?? n.detail.dataUsed ?? [];
       return Math.min(src.length, leafCap);

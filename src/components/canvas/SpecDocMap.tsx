@@ -84,7 +84,8 @@ function SpecDocMap({
   const slotIndex = new Map<number, number>();
   others.forEach((n, i) => slotIndex.set(n.id, i));
   const edgeSep = buildEdgeSeparation(edges, (id) => slotIndex.get(id));
-  const leafCap = N >= 10 ? 4 : N >= 7 ? 5 : 7;
+  // ノードが多いほど葉チップを減らして密度を抑える(大規模時の保険。MapCanvas と統一)。
+  const leafCap = N >= 14 ? 3 : N >= 10 ? 4 : N >= 7 ? 5 : 7;
   const R_branch = M > 0 ? Math.max(220, 110 + M * 36) : 0;
   const leafOuterReach = BRANCH_W / 2 + LEAF_GAP_X + 200;
   // 詳細モードはデータチップ分を余計に確保

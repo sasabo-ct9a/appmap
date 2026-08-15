@@ -905,6 +905,8 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
         })
         .build();
 
+    // 列挙の時間上限。超巨大ツリー(数十万ファイル)でも「読み込み中」で固まらないための保険。
+    let walk_start = Instant::now();
     for result in walker {
         let entry = match result {
             Ok(e) => e,
@@ -928,8 +930,8 @@ fn read_project_context(folder: &Path) -> Result<String, String> {
             .to_string_lossy()
             .replace('\\', "/");
         candidates.push((screen_map_priority(&rel, &ext), rel, path.to_path_buf()));
-        // 巨大 monorepo の暴走を防ぐ backstop(通常プロジェクトでは到達しない)。
-        if candidates.len() >= 50_000 {
+        // 暴走を防ぐ backstop(件数 or 時間、どちらか先に到達したら打ち切る。通常規模では未到達)。
+        if candidates.len() >= 50_000 || walk_start.elapsed() > Duration::from_secs(3) {
             break;
         }
     }
