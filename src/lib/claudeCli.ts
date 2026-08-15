@@ -226,8 +226,8 @@ const SYSTEM_PROMPT_JA = `You are a JSON-only data extraction tool for AppMap. A
 CRITICAL OUTPUT RULE — non-negotiable:
 Your final response MUST be a single JSON object matching the schema below. No prose, no markdown fences, no explanation, no preamble, no postamble. The first character of your final response must be "{" and the last must be "}". If you write any text before or after the JSON, the task fails.
 
-PROCESS:
-You will be given a folder path. Use your file-reading tools to investigate the project structure. Start with README.md, CLAUDE.md (if present), package.json, and obvious entry points (src/App.tsx, src/main.tsx, src-tauri/src/lib.rs). Read additional files only when needed for clarity. Use thinking internally — do not write your reasoning to the output.
+INPUT — the project's files are provided INLINE:
+The project's source files are included directly in the user message, under the heading "=== Project files context ===". Analyze that inline content to build the map. Do NOT try to open, read, list, or fetch any files, and do NOT use any tools — everything you need is already inline. Pay attention to README.md, CLAUDE.md, manifests (package.json / Cargo.toml / etc.), and obvious entry points when they appear in the inline content. Go straight to producing the JSON. Use thinking internally — do not write your reasoning to the output.
 
 OUTPUT SCHEMA — JSON shape:
 
@@ -385,8 +385,8 @@ const SYSTEM_PROMPT_EN = `You are a JSON-only data extraction tool for AppMap. A
 CRITICAL OUTPUT RULE — non-negotiable:
 Your final response MUST be a single JSON object matching the schema below. No prose, no markdown fences, no explanation, no preamble, no postamble. The first character of your final response must be "{" and the last must be "}". If you write any text before or after the JSON, the task fails.
 
-PROCESS:
-You will be given a folder path. Use your file-reading tools to investigate the project structure. Start with README.md, CLAUDE.md (if present), package.json, and obvious entry points (src/App.tsx, src/main.tsx, src-tauri/src/lib.rs). Read additional files only when needed for clarity. Use thinking internally — do not write your reasoning to the output.
+INPUT — the project's files are provided INLINE:
+The project's source files are included directly in the user message, under the heading "=== Project files context ===". Analyze that inline content to build the map. Do NOT try to open, read, list, or fetch any files, and do NOT use any tools — everything you need is already inline. Pay attention to README.md, CLAUDE.md, manifests (package.json / Cargo.toml / etc.), and obvious entry points when they appear in the inline content. Go straight to producing the JSON. Use thinking internally — do not write your reasoning to the output.
 
 OUTPUT SCHEMA — JSON shape:
 
@@ -547,8 +547,8 @@ Every single node MUST include a "detailLevel" field with value 0, 1, or 2 (inte
 - At "Standard" (detailLevel <= 1), add supporting screens that round out the picture.
 - At "Detailed" (all), include everything.
 
-PROCESS:
-You will be given a folder path. Use your file-reading tools to investigate the project structure. Start with README.md, CLAUDE.md (if present), package.json, and obvious entry points (src/App.tsx, src/main.tsx, src-tauri/src/lib.rs). Read additional files only when needed for clarity.
+INPUT — the project's files are provided INLINE:
+The project's source files are included directly in the user message, under the heading "=== Project files context ===". Analyze that inline content to build the map. Do NOT try to open, read, list, or fetch any files, and do NOT use any tools — everything you need is already inline. Pay attention to README.md, CLAUDE.md, manifests (package.json / Cargo.toml / etc.), and obvious entry points when they appear in the inline content. Go straight to producing the JSON.
 
 OUTPUT SCHEMA — JSON shape:
 

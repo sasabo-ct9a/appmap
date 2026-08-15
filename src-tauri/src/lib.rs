@@ -275,50 +275,126 @@ async fn claude_analyze(
 ) -> Result<String, String> {
     let exe = find_claude_exe()?;
     let path_env = augmented_path();
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        StdCommand::new(&exe)
+    // 分析を「エージェント読み歩き(--add-dir で claude が自分で読む)」から「先読みして
+    //   inline で渡す」方式へ。理由:
+    //   1) 大規模プロジェクト(例:3 万ファイルの Unity)は読み歩きが 20 往復でも終わらず
+    //      8 分で落ちていた。read_project_context は .gitignore を尊重し上限内だけ読むので、
+    //      巨大な Library/ 等を避けて数秒で済む。
+    //   2) `--json-schema`(制約デコード)は深いネストのスキーマで生成が詰まる。ローカル LLM で
+    //      同じ現象を確認済み(json_object へ緩めて解決)。claude 側も外し、スキーマ形状は
+    //      system_prompt 内の記述で誘導、受信側 TS(unwrapResult + extractJsonFromString +
+    //      isScreenMapResult)で型検証する。
+    //   タイムアウト(8 分)は無限ハング防止の保険として維持。stdout/stderr は別スレッドで
+    //   並行ドレインしてパイプ詰まりのデッドロックを避ける。
+    //   schema 引数は上記のため未使用だが、TS 側 invoke 契約維持のため受け取りは残す。
+    let _ = &schema;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // 1. プロジェクトを先読み(.gitignore 尊重・秘密マスク済み)して 1 テキスト化。
+        let folder_path = PathBuf::from(&folder);
+        if !folder_path.exists() {
+            return Err(format!("folder does not exist: {}", folder));
+        }
+        let context = read_project_context(&folder_path)?;
+        let full_user_prompt = format!(
+            "{}\n\n=== Project files context ===\n{}",
+            user_prompt, context
+        );
+
+        // 2. claude を起動。プロンプト本体は stdin(先読みで大きく、引数だと Windows の
+        //    コマンドライン上限 ~32KB を超えて os error 206 になる)。`-p` の後に引数が無く
+        //    stdin があれば stdin から読む(claude_chat と同方式)。--add-dir 無し(先読み
+        //    済み)、--json-schema 無し(制約デコード回避)。
+        let mut child = StdCommand::new(&exe)
             .args([
                 "-p",
-                &user_prompt,
-                "--add-dir",
-                &folder,
                 "--model",
                 &model,
                 "--output-format",
                 "json",
-                "--json-schema",
-                &schema,
                 "--system-prompt",
                 &system_prompt,
+                // 先読み済みで読み歩き不要。思考 + 出力の少数往復で足りる。
                 "--max-turns",
-                "20",
+                "6",
             ])
             .env("PATH", &path_env)
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {}", e))?;
+
+        // プロンプト(先読みで大きい)は別スレッドで stdin に書き、書き終えたら drop で EOF。
+        //   stdout ドレインと並行させてパイプ詰まりのデッドロックを避ける。
+        if let Some(mut stdin) = child.stdin.take() {
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(full_user_prompt.as_bytes());
+            });
+        }
+
+        // 大きな出力(マップ JSON)で子プロセスが stdout 書き込みでブロックしないよう、
+        //   両パイプを別スレッドで最後まで読み切る。
+        let out_pipe = child.stdout.take();
+        let err_pipe = child.stderr.take();
+        let out_handle = std::thread::spawn(move || -> Vec<u8> {
+            let mut buf = Vec::new();
+            if let Some(mut p) = out_pipe {
+                p.read_to_end(&mut buf).ok();
+            }
+            buf
+        });
+        let err_handle = std::thread::spawn(move || -> Vec<u8> {
+            let mut buf = Vec::new();
+            if let Some(mut p) = err_pipe {
+                p.read_to_end(&mut buf).ok();
+            }
+            buf
+        });
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(480); // 8 分の保険(無限ハング防止)
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let stdout =
+                        String::from_utf8_lossy(&out_handle.join().unwrap_or_default())
+                            .into_owned();
+                    let stderr =
+                        String::from_utf8_lossy(&err_handle.join().unwrap_or_default())
+                            .into_owned();
+                    if !status.success() {
+                        // v0.1.7 hotfix:Claude CLI は --output-format json 時にエラーを
+                        // stdout 側に出すことがあるため、stderr + stdout 両方を混ぜる。
+                        return Err(format!(
+                            "claude failed (code {:?})\nstderr: {}\nstdout (先頭 2000 字): {}",
+                            status.code(),
+                            if stderr.trim().is_empty() { "(empty)" } else { stderr.trim() },
+                            if stdout.trim().is_empty() {
+                                "(empty)".to_string()
+                            } else {
+                                stdout.chars().take(2000).collect()
+                            }
+                        ));
+                    }
+                    return Ok(stdout);
+                }
+                Ok(None) => {
+                    if start.elapsed() > timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(
+                            "分析がタイムアウトしました(8 分)。フォルダのファイル数がとても多いか、通常のアプリではない(データ中心のフォルダ等)可能性があります。別のフォルダでお試しください。"
+                                .to_string(),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Err(e) => return Err(format!("wait failed: {}", e)),
+            }
+        }
     })
     .await
     .map_err(|e| format!("join error: {}", e))?
-    .map_err(|e| format!("failed to spawn claude: {}", e))?;
-
-    if !output.status.success() {
-        // v0.1.7 hotfix:Claude CLI は --output-format json 時にエラーを stdout 側に
-        // 出すことがあるため、stderr + stdout 両方を error メッセージに混ぜる。
-        // stderr が空でも何が起きたか分かるように。
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "claude failed (code {:?})\nstderr: {}\nstdout (先頭 2000 字): {}",
-            output.status.code(),
-            if stderr.trim().is_empty() { "(empty)" } else { stderr.trim() },
-            if stdout.trim().is_empty() {
-                "(empty)".to_string()
-            } else {
-                stdout.chars().take(2000).collect()
-            }
-        ));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Check if Node.js is installed and return its version (機能拡張 Option A).
@@ -789,156 +865,177 @@ fn llama_stop_server(state: State<'_, LlamaState>) -> Result<(), String> {
 ///   - 除外:node_modules / .git / target / dist / build / .next / venv / 隠しディレクトリ
 ///   - 上限:1 ファイル 50KB、合計 150KB(LLM のコンテキスト予算)
 fn read_project_context(folder: &Path) -> Result<String, String> {
-    let mut out = String::new();
-    let mut total: usize = 0;
-    // v0.1.7 hotfix(2 回目):bilingual 化で出力が ~14K tokens 必要、
-    // 入力との合計を ctx 32K に収めるため入力をさらに削る。
-    //   system_prompt ~2K + 出力 14K = 16K
-    //   残り 16K を入力(user_prompt + project context)で使える
-    //   30KB のテキスト ≈ 10K tokens → system + user で ~12K、余裕 4K
+    use ignore::WalkBuilder;
+
+    // bilingual 出力(~14K tokens)+ system_prompt を ctx に収めるため入力は 30KB 上限。
     let max_total: usize = 30 * 1024;
     let max_per_file: usize = 10 * 1024;
 
-    // ディレクトリ除外は is_skippable_dir に一元化(Unity/.NET キャッシュも含む)。
+    // 画面マップ生成に効く拡張子。Unity(cs/unity/prefab/asset/uxml)や Kotlin も含める
+    //   (画面・遷移が C# スクリプトや Scene/Prefab 側にある。Codex 2026-08-15 指摘)。
     const INCLUDE_EXTS: &[&str] = &[
-        "md", "json", "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "rb",
-        "vue", "svelte", "html", "css", "toml", "yaml", "yml",
+        "md", "json", "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "rb", "kt",
+        "vue", "svelte", "html", "css", "toml", "yaml", "yml", "cs", "unity", "prefab",
+        "asset", "uxml",
     ];
 
-    // 優先読込(プロジェクト構造の理解に効くやつから)
-    let priorities: &[&str] = &[
-        "README.md",
-        "README.markdown",
-        "CLAUDE.md",
-        "package.json",
-        "tsconfig.json",
-        "Cargo.toml",
-        "src-tauri/Cargo.toml",
-        "src/App.tsx",
-        "src/main.tsx",
-        "src/index.tsx",
-        "src/index.ts",
-        "src/main.ts",
-        "src/App.jsx",
-        "src/App.js",
-        "main.py",
-        "app.py",
-    ];
+    // 1. 候補ファイルを列挙。
+    //    - WalkBuilder が `.gitignore` を Git 互換で尊重(手書き近似はしない。過去に手書き
+    //      glob で誤検出/取りこぼしを繰り返した反省。ripgrep と同じ ignore クレートに委譲)。
+    //    - filter_entry で is_skippable_dir のキャッシュ/生成物ディレクトリは descend しない
+    //      (`.gitignore` に無い Unity Library 等も確実に除外)。
+    //    - hidden(true):隠しファイル/ディレクトリを除外(従来踏襲)。
+    //    - require_git(false):Git 管理外フォルダでも `.gitignore` を尊重。
+    //    - parents(false):解析対象フォルダの外(親)の `.gitignore` は見ない。
+    //    - max_filesize:巨大ファイル(生成データ等)は列挙しない。
+    let mut candidates: Vec<(i32, String, PathBuf)> = Vec::new();
+    let walker = WalkBuilder::new(folder)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(true)
+        .require_git(false)
+        .parents(false)
+        .max_filesize(Some(1024 * 1024))
+        .filter_entry(|e| {
+            if e.file_type().map_or(false, |t| t.is_dir()) {
+                return !is_skippable_dir(&e.file_name().to_string_lossy());
+            }
+            true
+        })
+        .build();
 
-    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
-    let push_file = |rel: &str, content: &str, total: &mut usize, out: &mut String| -> bool {
-        // credential ファイルは丸ごと skip、それ以外は secret 行だけ mask してから渡す。
-        // Q&A と同じ思想(local LLM でもログ出力される可能性があるため素通しにしない)。
-        if is_credential_file_path(rel) {
-            return true; // skip(false を返すと以降の処理も止まるので true で継続)
+    for result in walker {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map_or(false, |t| t.is_file()) {
+            continue;
         }
-        let masked = mask_secrets_only(content);
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !INCLUDE_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(folder)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        candidates.push((screen_map_priority(&rel, &ext), rel, path.to_path_buf()));
+        // 巨大 monorepo の暴走を防ぐ backstop(通常プロジェクトでは到達しない)。
+        if candidates.len() >= 50_000 {
+            break;
+        }
+    }
+
+    // 2. 画面/遷移に効く順へ安定ソート(score 昇順=優先、同点は rel パスで決定的に)。
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    // 3. 予算(30KB)まで連結。credential ファイルは丸ごと skip、それ以外は secret 行を
+    //    mask してから渡す(以前は再帰探索側だけマスクが抜けていた。Codex 2026-08-15 指摘)。
+    let mut out = String::new();
+    let mut total: usize = 0;
+    for (_score, rel, path) in candidates {
+        if total >= max_total {
+            break;
+        }
+        if is_credential_file_path(&rel) {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let masked = mask_secrets_only(&content);
         let truncated: String = masked.chars().take(max_per_file).collect();
         let header = format!("\n\n<<<<< FILE: {} >>>>>\n", rel);
-        let need = header.len() + truncated.len();
-        if *total + need > max_total {
-            return false;
+        // このファイルが入らなくても、後続のより小さいファイルは入るかもしれないので continue。
+        if total + header.len() + truncated.len() > max_total {
+            continue;
         }
         out.push_str(&header);
         out.push_str(&truncated);
-        *total += need;
-        true
-    };
-
-    for p in priorities.iter() {
-        let file_path = folder.join(p);
-        if file_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                if !push_file(p, &content, &mut total, &mut out) {
-                    return Ok(out);
-                }
-                visited.insert(file_path);
-            }
-        }
+        total += header.len() + truncated.len();
     }
+    Ok(out)
+}
 
-    // 再帰探索(深さ優先、典型サイズなら数十ファイル止まり)
-    fn walk(
-        dir: &Path,
-        base: &Path,
-        out: &mut String,
-        total: &mut usize,
-        max_total: usize,
-        max_per_file: usize,
-        include_exts: &[&str],
-        visited: &mut std::collections::HashSet<PathBuf>,
-    ) {
-        if *total >= max_total {
-            return;
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
+/// 画面マップ生成に効く順にファイルへ優先度スコアを付ける(小さいほど優先)。
+///   README/manifest → エントリポイント → ルーティング/画面 → 一般ソース → Unity Scene/Prefab。
+fn screen_map_priority(rel: &str, ext: &str) -> i32 {
+    let lower = rel.to_lowercase();
+    let base = lower.rsplit('/').next().unwrap_or(lower.as_str());
+
+    const TOP: &[&str] = &[
+        "readme.md", "readme.markdown", "claude.md", "package.json", "cargo.toml",
+        "tsconfig.json", "pubspec.yaml", "go.mod", "requirements.txt", "pyproject.toml",
+    ];
+    if TOP.contains(&base) {
+        return 0;
+    }
+    const ENTRY: &[&str] = &[
+        "app.tsx", "app.jsx", "app.ts", "app.js", "main.tsx", "main.ts", "index.tsx",
+        "index.ts", "main.py", "app.py", "main.dart",
+    ];
+    if ENTRY.contains(&base) {
+        return 5;
+    }
+    // 画面/遷移に効くディレクトリ・語(ルーティング中心)
+    const SCREEN_HINTS: &[&str] = &[
+        "/routes/", "/route/", "/pages/", "/page/", "/screens/", "/screen/", "/views/",
+        "/view/", "/navigation/", "/router/", "/routing/", "/scenes/", "/controllers/",
+    ];
+    if SCREEN_HINTS.iter().any(|h| lower.contains(h)) {
+        return 10;
+    }
+    // Unity Scene/Prefab/Asset は冗長なので後ろへ回す。
+    if matches!(ext, "unity" | "prefab" | "asset") {
+        return 45;
+    }
+    // 一般ソースの入口寄り。
+    if lower.starts_with("src/")
+        || lower.starts_with("app/")
+        || lower.starts_with("lib/")
+        || lower.starts_with("assets/")
+    {
+        return 20;
+    }
+    30
+}
+
+/// フォールバック用:解析対象フォルダのトップレベルの主要ディレクトリ名を返す。
+///
+/// AI 分析が失敗したとき(タイムアウト・出力破損など)、フロント側がフォルダ構成から
+/// 「必ず出る最小マップ」を組むための材料。キャッシュ/生成物/隠しディレクトリは除外。
+/// これにより「読み込めない=アプリの存在意義が無い」を回避する(最優先要件)。
+#[tauri::command]
+fn list_project_areas(folder: String) -> Result<Vec<String>, String> {
+    let path = PathBuf::from(&folder);
+    if !path.is_dir() {
+        return Err(format!("folder does not exist: {}", folder));
+    }
+    let mut dirs: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&path) {
         for entry in entries.flatten() {
-            if *total >= max_total {
-                return;
-            }
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if !entry.path().is_dir() {
                 continue;
             }
-            if path.is_dir() {
-                if is_skippable_dir(&name) {
-                    continue;
-                }
-                walk(
-                    &path,
-                    base,
-                    out,
-                    total,
-                    max_total,
-                    max_per_file,
-                    include_exts,
-                    visited,
-                );
-            } else if path.is_file() && !visited.contains(&path) {
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if !include_exts.contains(&ext.as_str()) {
-                    continue;
-                }
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let rel = path
-                        .strip_prefix(base)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let truncated: String = content.chars().take(max_per_file).collect();
-                    let header = format!("\n\n<<<<< FILE: {} >>>>>\n", rel);
-                    if *total + header.len() + truncated.len() > max_total {
-                        return;
-                    }
-                    out.push_str(&header);
-                    out.push_str(&truncated);
-                    *total += header.len() + truncated.len();
-                    visited.insert(path);
-                }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || is_skippable_dir(&name) {
+                continue;
             }
+            dirs.push(name);
         }
     }
-
-    walk(
-        folder,
-        folder,
-        &mut out,
-        &mut total,
-        max_total,
-        max_per_file,
-        INCLUDE_EXTS,
-        &mut visited,
-    );
-    Ok(out)
+    dirs.sort();
+    dirs.truncate(12); // マップが混雑しないよう上限
+    Ok(dirs)
 }
 
 /// llama-server に POST して画面マップ JSON を取得。
@@ -3470,6 +3567,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             claude_check_version,
             claude_analyze,
+            list_project_areas,
             node_check_version,
             install_claude_code,
             claude_login,
