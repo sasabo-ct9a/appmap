@@ -9,6 +9,12 @@ import { pickLocalized, type Language } from "../../lib/i18n";
 import { computeStableColorIndex, paletteAt } from "../../lib/nodeColors";
 import { loadAllNotes, type NodeTag } from "../../lib/nodeNotes";
 import { edgeFlowRole } from "../../lib/happyPath";
+import {
+  orderRingNodes,
+  ringBasePosition,
+  buildEdgeSeparation,
+  ringEdgePath,
+} from "../../lib/mapLayout";
 
 /**
  * v0.1.7 マインドマップ化:中心ノード + 放射状の主枝 + 葉チップ。
@@ -202,106 +208,14 @@ function MapCanvas({
     const othersRawUnsorted = entry
       ? nodes.filter((n) => n.id !== entry.id)
       : nodes;
-    // v0.1.7 安定化:分析ごとの並び順ゆらぎを吸収するため、決定的にソート。
-    //   1st key: 全エッジ数(degree)降順 — 中心的な要素が常に上位に
-    //   2nd key: userIntent か label のロケール順 — 同点でも一意
-    //   これで同じフォルダを再解析しても要素の配置がほぼ同じに落ち着く。
-    const degreeAll = (id: number) =>
-      edges.reduce(
-        (a, e) => a + (e.from === id ? 1 : 0) + (e.to === id ? 1 : 0),
-        0,
-      );
-    const stableLabel = (n: ScreenNode) => {
-      const src = n.userIntent ?? n.label;
-      const s = pickLocalized(src, language);
+    // つながったノードが隣接するように決定的に並べ替える(木構造 DFS + 2-opt は mapLayout に
+    //   一元化。以前はここに直書きで、SpecDocMap / ImpactMap と 3 重複していた)。
+    //   ラベル(userIntent か label のロケール順)を同点タイブレークに使う。
+    const labelOf = (n: ScreenNode) => {
+      const s = pickLocalized(n.userIntent ?? n.label, language);
       return s || String(n.id);
     };
-    const othersRaw = [...othersRawUnsorted].sort((a, b) => {
-      const dd = degreeAll(b.id) - degreeAll(a.id);
-      if (dd !== 0) return dd;
-      return stableLabel(a).localeCompare(stableLabel(b), "ja");
-    });
-
-    // 交差削減:他ノード同士の連結を見て、つながり合うノードが隣接するように並べ替え。
-    // entry 経由のエッジは除いて adjacency を作る(entry は中心からの放射エッジのみ)。
-    const otherIds = new Set(othersRaw.map((n) => n.id));
-    const adjacency = new Map<number, Set<number>>();
-    for (const e of edges) {
-      if (!otherIds.has(e.from) || !otherIds.has(e.to)) continue;
-      adjacency.set(e.from, (adjacency.get(e.from) ?? new Set()).add(e.to));
-      adjacency.set(e.to, (adjacency.get(e.to) ?? new Set()).add(e.from));
-    }
-    const degree = (id: number) => adjacency.get(id)?.size ?? 0;
-    // 初期順序:連結度が高い順に greedy(以前と同じ)
-    const initialOrder: ScreenNode[] = [];
-    const visited = new Set<number>();
-    if (othersRaw.length > 0) {
-      const start = [...othersRaw].sort((a, b) => degree(b.id) - degree(a.id))[0];
-      initialOrder.push(start);
-      visited.add(start.id);
-      while (initialOrder.length < othersRaw.length) {
-        const last = initialOrder[initialOrder.length - 1];
-        const neighbors = adjacency.get(last.id) ?? new Set();
-        let next: ScreenNode | null = null;
-        for (const n of othersRaw) {
-          if (visited.has(n.id)) continue;
-          if (!neighbors.has(n.id)) continue;
-          if (!next || degree(n.id) > degree(next.id)) next = n;
-        }
-        if (!next) {
-          for (const n of othersRaw) {
-            if (visited.has(n.id)) continue;
-            if (!next || degree(n.id) > degree(next.id)) next = n;
-          }
-        }
-        if (!next) break;
-        initialOrder.push(next);
-        visited.add(next.id);
-      }
-    }
-    // 2-opt スワップで交差数を最小化
-    //   環上でエッジ (a,b) と (c,d) が交差 ⇔ endpoints が交互に並ぶ
-    const countCrossings = (order: ScreenNode[]): number => {
-      const pos = new Map<number, number>();
-      order.forEach((n, i) => pos.set(n.id, i));
-      const chords: Array<[number, number]> = [];
-      for (const e of edges) {
-        const a = pos.get(e.from);
-        const b = pos.get(e.to);
-        if (a === undefined || b === undefined) continue;
-        chords.push([Math.min(a, b), Math.max(a, b)]);
-      }
-      let c = 0;
-      for (let i = 0; i < chords.length; i++) {
-        for (let j = i + 1; j < chords.length; j++) {
-          const [a, b] = chords[i];
-          const [x, y] = chords[j];
-          // 標準的な circular chord crossing テスト
-          if ((a < x && x < b && b < y) || (x < a && a < y && y < b)) c++;
-        }
-      }
-      return c;
-    };
-    const optimized = [...initialOrder];
-    let bestCrossings = countCrossings(optimized);
-    let improved = true;
-    let guard = 0;
-    while (improved && guard++ < 20) {
-      improved = false;
-      for (let i = 0; i < optimized.length - 1; i++) {
-        for (let j = i + 1; j < optimized.length; j++) {
-          [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
-          const c = countCrossings(optimized);
-          if (c < bestCrossings) {
-            bestCrossings = c;
-            improved = true;
-          } else {
-            [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
-          }
-        }
-      }
-    }
-    const others = optimized;
+    const others = orderRingNodes(othersRawUnsorted, edges, { labelOf });
     const M = others.length;
 
     // 葉数の上限:多ノード時はチップ密度を抑える
@@ -337,12 +251,15 @@ function MapCanvas({
       leafPositions.set(entry.id, []);
     }
 
-    // 周囲のノードを放射状に配置(UL から時計回り)
+    // 周囲のノードを放射状に配置(UL から時計回り。配置式は mapLayout に一元化)
     others.forEach((node, i) => {
-      const angleDeg = M > 0 ? -135 + (360 / M) * i : 0;
-      const angleRad = (angleDeg * Math.PI) / 180;
-      const bx = cx + R_branch * Math.cos(angleRad);
-      const by = cy + R_branch * Math.sin(angleRad);
+      const { x: bx, y: by, angle: angleRad } = ringBasePosition(
+        cx,
+        cy,
+        R_branch,
+        i,
+        M,
+      );
       branchPositions.set(node.id, { x: bx, y: by, angle: angleRad });
 
       const leafSourceAll: LocalizedText[] =
@@ -486,19 +403,38 @@ function MapCanvas({
       });
     }
 
+    // エッジ描画用:スロット index と、同回廊の平行エッジを扇状に分ける index/count。
+    const slotIndex = new Map<number, number>();
+    others.forEach((n, i) => slotIndex.set(n.id, i));
+    const edgeSep = buildEdgeSeparation(edges, (id) => slotIndex.get(id));
+
     return {
       width: W,
       height: H,
       cx,
       cy,
+      R: R_branch,
+      entryId: entry?.id ?? null,
+      edgeSep,
       branchPositions,
       leafPositions,
       dataPositions,
     };
-  }, [nodes, language, showDataDetails]);
+    // edges を依存に追加(以前欠落。エッジ変更時にレイアウトが陳腐化する潜在バグを同時修正)。
+  }, [nodes, edges, language, showDataDetails]);
 
-  const { width: W, height: H, cx, cy, branchPositions, leafPositions, dataPositions } =
-    layout;
+  const {
+    width: W,
+    height: H,
+    cx,
+    cy,
+    R: mapR,
+    entryId,
+    edgeSep,
+    branchPositions,
+    leafPositions,
+    dataPositions,
+  } = layout;
 
   // ズーム + パン適用後の viewBox
   const vbW = W / zoom;
@@ -824,15 +760,6 @@ function MapCanvas({
                 y: toBase.y + toOff.y,
               };
               const fromP = paletteFor(edge.from);
-              const midX = (fromB.x + toB.x) / 2;
-              const midY = (fromB.y + toB.y) / 2;
-              // 中心 entry を避けて外側に膨らませる:制御点を中心の反対方向へ
-              const dx = midX - cx;
-              const dy = midY - cy;
-              const d = Math.sqrt(dx * dx + dy * dy) || 1;
-              const pushOut = 80; // 外側にどれだけ膨らませるか
-              const pullX = midX + (dx / d) * pushOut;
-              const pullY = midY + (dy / d) * pushOut;
               const involved =
                 hoveredId !== null &&
                 (edge.from === hoveredId || edge.to === hoveredId);
@@ -870,16 +797,28 @@ function MapCanvas({
               //   始点/終点を入れ替えて passed 端 → active 端の向きに描く。key に replayStep を
               //   混ぜ、ステージが進む度に remount させて描画を最初からやり直す。
               const animateDraw = arriving;
+              // 重ならないエッジ path を組み立てる(境界アンカー + 角度差比例の外向き膨らみ
+              //   + 同回廊の平行分離)。ロジックは mapLayout に一元化。
+              const sepInfo = edgeSep.get(edge.id) ?? { index: 0, count: 1 };
+              const edgeD = ringEdgePath({
+                from: fromB,
+                to: toB,
+                mapCenter: { x: cx, y: cy },
+                R: mapR,
+                halfW: BRANCH_W / 2,
+                halfH: BRANCH_H / 2,
+                isEntryFrom: entryId !== null && edge.from === entryId,
+                isEntryTo: entryId !== null && edge.to === entryId,
+                index: sepInfo.index,
+                count: sepInfo.count,
+                reversed,
+              });
               return (
                 <path
                   key={
                     animateDraw ? `flow-${edge.id}-${replayStep ?? 0}` : edge.id
                   }
-                  d={
-                    reversed
-                      ? `M ${toB.x} ${toB.y} Q ${pullX} ${pullY} ${fromB.x} ${fromB.y}`
-                      : `M ${fromB.x} ${fromB.y} Q ${pullX} ${pullY} ${toB.x} ${toB.y}`
-                  }
+                  d={edgeD}
                   fill="none"
                   stroke={stroke}
                   strokeOpacity={strokeOpacity}

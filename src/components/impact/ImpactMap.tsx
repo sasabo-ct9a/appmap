@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 import { pickLocalized, type Language } from "../../lib/i18n";
+import {
+  orderRingNodes,
+  ringBasePosition,
+  buildEdgeSeparation,
+  ringEdgePath,
+} from "../../lib/mapLayout";
 
 /**
  * v0.1.7:「変更の影響を確認」ページのマップ表現。
@@ -67,98 +73,12 @@ function ImpactMap({
     const othersRawUnsorted = entry
       ? nodes.filter((n) => n.id !== entry.id)
       : nodes;
-    // v0.1.7 安定化:同じ解析でも degree 順 + label 順で配置を統一
-    const degreeAll = (id: number) =>
-      edges.reduce(
-        (a, e) => a + (e.from === id ? 1 : 0) + (e.to === id ? 1 : 0),
-        0,
-      );
-    const stableLabel = (n: ScreenNode) => {
-      const src = n.userIntent ?? n.label;
-      const s = pickLocalized(src, language);
+    // つながったノードが隣接するよう決定的に並べ替える(木構造 DFS + 2-opt は mapLayout に一元化)。
+    const labelOf = (n: ScreenNode) => {
+      const s = pickLocalized(n.userIntent ?? n.label, language);
       return s || String(n.id);
     };
-    const othersRaw = [...othersRawUnsorted].sort((a, b) => {
-      const dd = degreeAll(b.id) - degreeAll(a.id);
-      if (dd !== 0) return dd;
-      return stableLabel(a).localeCompare(stableLabel(b), "ja");
-    });
-
-    // 交差最小化(greedy + 2-opt スワップ)
-    const otherIds = new Set(othersRaw.map((n) => n.id));
-    const adjacency = new Map<number, Set<number>>();
-    for (const e of edges) {
-      if (!otherIds.has(e.from) || !otherIds.has(e.to)) continue;
-      adjacency.set(e.from, (adjacency.get(e.from) ?? new Set()).add(e.to));
-      adjacency.set(e.to, (adjacency.get(e.to) ?? new Set()).add(e.from));
-    }
-    const degree = (id: number) => adjacency.get(id)?.size ?? 0;
-    const initialOrder: ScreenNode[] = [];
-    const visited = new Set<number>();
-    if (othersRaw.length > 0) {
-      const start = [...othersRaw].sort((a, b) => degree(b.id) - degree(a.id))[0];
-      initialOrder.push(start);
-      visited.add(start.id);
-      while (initialOrder.length < othersRaw.length) {
-        const last = initialOrder[initialOrder.length - 1];
-        const neighbors = adjacency.get(last.id) ?? new Set();
-        let next: ScreenNode | null = null;
-        for (const n of othersRaw) {
-          if (visited.has(n.id)) continue;
-          if (!neighbors.has(n.id)) continue;
-          if (!next || degree(n.id) > degree(next.id)) next = n;
-        }
-        if (!next) {
-          for (const n of othersRaw) {
-            if (visited.has(n.id)) continue;
-            if (!next || degree(n.id) > degree(next.id)) next = n;
-          }
-        }
-        if (!next) break;
-        initialOrder.push(next);
-        visited.add(next.id);
-      }
-    }
-    const countCrossings = (order: ScreenNode[]) => {
-      const pos = new Map<number, number>();
-      order.forEach((n, i) => pos.set(n.id, i));
-      const chords: Array<[number, number]> = [];
-      for (const e of edges) {
-        const a = pos.get(e.from);
-        const b = pos.get(e.to);
-        if (a === undefined || b === undefined) continue;
-        chords.push([Math.min(a, b), Math.max(a, b)]);
-      }
-      let c = 0;
-      for (let i = 0; i < chords.length; i++) {
-        for (let j = i + 1; j < chords.length; j++) {
-          const [a, b] = chords[i];
-          const [x, y] = chords[j];
-          if ((a < x && x < b && b < y) || (x < a && a < y && y < b)) c++;
-        }
-      }
-      return c;
-    };
-    const optimized = [...initialOrder];
-    let bestC = countCrossings(optimized);
-    let improved = true;
-    let guard = 0;
-    while (improved && guard++ < 20) {
-      improved = false;
-      for (let i = 0; i < optimized.length - 1; i++) {
-        for (let j = i + 1; j < optimized.length; j++) {
-          [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
-          const c = countCrossings(optimized);
-          if (c < bestC) {
-            bestC = c;
-            improved = true;
-          } else {
-            [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
-          }
-        }
-      }
-    }
-    const others = optimized;
+    const others = orderRingNodes(othersRawUnsorted, edges, { labelOf });
     const M = others.length;
     const R = M > 0 ? Math.max(200, 100 + M * 34) : 0;
     const reach = R + BRANCH_W / 2 + 30;
@@ -169,17 +89,17 @@ function ImpactMap({
     const positions = new Map<number, { x: number; y: number }>();
     if (entry) positions.set(entry.id, { x: cx, y: cy });
     others.forEach((node, i) => {
-      const angleDeg = M > 0 ? -135 + (360 / M) * i : 0;
-      const angleRad = (angleDeg * Math.PI) / 180;
-      positions.set(node.id, {
-        x: cx + R * Math.cos(angleRad),
-        y: cy + R * Math.sin(angleRad),
-      });
+      const base = ringBasePosition(cx, cy, R, i, M);
+      positions.set(node.id, { x: base.x, y: base.y });
     });
-    return { W, H, cx, cy, positions };
+    // エッジ描画用:スロット index と、同回廊の平行エッジを扇状に分ける index/count。
+    const slotIndex = new Map<number, number>();
+    others.forEach((n, i) => slotIndex.set(n.id, i));
+    const edgeSep = buildEdgeSeparation(edges, (id) => slotIndex.get(id));
+    return { W, H, cx, cy, R, entryId: entry?.id ?? null, edgeSep, positions };
   }, [nodes, edges, language]);
 
-  const { W, H, cx, cy, positions } = layout;
+  const { W, H, cx, cy, R: mapR, entryId, edgeSep, positions } = layout;
 
   const vbW = W / zoom;
   const vbH = H / zoom;
@@ -364,19 +284,23 @@ function ImpactMap({
               const stroke = isRelevant && other
                 ? SAFETY_COLORS[getSafety(other)].fill
                 : "#94a3b8";
-              const midX = (fromPos.x + toPos.x) / 2;
-              const midY = (fromPos.y + toPos.y) / 2;
-              // 少し外側に膨らむ制御点
-              const dx = midX - cx;
-              const dy = midY - cy;
-              const d = Math.sqrt(dx * dx + dy * dy) || 1;
-              const push = 40;
-              const pullX = midX + (dx / d) * push;
-              const pullY = midY + (dy / d) * push;
+              const sepInfo = edgeSep.get(edge.id) ?? { index: 0, count: 1 };
+              const edgeD = ringEdgePath({
+                from: fromPos,
+                to: toPos,
+                mapCenter: { x: cx, y: cy },
+                R: mapR,
+                halfW: BRANCH_W / 2,
+                halfH: BRANCH_H / 2,
+                isEntryFrom: entryId !== null && edge.from === entryId,
+                isEntryTo: entryId !== null && edge.to === entryId,
+                index: sepInfo.index,
+                count: sepInfo.count,
+              });
               return (
                 <path
                   key={edge.id}
-                  d={`M ${fromPos.x} ${fromPos.y} Q ${pullX} ${pullY} ${toPos.x} ${toPos.y}`}
+                  d={edgeD}
                   fill="none"
                   stroke={stroke}
                   strokeOpacity={isRelevant ? 0.85 : 0.14}

@@ -5,6 +5,12 @@ import type {
 } from "../../types/screen";
 import { pickLocalized, type Language } from "../../lib/i18n";
 import { computeStableColorIndex, paletteAt } from "../../lib/nodeColors";
+import {
+  orderRingNodes,
+  ringBasePosition,
+  buildEdgeSeparation,
+  ringEdgePath,
+} from "../../lib/mapLayout";
 
 /**
  * v0.1.7 仕様書 PDF 用の静的マインドマップ SVG。
@@ -67,99 +73,17 @@ function SpecDocMap({
   const othersRawUnsorted = entry
     ? nodes.filter((n) => n.id !== entry.id)
     : nodes;
-  // v0.1.7 安定化:degree 降順 + ロケール順で決定的に並べる(分析ごとのブレを吸収)
-  const degreeAll = (id: number) =>
-    edges.reduce(
-      (a, e) => a + (e.from === id ? 1 : 0) + (e.to === id ? 1 : 0),
-      0,
-    );
-  const stableLabel = (n: ScreenNode) => {
-    const src = n.userIntent ?? n.label;
-    const s = pickLocalized(src, language);
+  // つながったノードが隣接するよう決定的に並べ替える(木構造 DFS + 2-opt は mapLayout に一元化)。
+  const labelOf = (n: ScreenNode) => {
+    const s = pickLocalized(n.userIntent ?? n.label, language);
     return s || String(n.id);
   };
-  const othersRaw = [...othersRawUnsorted].sort((a, b) => {
-    const dd = degreeAll(b.id) - degreeAll(a.id);
-    if (dd !== 0) return dd;
-    return stableLabel(a).localeCompare(stableLabel(b), "ja");
-  });
-
-  // 交差削減:greedy 初期順序 → 2-opt スワップで最終最適化
-  const otherIds = new Set(othersRaw.map((n) => n.id));
-  const adjacency = new Map<number, Set<number>>();
-  for (const e of edges) {
-    if (!otherIds.has(e.from) || !otherIds.has(e.to)) continue;
-    adjacency.set(e.from, (adjacency.get(e.from) ?? new Set()).add(e.to));
-    adjacency.set(e.to, (adjacency.get(e.to) ?? new Set()).add(e.from));
-  }
-  const degree = (id: number) => adjacency.get(id)?.size ?? 0;
-  const initialOrder: ScreenNode[] = [];
-  const visited = new Set<number>();
-  if (othersRaw.length > 0) {
-    const start = [...othersRaw].sort((a, b) => degree(b.id) - degree(a.id))[0];
-    initialOrder.push(start);
-    visited.add(start.id);
-    while (initialOrder.length < othersRaw.length) {
-      const last = initialOrder[initialOrder.length - 1];
-      const neighbors = adjacency.get(last.id) ?? new Set();
-      let next: ScreenNode | null = null;
-      for (const n of othersRaw) {
-        if (visited.has(n.id)) continue;
-        if (!neighbors.has(n.id)) continue;
-        if (!next || degree(n.id) > degree(next.id)) next = n;
-      }
-      if (!next) {
-        for (const n of othersRaw) {
-          if (visited.has(n.id)) continue;
-          if (!next || degree(n.id) > degree(next.id)) next = n;
-        }
-      }
-      if (!next) break;
-      initialOrder.push(next);
-      visited.add(next.id);
-    }
-  }
-  const countCrossings = (order: ScreenNode[]): number => {
-    const pos = new Map<number, number>();
-    order.forEach((n, i) => pos.set(n.id, i));
-    const chords: Array<[number, number]> = [];
-    for (const e of edges) {
-      const a = pos.get(e.from);
-      const b = pos.get(e.to);
-      if (a === undefined || b === undefined) continue;
-      chords.push([Math.min(a, b), Math.max(a, b)]);
-    }
-    let c = 0;
-    for (let i = 0; i < chords.length; i++) {
-      for (let j = i + 1; j < chords.length; j++) {
-        const [a, b] = chords[i];
-        const [x, y] = chords[j];
-        if ((a < x && x < b && b < y) || (x < a && a < y && y < b)) c++;
-      }
-    }
-    return c;
-  };
-  const optimized = [...initialOrder];
-  let bestCrossings = countCrossings(optimized);
-  let improved = true;
-  let guard = 0;
-  while (improved && guard++ < 20) {
-    improved = false;
-    for (let i = 0; i < optimized.length - 1; i++) {
-      for (let j = i + 1; j < optimized.length; j++) {
-        [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
-        const c = countCrossings(optimized);
-        if (c < bestCrossings) {
-          bestCrossings = c;
-          improved = true;
-        } else {
-          [optimized[i], optimized[j]] = [optimized[j], optimized[i]];
-        }
-      }
-    }
-  }
-  const others = optimized;
+  const others = orderRingNodes(othersRawUnsorted, edges, { labelOf });
   const M = others.length;
+  // エッジ描画用:スロット index と、同回廊の平行エッジを扇状に分ける index/count。
+  const slotIndex = new Map<number, number>();
+  others.forEach((n, i) => slotIndex.set(n.id, i));
+  const edgeSep = buildEdgeSeparation(edges, (id) => slotIndex.get(id));
   const leafCap = N >= 10 ? 4 : N >= 7 ? 5 : 7;
   const R_branch = M > 0 ? Math.max(220, 110 + M * 36) : 0;
   const leafOuterReach = BRANCH_W / 2 + LEAF_GAP_X + 200;
@@ -196,11 +120,11 @@ function SpecDocMap({
 
   // 周囲のノードを放射状に
   others.forEach((node, i) => {
-    const angleDeg = M > 0 ? -135 + (360 / M) * i : 0;
-    const angleRad = (angleDeg * Math.PI) / 180;
+    const base = ringBasePosition(cx, cy, R_branch, i, M);
+    const angleRad = base.angle;
     const off = offsetFor(node.id);
-    const bx = cx + R_branch * Math.cos(angleRad) + off.x;
-    const by = cy + R_branch * Math.sin(angleRad) + off.y;
+    const bx = base.x + off.x;
+    const by = base.y + off.y;
     branchPositions.set(node.id, { x: bx, y: by, angle: angleRad });
 
     const leafSourceAll: LocalizedText[] =
@@ -372,18 +296,23 @@ function SpecDocMap({
             const toB = branchPositions.get(edge.to);
             if (!fromB || !toB) return null;
             const fromP = paletteFor(edge.from);
-            const midX = (fromB.x + toB.x) / 2;
-            const midY = (fromB.y + toB.y) / 2;
-            const dx = midX - cx;
-            const dy = midY - cy;
-            const d = Math.sqrt(dx * dx + dy * dy) || 1;
-            const pushOut = 80;
-            const pullX = midX + (dx / d) * pushOut;
-            const pullY = midY + (dy / d) * pushOut;
+            const sepInfo = edgeSep.get(edge.id) ?? { index: 0, count: 1 };
+            const edgeD = ringEdgePath({
+              from: fromB,
+              to: toB,
+              mapCenter: { x: cx, y: cy },
+              R: R_branch,
+              halfW: BRANCH_W / 2,
+              halfH: BRANCH_H / 2,
+              isEntryFrom: entry ? edge.from === entry.id : false,
+              isEntryTo: entry ? edge.to === entry.id : false,
+              index: sepInfo.index,
+              count: sepInfo.count,
+            });
             return (
               <path
                 key={edge.id}
-                d={`M ${fromB.x} ${fromB.y} Q ${pullX} ${pullY} ${toB.x} ${toB.y}`}
+                d={edgeD}
                 fill="none"
                 stroke={fromP.accent}
                 strokeOpacity={0.35}
