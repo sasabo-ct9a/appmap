@@ -49,6 +49,7 @@ export type Translations = {
     statusAiMap: (screens: number, links: number, costPart: string, folder: string) => string;
     statusDone: string;
     statusSelected: (folder: string, fileCount: number | null) => string;
+    largeAppMapNote: string;
     costPart: (cost: number) => string;
     reAnalyzeConfirmTitle: string;
     reAnalyzeConfirmBody: (lastCost: number) => string;
@@ -349,6 +350,8 @@ const JA: Translations = {
     statusDone: "完了",
     statusSelected: (folder, fileCount) =>
       `選択中: ${folder} (${fileCount} ファイル)`,
+    largeAppMapNote:
+      "大きいアプリのため、このマップは主要ファイルからの AI 要約です。すべての画面を網羅していない場合があります。",
     costPart: (cost) => ` / コスト $${cost.toFixed(4)}`,
     reAnalyzeConfirmTitle: "再分析の確認",
     reAnalyzeConfirmBody: (lastCost) =>
@@ -676,6 +679,8 @@ const EN: Translations = {
     statusDone: "Done",
     statusSelected: (folder, fileCount) =>
       `Selected: ${folder} (${fileCount} files)`,
+    largeAppMapNote:
+      "This is a large app, so the map is an AI summary of the main files. It may not cover every screen.",
     costPart: (cost) => ` / cost $${cost.toFixed(4)}`,
     reAnalyzeConfirmTitle: "Re-analyze?",
     reAnalyzeConfirmBody: (lastCost) =>

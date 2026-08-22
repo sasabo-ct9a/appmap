@@ -41,6 +41,7 @@ import {
   checkLlamaModel,
 } from "./lib/llamaClient";
 import { analyzeFolder } from "./lib/engineSelector";
+import { isLargeApp } from "./lib/appSize";
 import { computeMapDiff } from "./lib/mapDiff";
 import { buildShareHTML } from "./lib/shareHTML";
 import {
@@ -960,6 +961,24 @@ function App() {
                 <span className="text-sm text-ink-soft">{statusText}</span>
               ) : null}
             </div>
+
+            {/* 大きいアプリの注意書き:マップは主要ファイルからの AI 要約なので、
+                規模が大きいほど「全画面を網羅した確定情報」ではないことを控えめに添える。
+                実分析(aiResult あり)かつファイル数が多い時だけ。サンプル表示では出さない。 */}
+            {analysisStatus === "done" &&
+            aiResult !== null &&
+            isLargeApp(fileCount) ? (
+              <div
+                className="mb-4 text-[12px] leading-relaxed rounded-[10px] px-3 py-2"
+                style={{
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  color: "#92400e",
+                }}
+              >
+                {T.app.largeAppMapNote}
+              </div>
+            ) : null}
 
             {/* エラー本文
                 v0.1.10:認証エラー時は原文の代わりにワンクリック復旧バナーを表示 */}

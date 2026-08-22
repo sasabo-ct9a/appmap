@@ -15,6 +15,7 @@ import {
   type Severity,
   type Verdict,
 } from "../../lib/preReleaseCheck";
+import { isLargeApp } from "../../lib/appSize";
 // v0.1.10:AI 深掘り機能は全削除。リリース前チェックは実 grep ベースの
 // 信頼度の高い検出結果のみを表示する構成に。
 
@@ -202,6 +203,9 @@ function PreReleaseChecklist({
         ? "ok"
         : "unavailable";
   const isPartialCoverage = scanState === "ok" && !!scan?.files_truncated;
+  // 大きいアプリ:全ファイルを走査し切れた(truncated でない)場合でも、規模が大きいほど
+  // この軽いチェックだけで「出荷 OK」と過信させたくない。見出しを控えめにし、注意書きを添える。
+  const largeApp = scanState === "ok" && isLargeApp(scan?.files_scanned);
   const assessment = computeOverallAssessment(
     findings,
     language,
@@ -221,6 +225,14 @@ function PreReleaseChecklist({
   const emptyState = isJa
     ? "重大な問題は見つかりませんでした。出荷準備が整っています!"
     : "No serious issues found. You're ready to ship!";
+  // 大きいアプリでは「出荷準備 OK」と言い切らず、見えた範囲での結果だと控えめに伝える
+  // (§6.5:このチェックは出荷ゲートではない)。
+  const largeAppEmptyState = isJa
+    ? "見えた範囲では重大な問題は見つかりませんでした。"
+    : "No serious issues were found in what we scanned.";
+  const largeAppNote = isJa
+    ? "大きいアプリなので、この軽いチェック(よくある抜け漏れのみ)だけで安心せず、AI に全体のレビューも頼むと安心です。"
+    : "This is a large app. This check only looks for common slip-ups, so don't rely on it alone — ask your AI tool for a full review too.";
   const unknownState = isJa
     ? "コード検査が完了していないため、判定を出せません。フォルダのアクセス権を確認するか、再度スキャンを実行してください。"
     : "The code check has not completed, so no verdict can be given. Check folder access or run the scan again.";
@@ -481,15 +493,29 @@ function PreReleaseChecklist({
         // 「重大なもの無し(緑バナー)」は scan 完了 かつ 全ファイル走査 かつ 実データ のときだけ。
         // sample / failed / unavailable / partial coverage はすべて「不明」表示に寄せる。
         scanState === "ok" && !isPartialCoverage ? (
-          <div
-            className="text-sm text-ink-strong px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
-            style={{ borderColor: "#a7f3d0", background: "#ecfdf5", color: "#065f46" }}
-          >
-            <div className="text-2xl mb-1">
-              <CheckCircleIcon />
+          <>
+            <div
+              className="text-sm text-ink-strong px-4 py-6 rounded-[12px] border-2 border-dashed text-center"
+              style={{ borderColor: "#a7f3d0", background: "#ecfdf5", color: "#065f46" }}
+            >
+              <div className="text-2xl mb-1">
+                <CheckCircleIcon />
+              </div>
+              {largeApp ? largeAppEmptyState : emptyState}
             </div>
-            {emptyState}
-          </div>
+            {largeApp ? (
+              <div
+                className="mt-2 text-[12px] leading-relaxed rounded-[10px] px-3 py-2"
+                style={{
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  color: "#92400e",
+                }}
+              >
+                {largeAppNote}
+              </div>
+            ) : null}
+          </>
         ) : isPartialCoverage ? (
           // 大きいプロジェクトで一部未走査(失敗ではない)。amber で「見えた範囲は問題なし +
           // ただし未完了」を伝える。下の AssessmentPanel が unknown verdict の詳細を補う。
