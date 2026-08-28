@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ScreenNode,
   ScreenEdge,
@@ -50,6 +50,8 @@ type MapCanvasProps = {
   appName?: string;
   /** 構造を見るページ用の大画面モード。SVG 領域を viewport いっぱいに広げる。 */
   tall?: boolean;
+  /** 親要素の高さいっぱいに SVG 領域を伸ばす(制作モードの可変ペイン用)。親は height を持つこと。 */
+  fillHeight?: boolean;
   /** ユーザーのドラッグ位置(App から lift up、PDF 出力でも共有)*/
   nodeOffsets: Map<number, { x: number; y: number }>;
   onNodeOffsetsChange: (
@@ -80,6 +82,8 @@ type MapCanvasProps = {
   /** 流れの再生:現在のステップ番号(index)。この値が変わると到達エッジの描画
    *  アニメーションを再実行する(key に混ぜて remount させるため)。 */
   replayStep?: number | null;
+  /** 制作モード等の小さい枠用:マップ表示時に中身を枠に合わせて中央表示する。 */
+  autoFit?: boolean;
 };
 
 const ZOOM_MIN = 0.4;
@@ -114,6 +118,7 @@ function MapCanvas({
   appSummary,
   appName,
   tall = false,
+  fillHeight = false,
   nodeOffsets,
   onNodeOffsetsChange,
   showDataDetails = false,
@@ -126,6 +131,7 @@ function MapCanvas({
   replayPassedIds = null,
   replayDetachedActive = false,
   replayStep = null,
+  autoFit = false,
 }: MapCanvasProps) {
   const [hoveredId, setHoveredId] = useState<number | null>(null);
   // v0.1.7 色統一:安定インデックスから引くローカル palette 関数
@@ -444,6 +450,48 @@ function MapCanvas({
   const vbY = (H - vbH) / 2 - pan.y;
   const viewBox = `${vbX} ${vbY} ${vbW} ${vbH}`;
 
+  // autoFit(制作モード等の小さい枠):中身の bounding box を枠に合わせて中央表示する。
+  // 本体アプリ(autoFit 無し)には影響しない。マップが変わった時だけ再フィットし、
+  // ユーザーのズーム/ドラッグ後は再実行されない(branchPositions は drag で不変)。
+  // autoFit(制作モード等):中身の「実範囲」(枝ノードの箱 + 葉チップ)を計算し、枠に収まる
+  // 倍率で中央表示する。中身が論理キャンバス W×H より大きくても(倍率 < 1)全体が入る。
+  // 固定倍率だとマップの広がりに追随できず空表示になったため、実測ベースに戻した。
+  const fitAutoFit = useCallback(() => {
+    let minX = cx;
+    let minY = cy;
+    let maxX = cx;
+    let maxY = cy;
+    const grow = (x0: number, y0: number, x1: number, y1: number) => {
+      minX = Math.min(minX, x0);
+      minY = Math.min(minY, y0);
+      maxX = Math.max(maxX, x1);
+      maxY = Math.max(maxY, y1);
+    };
+    for (const p of branchPositions.values()) {
+      grow(
+        p.x - BRANCH_W / 2,
+        p.y - BRANCH_H / 2,
+        p.x + BRANCH_W / 2,
+        p.y + BRANCH_H / 2,
+      );
+    }
+    for (const leaves of leafPositions.values()) {
+      for (const lf of leaves) {
+        grow(lf.x - lf.w / 2, lf.y - LEAF_H / 2, lf.x + lf.w / 2, lf.y + LEAF_H / 2);
+      }
+    }
+    const bw = maxX - minX + 120;
+    const bh = maxY - minY + 120;
+    // 拡大は 1.0 まで(小さいマップを拡大しすぎない)。大きいマップは縮小して全体を収める。
+    const z = clamp(Math.min(W / bw, H / bh), ZOOM_MIN, 1.0);
+    setZoom(z);
+    setPan({ x: W / 2 - (minX + maxX) / 2, y: H / 2 - (minY + maxY) / 2 });
+  }, [branchPositions, leafPositions, cx, cy, W, H]);
+
+  useEffect(() => {
+    if (autoFit) fitAutoFit();
+  }, [autoFit, fitAutoFit]);
+
   // マウスホイールでズーム(passive: false で preventDefault)。
   // v0.1.10:mapInteractive === false の時はページスクロールを妨げないよう preventDefault
   //   せず、そのままバブリング → ページがスクロールされる(埋め込みマップ方式)。
@@ -528,8 +576,13 @@ function MapCanvas({
   const zoomIn = () => setZoom((z) => clamp(z * 1.2, ZOOM_MIN, ZOOM_MAX));
   const zoomOut = () => setZoom((z) => clamp(z / 1.2, ZOOM_MIN, ZOOM_MAX));
   const zoomReset = () => {
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
+    // autoFit(制作モード)では ⟲ で「中身に合わせて再フィット」する(1.0 に戻すと空になり得る)。
+    if (autoFit) {
+      fitAutoFit();
+    } else {
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+    }
   };
 
   // ─── ノードドラッグ:主枝をクリック+ドラッグで動かす ───
@@ -596,6 +649,11 @@ function MapCanvas({
     <div
       className="bg-paper rounded-[16px] border border-border-soft p-5"
       data-tour="map-canvas"
+      style={
+        fillHeight
+          ? { height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }
+          : undefined
+      }
     >
       {/* ヘッダー */}
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
@@ -717,11 +775,13 @@ function MapCanvas({
             : "border-transparent cursor-pointer"
         }`}
         style={
-          tall
-            ? { height: "min(calc(100vh - 280px), 780px)", minHeight: 560 }
-            : // 全画面時にマップを大きく見せるため、内容高さに対する係数を少し上げる
-              // (0.62 だと引き気味だった)。幅拡張(App.tsx の max-w)と合わせて効く。
-              { height: Math.round(H * 0.72) }
+          fillHeight
+            ? { flex: 1, minHeight: 0 }
+            : tall
+              ? { height: "min(calc(100vh - 280px), 780px)", minHeight: 560 }
+              : // 全画面時にマップを大きく見せるため、内容高さに対する係数を少し上げる
+                // (0.62 だと引き気味だった)。幅拡張(App.tsx の max-w)と合わせて効く。
+                { height: Math.round(H * 0.72) }
         }
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

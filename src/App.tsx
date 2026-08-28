@@ -42,6 +42,7 @@ import {
 } from "./lib/llamaClient";
 import { analyzeFolder } from "./lib/engineSelector";
 import { isLargeApp } from "./lib/appSize";
+import { CreateMode } from "./components/create/CreateMode";
 import { computeMapDiff } from "./lib/mapDiff";
 import { buildShareHTML } from "./lib/shareHTML";
 import {
@@ -101,6 +102,8 @@ function App() {
   const [noCodeMode, setNoCodeMode] = useState<boolean>(false);
   const [folderPath, setFolderPath] = useState<string | null>(null);
   const [fileCount, setFileCount] = useState<number | null>(null);
+  // 制作モード(Phase 1a・実験):オーバーレイの開閉
+  const [createOpen, setCreateOpen] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>("idle");
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [aiResult, setAiResult] = useState<ScreenMapResult | null>(null);
@@ -950,6 +953,10 @@ function App() {
                 {T.specDoc.buttonLabel}
               </Button>
 
+              <Button variant="secondary" onClick={() => setCreateOpen(true)}>
+                作る(実験)
+              </Button>
+
               {analysisStatus === "loading" ? (
                 <Spinner
                   className="w-4 h-4 text-feature-teal"
@@ -961,6 +968,14 @@ function App() {
                 <span className="text-sm text-ink-soft">{statusText}</span>
               ) : null}
             </div>
+
+            {createOpen ? (
+              <CreateMode
+                onExit={() => setCreateOpen(false)}
+                language={language}
+                engine={engine}
+              />
+            ) : null}
 
             {/* 大きいアプリの注意書き:マップは主要ファイルからの AI 要約なので、
                 規模が大きいほど「全画面を網羅した確定情報」ではないことを控えめに添える。
