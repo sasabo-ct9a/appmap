@@ -3558,6 +3558,7 @@ fn stop_folder_watch(id: u64, state: State<'_, WatchState>) -> Result<(), String
 #[cfg(test)]
 #[path = "scanner_test.rs"]
 mod scanner_tests;
+mod create_mode;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -3574,6 +3575,8 @@ pub fn run() {
             debouncer: Mutex::new(None),
             next_id: AtomicU64::new(1),
         })
+        // 制作モード:プレビュー dev サーバの ownership を保持
+        .manage(create_mode::CreateState::default())
         .invoke_handler(tauri::generate_handler![
             claude_check_version,
             claude_analyze,
@@ -3601,6 +3604,12 @@ pub fn run() {
             // v0.1.10 ファイル監視(選択中フォルダの変更検知 → frontend に emit)
             start_folder_watch,
             stop_folder_watch,
+            // 制作モード(Phase 1a):プロジェクト作成 + プレビュー
+            create_mode::create_project,
+            create_mode::start_preview,
+            create_mode::stop_preview,
+            // 制作モード(Phase 1b):Claude Code でコード生成
+            create_mode::generate_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
