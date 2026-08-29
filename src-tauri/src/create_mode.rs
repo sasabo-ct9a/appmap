@@ -325,18 +325,22 @@ pub fn stop_preview(state: tauri::State<'_, CreateState>) -> Result<(), String> 
 /// スパイクで実証した呼び出し方:cwd=workspace、-p(非対話)、--permission-mode acceptEdits
 /// (ファイル編集を自動承認)。編集は dev サーバの HMR で即プレビューに反映される。
 /// 生成は Claude 専用(ローカル LLM は agentic なファイル編集ができない)。
-/// プロンプトは TS 側(createContext.ts)で AppMap の文脈込みで組み立てて渡す
-/// (§7.1:プロンプト組立ては TypeScript の担当)。ここは受け取った prompt を
-/// そのまま claude に流すだけにする。
 #[tauri::command]
 pub async fn generate_app(
     app: tauri::AppHandle,
     workspace: String,
-    prompt: String,
+    instruction: String,
 ) -> Result<String, String> {
     let ws = resolve_managed_workspace(&app, &workspace)?;
     let exe = crate::find_claude_exe()?;
     let path_env = crate::augmented_path();
+    let prompt = format!(
+        "この Vite + React アプリを、次の要望に沿って作ってください:「{}」。\
+         src/App.tsx を中心に実装し、日本語 UI、シンプルで見やすいインラインスタイルに。\
+         React の useState だけで動く範囲で作る。Vite+React の構成は変えない。\
+         npm パッケージは追加しない。",
+        instruction
+    );
 
     let ws2 = ws.clone();
     let out = tauri::async_runtime::spawn_blocking(move || {
