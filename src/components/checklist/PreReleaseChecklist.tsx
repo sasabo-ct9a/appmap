@@ -34,6 +34,8 @@ type PreReleaseChecklistProps = {
   screens: ScreenMapResult;
   folderPath: string | null;
   language: Language;
+  /** かんたんモード(viewMode==="map")なら平易な直し方を出す(§6.5)。 */
+  easyMode: boolean;
 };
 
 const SEVERITY_STYLE: Record<
@@ -67,6 +69,7 @@ function PreReleaseChecklist({
   screens,
   folderPath,
   language,
+  easyMode,
 }: PreReleaseChecklistProps) {
   const [scan, setScan] = useState<PreReleaseScanResult | null>(null);
   const [scanning, setScanning] = useState<boolean>(false);
@@ -183,7 +186,7 @@ function PreReleaseChecklist({
     };
   }, [folderPath, scanNow]);
 
-  const findings = buildFindings({ screens, scan, language });
+  const findings = buildFindings({ screens, scan, language, easyMode });
   const highs = findings.filter((f) => f.severity === "high");
   const mids = findings.filter((f) => f.severity === "medium");
   const lows = findings.filter((f) => f.severity === "low");

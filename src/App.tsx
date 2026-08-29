@@ -1393,6 +1393,7 @@ function App() {
                 screens={screens}
                 folderPath={lastAnalyzedFolder}
                 language={language}
+                easyMode={viewMode === "map"}
               />
             )}
 

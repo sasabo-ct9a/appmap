@@ -250,6 +250,8 @@ export type CheckInputs = {
   screens: ScreenMapResult;
   scan: PreReleaseScanResult | null; // scan は失敗 or サンプル時 null
   language: Language;
+  /** かんたんモード(viewMode==="map")= 専門ツール名を避け平易な直し方を出す(§6.5)。 */
+  easyMode?: boolean;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -483,6 +485,7 @@ export function buildFindings({
   screens,
   scan,
   language,
+  easyMode = false,
 }: CheckInputs): Finding[] {
   const findings: Finding[] = [];
   const t = translations(language);
@@ -581,7 +584,7 @@ export function buildFindings({
           category: "testing",
           title: t.noTestsTitle(framework),
           hint: t.noTestsHint,
-          fixSteps: t.noTestsFix(stackHint),
+          fixSteps: easyMode ? t.noTestsFixEasy : t.noTestsFix(stackHint),
         });
       }
     } else if (hasTests !== true) {
@@ -596,7 +599,9 @@ export function buildFindings({
         category: "testing",
         title: t.noTestFrameworkTitle,
         hint: t.noTestFrameworkHint,
-        fixSteps: t.noTestFrameworkFix(stackHint),
+        fixSteps: easyMode
+          ? t.noTestFrameworkFixEasy
+          : t.noTestFrameworkFix(stackHint),
       });
     }
   }
@@ -612,7 +617,7 @@ export function buildFindings({
       category: "dev-leftovers",
       title: t.consoleLogsTitle(total),
       hint: t.consoleLogsHint,
-      fixSteps: t.consoleLogsFix,
+      fixSteps: easyMode ? t.consoleLogsFixEasy : t.consoleLogsFix,
       examples: scan.console_logs.slice(0, 10).map((s) => ({
         file: s.file,
         line: s.line,
@@ -675,6 +680,10 @@ type Copy = {
   consoleLogsTitle: (n: number) => string;
   consoleLogsHint: string;
   consoleLogsFix: string[];
+  /** かんたんモード用の平易版(§6.5:専門ツール名を避け、AI への頼み方を平易に)。 */
+  noTestFrameworkFixEasy: string[];
+  noTestsFixEasy: string[];
+  consoleLogsFixEasy: string[];
   todosTitle: (n: number) => string;
   todosHint: string;
   todosFix: string[];
@@ -802,6 +811,21 @@ const JA: Copy = {
     "本番でも残したいログは、ちゃんとしたロガー(`pino` / `winston` / `debug` 等)に置き換える",
     "Vite なら `vite-plugin-remove-console` を導入して本番ビルド時に自動除去(`npm i -D vite-plugin-remove-console`)",
     "ESLint 設定で `no-console` ルールを本番ビルド時のみ warn/error にすると、以降混入を防げる",
+  ],
+  // かんたんモード用(§6.5:専門ツール名を避け「なぜ + AI への頼み方」を平易に)
+  noTestFrameworkFixEasy: [
+    "AI コーディングツールに「このアプリに、壊れていないか自動で確かめる簡単なテストを1つ作って」と頼む",
+    "まずは主要な画面や機能が1つ、ちゃんと動くかを確かめるだけで十分(慣れたら少しずつ増やす)",
+    "作ってもらったテストは、AI に「テストを実行して結果を教えて」と頼めば確認できる",
+  ],
+  noTestsFixEasy: [
+    "AI コーディングツールに「よく使う流れが動くか確かめるテストを1つ書いて」と頼む",
+    "作ってもらったテストを実行して、問題なく通ることを確認(実行も AI に頼める)",
+    "同じ要領で、大事な流れにもテストを少しずつ足していく",
+  ],
+  consoleLogsFixEasy: [
+    "本番の前に、要らないデバッグ用の出力(console.log)を消す",
+    "AI コーディングツールに「残っている不要な console.log を消して(エラー表示は残して)」と頼めば消せます",
   ],
   todosTitle: (n) => `TODO / FIXME コメントが ${n} 箇所残っています`,
   todosHint:
@@ -944,6 +968,21 @@ const EN: Copy = {
     "For logs you actually want in production, replace with a real logger (`pino` / `winston` / `debug`)",
     "For Vite, add `vite-plugin-remove-console` to strip them in production builds (`npm i -D vite-plugin-remove-console`)",
     "Enable the ESLint `no-console` rule to prevent new ones from creeping in",
+  ],
+  // Easy mode (§6.5: avoid tool jargon, phrase as a plain request to your AI)
+  noTestFrameworkFixEasy: [
+    'Ask your AI coding tool: "add one simple test that checks this app still works"',
+    "Just confirming one main screen or feature works is enough to start (add more later)",
+    'To run it, ask your AI "run the tests and tell me the result"',
+  ],
+  noTestsFixEasy: [
+    'Ask your AI coding tool: "write one test for a common flow in this app"',
+    "Run the generated test and confirm it passes (you can ask the AI to run it too)",
+    "Add tests to other important flows the same way, little by little",
+  ],
+  consoleLogsFixEasy: [
+    "Before shipping, remove the leftover debug output (console.log)",
+    'Ask your AI coding tool: "remove the leftover console.log calls (keep error messages)"',
   ],
   todosTitle: (n) => `${n} TODO / FIXME comments remain`,
   todosHint:
