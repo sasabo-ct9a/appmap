@@ -1496,7 +1496,7 @@ function buildTourSteps(language: Language): TourStep[] {
     return [
       {
         title: "AppMap へようこそ",
-        body: "AI で作ったアプリの中身を 1 枚の地図で把握できます。主要 7 機能を順に紹介します(1〜2 分)。",
+        body: "AI で作ったアプリの中身を 1 枚の地図で把握できます。主要 8 機能を順に紹介します(1〜2 分)。",
         placement: "center",
       },
       {
@@ -1536,6 +1536,11 @@ function buildTourSteps(language: Language): TourStep[] {
         body: "解析に使う AI を切り替えられます:\n・Claude(クラウド):高精度。API 利用料(従量制)\n・ローカル AI:PC 上で動く。無料・オフライン、精度は劣る\n設定では表示言語やエディタも選べます。",
       },
       {
+        title: "⑧ 直したい所を自分の Claude に頼む",
+        body: "要素をクリックして開く詳細パネルの下に「この要素を Claude に頼む」があります。直したいことを書いて「指示をコピー」すると、その要素の情報を添えた指示文ができます。Cursor / Claude Code / claude.ai に貼るだけ。AppMap の外の、自分の Claude で開発する人向けです。",
+        placement: "center",
+      },
+      {
         title: "以上です",
         body: "この案内は左下の「ガイド付きツアー」からいつでも見られます。触って試してみてください。",
         placement: "center",
@@ -1545,7 +1550,7 @@ function buildTourSteps(language: Language): TourStep[] {
   return [
     {
       title: "Welcome to AppMap",
-      body: "Understand AI-generated apps as a single map. A quick tour of 7 key features (1-2 min).",
+      body: "Understand AI-generated apps as a single map. A quick tour of 8 key features (1-2 min).",
       placement: "center",
     },
     {
@@ -1583,6 +1588,11 @@ function buildTourSteps(language: Language): TourStep[] {
       target: "engine-switch",
       title: "7. Switch AI engine",
       body: "Switch the AI used for analysis:\n・Claude (cloud): high accuracy. Uses Anthropic's API (pay-per-use)\n・Local AI: runs on your PC — free and offline, but less accurate\nSettings also let you change language and editor.",
+    },
+    {
+      title: "8. Hand a change to your own Claude",
+      body: "Below the detail panel (opened by clicking an element) is 'Ask your Claude about this'. Write what you want changed, then Copy — you get a prompt with that element's context, ready to paste into Cursor / Claude Code / claude.ai. For people who build with their own Claude outside AppMap.",
+      placement: "center",
     },
     {
       title: "That's it",

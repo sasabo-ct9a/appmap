@@ -17,6 +17,11 @@ import {
 } from "../../lib/nodeQA";
 import type { EditorChoice, Engine } from "../../lib/storage";
 import { openInEditor } from "../../lib/openInEditor";
+import {
+  buildAppContext,
+  buildElementContext,
+  buildHandoffPrompt,
+} from "../../lib/claudeHandoff";
 
 /**
  * v0.1.7 リファイン:LIGHT モード Inspector パネル(360px、右側固定)。
@@ -98,6 +103,9 @@ function InspectorPanel({
   const [qaLoading, setQaLoading] = useState<boolean>(false);
   const [qaError, setQaError] = useState<string | null>(null);
   const qaScrollRef = useRef<HTMLDivElement | null>(null);
+  // AppMap→claude:この要素の修正を「自分の Claude(外部)」に頼む文をコピーする欄。
+  const [handoffInput, setHandoffInput] = useState<string>("");
+  const [handoffCopied, setHandoffCopied] = useState<boolean>(false);
 
   useEffect(() => {
     if (node === null) return;
@@ -108,6 +116,9 @@ function InspectorPanel({
     setQaHistory(loadQAHistory(folderPath, node.id));
     setQaInput("");
     setQaError(null);
+    // 要素を切り替えたら頼み文の下書きもリセット
+    setHandoffInput("");
+    setHandoffCopied(false);
   }, [node?.id, folderPath, node]);
 
   // 応答が来た後、履歴の末尾までスクロール
@@ -155,6 +166,25 @@ function InspectorPanel({
       setQaError(msg || T.qa.errorGeneric);
     } finally {
       setQaLoading(false);
+    }
+  };
+
+  // AppMap→claude:入力した「やりたいこと」に、この要素と全体の構造を添えた指示文を
+  // 作り、クリップボードへ。ユーザーは自分の Claude / Cursor に貼って頼める。
+  const handleCopyHandoff = async () => {
+    if (!handoffInput.trim()) return;
+    const mapForCtx = { nodes: allNodes, edges: allEdges };
+    const prompt = buildHandoffPrompt({
+      instruction: handoffInput,
+      elementContext: buildElementContext(node, mapForCtx, language),
+      appContext: buildAppContext(mapForCtx, language),
+    });
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setHandoffCopied(true);
+      setTimeout(() => setHandoffCopied(false), 2000);
+    } catch (err) {
+      console.warn("[AppMap] clipboard.writeText failed:", err);
     }
   };
 
@@ -753,6 +783,39 @@ function InspectorPanel({
               {T.qa.clearButton}
             </button>
           )}
+        </Section>
+
+        {/* AppMap→claude:この要素の修正を、自分の Claude / Cursor に頼む文を作ってコピー。
+            CreateMode を使わず外部の Claude で開発する人のための出口。*/}
+        <Section title={tx("この要素を Claude に頼む", "Ask your Claude about this")}>
+          <p className="text-[11px] text-ink-soft mb-2 leading-relaxed">
+            {tx(
+              "直したいことを書いて「コピー」すると、この要素の情報を添えた指示文ができます。Cursor / Claude Code / claude.ai などに貼って使えます。",
+              "Write what you want changed, then Copy — you get a prompt with this element's context, ready to paste into Cursor / Claude Code / claude.ai.",
+            )}
+          </p>
+          <textarea
+            value={handoffInput}
+            onChange={(e) => setHandoffInput(e.target.value)}
+            placeholder={tx(
+              "例:このボタンの色を青にして / 入力を必須にして",
+              "e.g. make this button blue / make the field required",
+            )}
+            spellCheck={false}
+            rows={2}
+            className="w-full text-xs text-ink-strong bg-canvas border border-border-soft rounded-[8px] px-2.5 py-1.5 resize-y outline-none focus:border-feature-teal focus:ring-2 focus:ring-feature-teal/30 transition-colors leading-relaxed"
+            style={{ minHeight: 48 }}
+          />
+          <button
+            type="button"
+            onClick={handleCopyHandoff}
+            disabled={!handoffInput.trim()}
+            className="mt-2 w-full text-xs font-semibold px-3 py-2 rounded-[8px] bg-feature-teal text-white hover:bg-feature-teal/90 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {handoffCopied
+              ? tx("コピーしました!", "Copied!")
+              : tx("指示をコピー(Claude に貼る)", "Copy prompt (paste into Claude)")}
+          </button>
         </Section>
 
         {/* 関連ファイル(v0.1.8:クリックで外部エディタ起動)*/}
