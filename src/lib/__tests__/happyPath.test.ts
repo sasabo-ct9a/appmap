@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeReplaySteps, edgeFlowRole } from "../happyPath";
+import {
+  computeReplaySteps,
+  computeReplayStepsFine,
+  edgeFlowRole,
+} from "../happyPath";
 import type { ScreenMapResult } from "../claudeCli";
 import type { ScreenNode, ScreenEdge } from "../../types/screen";
 
@@ -135,6 +139,52 @@ describe("computeReplaySteps", () => {
       [edge(1, 2), edge(2, 3), edge(3, 4, true), edge(3, 5, true)],
     );
     expect(computeReplaySteps(r).stages).toEqual([[1], [2], [3], [4, 5]]);
+  });
+});
+
+describe("computeReplayStepsFine", () => {
+  it("枝分かれも 1 要素ずつ別ステップになる(層版と違い潰さない)", () => {
+    // 1 → 2,3,4 の分岐。層版なら [[1],[2,3,4]]。細かい版は 1 つずつ。
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3), node(4)],
+      [edge(1, 2), edge(1, 3), edge(1, 4)],
+    );
+    expect(computeReplayStepsFine(r).stages).toEqual([[1], [2], [3], [4]]);
+  });
+
+  it("各ステップは必ず 1 要素、全要素が 1 回ずつ現れる", () => {
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3), node(4), node(5)],
+      [edge(1, 2), edge(2, 3), edge(2, 4), edge(3, 5), edge(4, 5)],
+    );
+    const stages = computeReplayStepsFine(r).stages;
+    expect(stages.every((s) => s.length === 1)).toBe(true);
+    expect(stages.flat().sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("BFS の発見順に並ぶ(一本道)", () => {
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3)],
+      [edge(1, 2), edge(2, 3)],
+    );
+    expect(computeReplayStepsFine(r).stages).toEqual([[1], [2], [3]]);
+  });
+
+  it("入口からたどり着けない要素は detached(本流に混ぜない)", () => {
+    const r = result(
+      [node(1, { entry: true }), node(2), node(3)],
+      [edge(1, 2)],
+    );
+    const plan = computeReplayStepsFine(r);
+    expect(plan.stages).toEqual([[1], [2]]);
+    expect(plan.detached).toEqual([3]);
+  });
+
+  it("空でも壊れない", () => {
+    expect(computeReplayStepsFine(result([], []))).toEqual({
+      stages: [],
+      detached: [],
+    });
   });
 });
 

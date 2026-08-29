@@ -105,6 +105,71 @@ export function computeReplaySteps(screens: ScreenMapResult): ReplayPlan {
   return { stages, detached };
 }
 
+/**
+ * 流れの再生(細かい版)。computeReplaySteps が「入口からの距離」で層分けする(同じ距離の
+ * 分岐が 1 ステップに潰れる)のに対し、こちらは BFS の発見順に 1 要素ずつステップにする。
+ * 分岐も 1 つずつ辿れ、要素同士のつながり(同距離の横リンク含む)は、新しく active になった
+ * 要素から passed 済み要素への到達線として MapCanvas 側で順に光る。
+ * 制作モードの「データの流れを見る」で、より細かく流れを説明するために使う(本体の層版は不変)。
+ */
+export function computeReplayStepsFine(screens: ScreenMapResult): ReplayPlan {
+  const nodes = screens.nodes;
+  if (nodes.length === 0) return { stages: [], detached: [] };
+
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+
+  // 入口判定・隣接リストは層版(computeReplaySteps)と同じ規則で決定的に。
+  const incoming = new Map<number, number>();
+  for (const e of screens.edges) {
+    if (byId.has(e.to)) incoming.set(e.to, (incoming.get(e.to) ?? 0) + 1);
+    if (e.bidirectional && byId.has(e.from)) {
+      incoming.set(e.from, (incoming.get(e.from) ?? 0) + 1);
+    }
+  }
+  const byDepthId = [...nodes].sort(
+    (a, b) => (a.depth ?? 0) - (b.depth ?? 0) || a.id - b.id,
+  );
+  const start =
+    nodes.find((n) => n.isEntryPoint) ??
+    byDepthId.find((n) => (incoming.get(n.id) ?? 0) === 0) ??
+    byDepthId[0];
+
+  const adj = new Map<number, number[]>();
+  const link = (from: number, to: number) => {
+    if (!adj.has(from)) adj.set(from, []);
+    adj.get(from)!.push(to);
+  };
+  for (const e of screens.edges) {
+    if (!byId.has(e.from) || !byId.has(e.to)) continue;
+    link(e.from, e.to);
+    if (e.bidirectional) link(e.to, e.from);
+  }
+  for (const list of adj.values()) list.sort((a, b) => a - b);
+
+  // BFS の発見順に 1 要素ずつステップ化(1 ステップ = 1 要素 = つながりを 1 本たどる)。
+  const visited = new Set<number>([start.id]);
+  const order: number[] = [start.id];
+  const queue: number[] = [start.id];
+  for (let qi = 0; qi < queue.length; qi++) {
+    const cur = queue[qi];
+    for (const to of adj.get(cur) ?? []) {
+      if (!visited.has(to)) {
+        visited.add(to);
+        order.push(to);
+        queue.push(to);
+      }
+    }
+  }
+
+  const stages = order.map((id) => [id]);
+  const detached = nodes
+    .filter((n) => !visited.has(n.id))
+    .map((n) => n.id)
+    .sort((a, b) => a - b);
+
+  return { stages, detached };
+}
+
 /** エッジが「前ステージ → 今ステージ」を繋ぐ到達線かどうかと、描画の向き。 */
 export type EdgeFlowRole = {
   /** 片端が passed・もう片端が active の「到達線」なら true。 */

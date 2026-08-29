@@ -1,7 +1,15 @@
-import { useRef, useState, useEffect, type CSSProperties } from "react";
+import {
+  useRef,
+  useState,
+  useEffect,
+  useMemo,
+  type CSSProperties,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MapCanvas from "../canvas/MapCanvas";
+import HappyPathReplay from "../canvas/HappyPathReplay";
 import { analyzeFolder } from "../../lib/engineSelector";
+import { computeReplayStepsFine } from "../../lib/happyPath";
 import type { ScreenMapResult } from "../../lib/claudeCli";
 import type { Language } from "../../lib/i18n";
 import { pickLocalized } from "../../lib/i18n";
@@ -114,6 +122,10 @@ export function CreateMode({
   const [nodeOffsets, setNodeOffsets] = useState<
     Map<number, { x: number; y: number }>
   >(new Map());
+  // データの流れの再生(既存の computeReplaySteps + HappyPathReplay を再利用)
+  const [replayIndex, setReplayIndex] = useState<number | null>(null);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const replayTotalRef = useRef(0);
 
   // マウント時:作りかけプロジェクトの一覧を読む。あれば一覧画面から始める(掛け持ち対応)。
   useEffect(() => {
@@ -138,6 +150,27 @@ export function CreateMode({
     setProjects(list);
     setScreen(list.length > 0 ? "list" : "form");
   }, []);
+
+  // マップが変わったら流れの再生をリセット
+  useEffect(() => {
+    setReplayIndex(null);
+    setReplayPlaying(false);
+  }, [mapResult]);
+
+  // 自動再生:一定間隔で次のステージへ。末尾で停止(App.tsx の再生ロジックを踏襲)。
+  useEffect(() => {
+    if (!replayPlaying || replayIndex === null) return;
+    if (replayIndex >= replayTotalRef.current - 1) {
+      setReplayPlaying(false);
+      return;
+    }
+    const id = setTimeout(() => {
+      setReplayIndex((i) =>
+        i === null ? i : Math.min(replayTotalRef.current - 1, i + 1),
+      );
+    }, 1900);
+    return () => clearTimeout(id);
+  }, [replayPlaying, replayIndex]);
 
   const showMap = async () => {
     if (!workspace.current || mapBusy) return;
@@ -230,6 +263,65 @@ export function CreateMode({
       ? mapResult.nodes.find((n) => n.id === targetNodeId) ?? null
       : null;
   const targetText = targetNode ? pickLocalized(targetNode.label, language) : null;
+
+  // 流れの再生:stages 計算 + 現在ステージから光らせる要素集合を導出(App.tsx と同じ導出)。
+  const replayPlan = useMemo(
+    () =>
+      mapResult
+        ? computeReplayStepsFine(mapResult)
+        : { stages: [] as number[][], detached: [] as number[] },
+    [mapResult],
+  );
+  const replayStages = replayPlan.stages;
+  const replayDetached = replayPlan.detached;
+  const replayHasDetached = replayDetached.length > 0;
+  const replayTotal = replayStages.length + (replayHasDetached ? 1 : 0);
+  replayTotalRef.current = replayTotal;
+  const activeReplayIndex =
+    replayIndex !== null && replayIndex < replayTotal ? replayIndex : null;
+  const isDetachedStep =
+    activeReplayIndex != null &&
+    replayHasDetached &&
+    activeReplayIndex === replayStages.length;
+  const replayActiveIds =
+    activeReplayIndex == null
+      ? null
+      : isDetachedStep
+        ? new Set(replayDetached)
+        : new Set(replayStages[activeReplayIndex] ?? []);
+  const replayPassedIds =
+    activeReplayIndex == null
+      ? null
+      : isDetachedStep
+        ? new Set(replayStages.flat())
+        : new Set(replayStages.slice(0, activeReplayIndex).flat());
+
+  const startReplay = () => {
+    setReplayIndex(0);
+    setReplayPlaying(true);
+  };
+  const replayTogglePlay = () => {
+    if (replayPlaying) {
+      setReplayPlaying(false);
+    } else {
+      if (replayIndex === null || replayIndex >= replayTotal - 1) {
+        setReplayIndex(0);
+      }
+      setReplayPlaying(true);
+    }
+  };
+  const replayPrev = () => {
+    setReplayPlaying(false);
+    setReplayIndex((i) => Math.max(0, (i ?? 0) - 1));
+  };
+  const replayNext = () => {
+    setReplayPlaying(false);
+    setReplayIndex((i) => Math.min(replayTotal - 1, (i ?? 0) + 1));
+  };
+  const replayClose = () => {
+    setReplayIndex(null);
+    setReplayPlaying(false);
+  };
 
   const handleStart = async () => {
     if (!desc.trim() || busy) return;
@@ -528,6 +620,20 @@ export function CreateMode({
           >
             <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>目的</div>
             <div style={{ fontSize: 14, color: "#111827", marginBottom: 12 }}>{desc}</div>
+            {mapResult && replayTotal >= 2 && activeReplayIndex === null ? (
+              <button
+                onClick={startReplay}
+                style={{
+                  ...primaryBtn,
+                  alignSelf: "flex-start",
+                  padding: "6px 14px",
+                  fontSize: 12,
+                  marginBottom: 8,
+                }}
+              >
+                データの流れを見る
+              </button>
+            ) : null}
             {mapResult ? (
               <div style={{ flex: 1, minHeight: 0 }}>
                 <MapCanvas
@@ -543,6 +649,10 @@ export function CreateMode({
                   folderPath={workspace.current}
                   autoFit
                   fillHeight
+                  replayActiveIds={replayActiveIds}
+                  replayPassedIds={replayPassedIds}
+                  replayDetachedActive={isDetachedStep}
+                  replayStep={activeReplayIndex}
                 />
               </div>
             ) : (
@@ -576,6 +686,20 @@ export function CreateMode({
                 ) : null}
               </div>
             )}
+            {activeReplayIndex !== null && mapResult ? (
+              <HappyPathReplay
+                stages={replayStages}
+                detached={replayDetached}
+                index={activeReplayIndex}
+                nodes={mapResult.nodes}
+                language={language}
+                playing={replayPlaying}
+                onTogglePlay={replayTogglePlay}
+                onPrev={replayPrev}
+                onNext={replayNext}
+                onClose={replayClose}
+              />
+            ) : null}
           </div>
         </div>
 
