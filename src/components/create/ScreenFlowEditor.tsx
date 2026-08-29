@@ -67,7 +67,7 @@ export function ScreenFlowEditor({
 }: {
   /** 開いたプロジェクトの保存済みフロー(あれば)。mount 時に読み込む。 */
   initial?: FlowData;
-  /** 「指示」で選んだ画面名。右ペインの追撃をこの画面にスコープするため親へ通知。 */
+  /** 「指示」で選んだ画面名。右ペインの追加指示をこの画面にスコープするため親へ通知。 */
   onTargetChange?: (screenName: string | null) => void;
   /** フロー(画面・矢印)が変わるたびに親へ通知(保存・生成用)。 */
   onChange?: (flow: FlowData) => void;
@@ -77,7 +77,7 @@ export function ScreenFlowEditor({
   // つなぐ操作:1 個目をクリック → connectFrom にセット → 2 個目クリックで矢印を作る。
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  // 「指示」で選んだ画面(右ペインの追撃のスコープ対象)。
+  // 「指示」で選んだ画面(右ペインの追加指示のスコープ対象)。
   const [targetId, setTargetId] = useState<string | null>(null);
   // 復元したフローの id と衝突しないよう、既存 id の最大 + 1 から採番する。
   const nextId = useRef(
@@ -190,7 +190,7 @@ export function ScreenFlowEditor({
         <span style={{ fontSize: 11, color: "#6b7280" }}>
           {connectFrom
             ? `「${nameOf(connectFrom)}」のつなぐ先をクリック(Esc で中止)`
-            : "ドラッグで移動 / 「つなぐ」で矢印 / 「指示」で追撃の対象に"}
+            : "ドラッグで移動 / 「つなぐ」で矢印 / 「指示」で直したい画面を選ぶ"}
         </span>
       </div>
 

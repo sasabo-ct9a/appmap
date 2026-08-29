@@ -4,6 +4,7 @@ import ScreenFlowEditor, {
   flowToText,
   type FlowData,
 } from "./ScreenFlowEditor";
+import { buildCreatePrompt, buildRefinePrompt } from "../../lib/createPrompt";
 
 /**
  * 制作モード(Create Mode)。モックの構成に沿う:
@@ -12,7 +13,7 @@ import ScreenFlowEditor, {
  *
  * 流れ:一言 → create_project(テンプレ複製)→ start_preview(dev 起動)→
  *       generate_app(Claude がコード実装)→ HMR で左プレビューが更新される。
- * 右ペインの入力で追撃(refine)でき、そのたびに Claude が直してプレビューに反映。
+ * 右ペインの入力で追加指示(refine)でき、そのたびに Claude が直してプレビューに反映。
  */
 
 // 作りかけプロジェクトの一覧を覚える(複数の掛け持ちに対応)。localStorage に保存し、
@@ -67,6 +68,15 @@ const fieldLabel: CSSProperties = {
   fontSize: 11,
   color: "#6b7280",
   fontWeight: 600,
+};
+
+const supaInput: CSSProperties = {
+  width: "100%",
+  padding: "5px 8px",
+  border: "1px solid #d1d5db",
+  borderRadius: 6,
+  fontSize: 11,
+  boxSizing: "border-box",
 };
 
 const closeBtn: CSSProperties = {
@@ -127,6 +137,13 @@ export function CreateMode({
   });
   // キャンバスに画面が 1 つでもあるか(「この流れで作る」の活性判定。0↔1 でのみ再描画)。
   const [hasFlow, setHasFlow] = useState(false);
+  // Supabase 接続(URL + anon key)。.env に書いて preview 再起動で反映する。
+  const [supaUrl, setSupaUrl] = useState("");
+  const [supaKey, setSupaKey] = useState("");
+  const [supaConnected, setSupaConnected] = useState(false);
+  const [supaOpen, setSupaOpen] = useState(false);
+  // .env を反映させるため iframe を張り直すキー。
+  const [previewNonce, setPreviewNonce] = useState(0);
   const [port, setPort] = useState<number | null>(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -138,7 +155,7 @@ export function CreateMode({
   const projectName = useRef("app-" + Date.now());
   // 中央は画面フロー・エディタ(ScreenFlowEditor)が自前の state を持つ。
   // 旧「コード解析マップ + 要素タグ + 流れ再生」は撤去した。
-  // 「指示」で選んだ画面名(右ペインの追撃をこの画面にスコープする)。
+  // 「指示」で選んだ画面名(右ペインの追加指示をこの画面にスコープする)。
   const [targetScreen, setTargetScreen] = useState<string | null>(null);
 
   // マウント時:作りかけプロジェクトの一覧を読む。あれば一覧画面から始める(掛け持ち対応)。
@@ -184,11 +201,32 @@ export function CreateMode({
     return workspace.current;
   };
 
-  const build = async (instruction: string) => {
+  // display = チャットに残す人向けの文。prompt = Claude に渡す完成プロンプト(基礎込み)。
+  const build = async (display: string, prompt: string) => {
     setBusy(true);
-    setLog((l) => [...l, { role: "you", text: instruction }]);
+    setLog((l) => [...l, { role: "you", text: display }]);
     try {
       const ws = await ensureWorkspace();
+      // 既存プロジェクトを本番構成(Supabase)に追いつかせる(Codex P1)。
+      // 不足テンプレ + 依存を補い、補ったら preview を再起動して反映する。
+      try {
+        setStatus("プロジェクトを整えています…");
+        const changed = await invoke<boolean>("ensure_supabase_ready", {
+          workspace: ws,
+        });
+        if (changed) {
+          try {
+            await invoke("stop_preview");
+          } catch {
+            // 停止失敗は無視
+          }
+          const p2 = await invoke<number>("start_preview", { workspace: ws });
+          setPort(p2);
+          setPreviewNonce((n) => n + 1);
+        }
+      } catch {
+        // 移行に失敗しても生成は続行(Claude 側で対処できることもある)
+      }
       // 実測で数分かかることがあるので「1〜2分」と嘘をつかず、経過秒数を出す。
       let sec = 0;
       setStatus("Claude Code が実装中…");
@@ -200,7 +238,7 @@ export function CreateMode({
       try {
         result = await invoke<string>("generate_app", {
           workspace: ws,
-          instruction,
+          prompt,
         });
       } finally {
         clearInterval(timer);
@@ -256,7 +294,9 @@ export function CreateMode({
     }
     if (flowText) parts.push(flowText);
     if (!parts.length) return; // 目的もフローも空なら何もしない
-    void build(parts.join("\n"));
+    // 初回/作り直し:本番の基礎プロンプトを付ける。
+    const instruction = parts.join("\n");
+    void build(instruction, buildCreatePrompt(instruction));
   };
 
   const handleFollowup = async () => {
@@ -265,7 +305,8 @@ export function CreateMode({
     // 「指示」で画面を選んでいれば、その画面にスコープした指示にする。
     const scoped = targetScreen ? `「${targetScreen}」画面について、${f}` : f;
     setFollowup("");
-    await build(scoped);
+    // 追加指示:基礎は既にあるので軽い prompt(要点だけ念押し)。
+    await build(scoped, buildRefinePrompt(scoped));
   };
 
   // 閉じる時に dev サーバも止める(Codex P2:放置すると裏で走り続け 5199 を占有)
@@ -328,6 +369,19 @@ export function CreateMode({
     const loadedFlow: FlowData = p.flow ?? { screens: [], edges: [] };
     flowRef.current = loadedFlow;
     setFlowInitial(loadedFlow);
+    // 保存済みの Supabase 接続情報(.env)を復元。
+    try {
+      const [u, k] = await invoke<[string, string]>("get_supabase_env", {
+        workspace: p.workspace,
+      });
+      setSupaUrl(u);
+      setSupaKey(k);
+      setSupaConnected(Boolean(u && k));
+    } catch {
+      setSupaUrl("");
+      setSupaKey("");
+      setSupaConnected(false);
+    }
     setLog([]);
     setPort(null);
     setAuthNeeded(false);
@@ -345,6 +399,31 @@ export function CreateMode({
     }
   };
 
+  // Supabase を接続:URL/キーを .env に書いて preview を再起動 → iframe を張り直す。
+  const connectSupabase = async () => {
+    if (!workspace.current || !supaUrl.trim() || !supaKey.trim()) return;
+    setStatus("Supabase に接続中…");
+    try {
+      await invoke("set_supabase_env", {
+        workspace: workspace.current,
+        url: supaUrl.trim(),
+        anonKey: supaKey.trim(),
+      });
+      try {
+        await invoke("stop_preview");
+      } catch {
+        // 停止失敗は無視
+      }
+      await invoke<number>("start_preview", { workspace: workspace.current });
+      setPreviewNonce((n) => n + 1);
+      setSupaConnected(true);
+      setSupaOpen(false);
+      setStatus("Supabase 接続済み");
+    } catch (e) {
+      setStatus("接続に失敗: " + String(e));
+    }
+  };
+
   // 新しいアプリを一から作る(別プロジェクト)。
   const startNew = () => {
     projectName.current = "app-" + Date.now();
@@ -354,6 +433,9 @@ export function CreateMode({
     flowRef.current = { screens: [], edges: [] };
     setFlowInitial({ screens: [], edges: [] });
     setHasFlow(false);
+    setSupaUrl("");
+    setSupaKey("");
+    setSupaConnected(false);
     setLog([]);
     setPort(null);
     setAuthNeeded(false);
@@ -567,16 +649,75 @@ export function CreateMode({
         {/* 左:プレビュー(実物) */}
         <div style={paneCol("30%")}>
           <div style={paneLabel}>プレビュー(実物)</div>
-          <div style={paneBody}>
-            {port ? (
-              <iframe
-                src={`http://127.0.0.1:${port}`}
-                style={{ width: "100%", height: "100%", border: "none" }}
-                title="preview"
-              />
-            ) : (
-              <div style={{ padding: 20, color: "#9ca3af", fontSize: 13 }}>準備中…</div>
-            )}
+          <div style={{ ...paneBody, display: "flex", flexDirection: "column" }}>
+            {/* Supabase 接続バー */}
+            <div style={{ padding: 8, borderBottom: "1px solid #eee" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: supaConnected ? "#0f766e" : "#9ca3af",
+                  }}
+                >
+                  {supaConnected ? "● Supabase 接続済み" : "○ Supabase 未接続"}
+                </span>
+                <button
+                  onClick={() => setSupaOpen((o) => !o)}
+                  style={{
+                    fontSize: 11,
+                    color: "#2563eb",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                >
+                  {supaOpen ? "閉じる" : "接続設定"}
+                </button>
+              </div>
+              {supaOpen ? (
+                <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                  <input
+                    value={supaUrl}
+                    onChange={(e) => setSupaUrl(e.target.value)}
+                    placeholder="Project URL(https://xxxx.supabase.co)"
+                    style={supaInput}
+                  />
+                  <input
+                    value={supaKey}
+                    onChange={(e) => setSupaKey(e.target.value)}
+                    placeholder="anon public key"
+                    style={supaInput}
+                  />
+                  <button
+                    onClick={connectSupabase}
+                    disabled={!workspace.current || !supaUrl.trim() || !supaKey.trim()}
+                    style={{ ...primaryBtn, padding: "6px 10px", fontSize: 11 }}
+                  >
+                    接続する
+                  </button>
+                  <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>
+                    Supabase の Project Settings → API から取得(anon public key)。
+                    接続後、プレビューを読み直します。
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              {port ? (
+                <iframe
+                  key={previewNonce}
+                  src={`http://127.0.0.1:${port}`}
+                  style={{ width: "100%", height: "100%", border: "none" }}
+                  title="preview"
+                />
+              ) : (
+                <div style={{ padding: 20, color: "#9ca3af", fontSize: 13 }}>
+                  準備中…
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
