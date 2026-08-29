@@ -3610,6 +3610,8 @@ pub fn run() {
             create_mode::stop_preview,
             // 制作モード(Phase 1b):Claude Code でコード生成
             create_mode::generate_app,
+            // 制作モード:一覧からプロジェクト削除(フォルダごと)
+            create_mode::delete_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

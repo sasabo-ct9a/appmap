@@ -186,6 +186,15 @@ pub fn create_project(app: tauri::AppHandle, name: String) -> Result<String, Str
     Ok(ws.to_string_lossy().to_string())
 }
 
+/// 管理下のプロジェクトフォルダを削除する(一覧からの削除で使う)。
+/// resolve_managed_workspace で projects ディレクトリ内であることを検証してから消す(§7.1:境界を信用しない)。
+#[tauri::command]
+pub fn delete_project(app: tauri::AppHandle, workspace: String) -> Result<(), String> {
+    let ws = resolve_managed_workspace(&app, &workspace)?;
+    fs::remove_dir_all(&ws).map_err(|e| format!("failed to delete project: {}", e))?;
+    Ok(())
+}
+
 /// workspace で dev サーバを起こし、プレビュー用ポートを返す。
 /// - node_modules が無ければ npm install(初回のみ・遅い)
 /// - npm run dev を長寿命の子プロセスとして起動し、ポートが応答するまで待つ
