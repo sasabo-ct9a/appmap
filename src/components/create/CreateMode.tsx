@@ -14,6 +14,11 @@ import type { ScreenMapResult } from "../../lib/claudeCli";
 import type { Language } from "../../lib/i18n";
 import { pickLocalized } from "../../lib/i18n";
 import type { Engine } from "../../lib/storage";
+import {
+  buildAppContext,
+  buildElementContext,
+  buildGeneratePrompt,
+} from "../../lib/createContext";
 
 /**
  * 制作モード(Create Mode)。モックの構成に沿う:
@@ -204,9 +209,11 @@ export function CreateMode({
     return workspace.current;
   };
 
-  const build = async (instruction: string) => {
+  // display = チャットに残す人向けの文。prompt = Claude に渡す完成プロンプト
+  // (AppMap の文脈を含む)。両者を分けるのは §7.1(プロンプト組立ては TS 担当)。
+  const build = async (display: string, prompt: string) => {
     setBusy(true);
-    setLog((l) => [...l, { role: "you", text: instruction }]);
+    setLog((l) => [...l, { role: "you", text: display }]);
     try {
       const ws = await ensureWorkspace();
       // 実測で数分かかることがあるので「1〜2分」と嘘をつかず、経過秒数を出す。
@@ -220,7 +227,7 @@ export function CreateMode({
       try {
         result = await invoke<string>("generate_app", {
           workspace: ws,
-          instruction,
+          prompt,
         });
       } finally {
         clearInterval(timer);
@@ -326,16 +333,33 @@ export function CreateMode({
   const handleStart = async () => {
     if (!desc.trim() || busy) return;
     setScreen("work");
-    await build(desc.trim());
+    // 初回はまだマップが無い(生成後に解析)ので文脈なし = 従来と同じプロンプト。
+    const prompt = buildGeneratePrompt({ instruction: desc.trim() });
+    await build(desc.trim(), prompt);
   };
 
   const handleFollowup = async () => {
     if (!followup.trim() || busy) return;
     const f = followup.trim();
-    // タグで要素を選んでいれば、その要素にスコープした指示にする(優先的にその要素を変更)。
-    const scoped = targetText ? `「${targetText}」の部分について、${f}` : f;
+    // チャットに残す表示は人にやさしい文。Claude には別途 AppMap の文脈を添える。
+    const display = targetText ? `「${targetText}」の部分について、${f}` : f;
+    // AppMap→claude:今のアプリ構造(常時)+ 指した要素の詳細(あれば)を指示に添える。
+    // マップは AI 解析(◐)なので createContext 側で「参考。コードを正とせよ」と明示する。
+    const appContext =
+      mapResult && mapResult.nodes.length
+        ? buildAppContext(mapResult, language)
+        : null;
+    const elementContext =
+      targetNode && mapResult
+        ? buildElementContext(targetNode, mapResult, language)
+        : null;
+    const prompt = buildGeneratePrompt({
+      instruction: f,
+      appContext,
+      elementContext,
+    });
     setFollowup("");
-    await build(scoped);
+    await build(display, prompt);
   };
 
   // 閉じる時に dev サーバも止める(Codex P2:放置すると裏で走り続け 5199 を占有)
