@@ -1,19 +1,9 @@
-import {
-  useRef,
-  useState,
-  useEffect,
-  useMemo,
-  type CSSProperties,
-} from "react";
+import { useRef, useState, useEffect, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import MapCanvas from "../canvas/MapCanvas";
-import HappyPathReplay from "../canvas/HappyPathReplay";
-import { analyzeFolder } from "../../lib/engineSelector";
-import { computeReplayStepsFine } from "../../lib/happyPath";
-import type { ScreenMapResult } from "../../lib/claudeCli";
-import type { Language } from "../../lib/i18n";
-import { pickLocalized } from "../../lib/i18n";
-import type { Engine } from "../../lib/storage";
+import ScreenFlowEditor, {
+  flowToText,
+  type FlowData,
+} from "./ScreenFlowEditor";
 
 /**
  * 制作モード(Create Mode)。モックの構成に沿う:
@@ -28,7 +18,15 @@ import type { Engine } from "../../lib/storage";
 // 作りかけプロジェクトの一覧を覚える(複数の掛け持ちに対応)。localStorage に保存し、
 // 各エントリは workspace パス・目的・最終更新時刻を持つ。生成コード自体はフォルダにある。
 const PROJECTS_KEY = "appmap-create-projects";
-type ProjectEntry = { workspace: string; desc: string; updatedAt: number };
+type ProjectEntry = {
+  workspace: string;
+  desc: string;
+  /** 期待するユーザーへのアウトプット内容(2 欄目)。旧データには無いので optional。 */
+  output?: string;
+  /** 画面フロー(キャンバスの画面・矢印)。旧データには無いので optional。 */
+  flow?: FlowData;
+  updatedAt: number;
+};
 
 function loadProjects(): ProjectEntry[] {
   try {
@@ -53,6 +51,23 @@ function upsertProject(entry: ProjectEntry): ProjectEntry[] {
   persistProjects(list);
   return list;
 }
+
+const intentInput: CSSProperties = {
+  width: "100%",
+  marginTop: 4,
+  padding: "10px 12px",
+  border: "1px solid #d1d5db",
+  borderRadius: 8,
+  fontSize: 15,
+  fontWeight: 400,
+};
+
+const fieldLabel: CSSProperties = {
+  display: "block",
+  fontSize: 11,
+  color: "#6b7280",
+  fontWeight: 600,
+};
 
 const closeBtn: CSSProperties = {
   padding: "6px 12px",
@@ -92,17 +107,26 @@ const paneCol = (basis: string, grow = 0): CSSProperties => ({
 
 export function CreateMode({
   onExit,
-  language,
-  engine,
 }: {
   onExit: () => void;
-  language: Language;
-  engine: Engine;
 }) {
   const [desc, setDesc] = useState("");
+  // 期待するユーザーへのアウトプット内容(2 欄目)。目的と合わせて Claude への指示にする。
+  const [output, setOutput] = useState("");
   // 画面:list=プロジェクト一覧 / form=新規の1問 / work=3ペイン作業
-  const [screen, setScreen] = useState<"list" | "form" | "work">("form");
+  const [screen, setScreen] = useState<"list" | "work">("work");
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  // 削除の確認モーダル対象(window.confirm は Tauri webview で機能しないため自前モーダルにする)。
+  const [confirmDelete, setConfirmDelete] = useState<ProjectEntry | null>(null);
+  // 画面フローの最新値(保存用)。ドラッグ中の毎フレーム再描画を避けるため state でなく ref。
+  const flowRef = useRef<FlowData>({ screens: [], edges: [] });
+  // 開いたプロジェクトの保存済みフロー(ScreenFlowEditor の初期値)。
+  const [flowInitial, setFlowInitial] = useState<FlowData>({
+    screens: [],
+    edges: [],
+  });
+  // キャンバスに画面が 1 つでもあるか(「この流れで作る」の活性判定。0↔1 でのみ再描画)。
+  const [hasFlow, setHasFlow] = useState(false);
   const [port, setPort] = useState<number | null>(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -112,20 +136,10 @@ export function CreateMode({
   const workspace = useRef<string | null>(null);
   // 各セッションで一意の workspace 名(Codex P3:定数だと前のアプリを引き継ぐ)
   const projectName = useRef("app-" + Date.now());
-  // 中央マップ:生成後に「構造を見る」で AppMap の解析を走らせて表示(on-demand=枠節約)
-  const [mapResult, setMapResult] = useState<ScreenMapResult | null>(null);
-  const [mapBusy, setMapBusy] = useState(false);
-  const [mapErr, setMapErr] = useState("");
-  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
-  // 右ペインのタグで選んだ「変更対象の要素」。指示をこの要素にスコープする。
-  const [targetNodeId, setTargetNodeId] = useState<number | null>(null);
-  const [nodeOffsets, setNodeOffsets] = useState<
-    Map<number, { x: number; y: number }>
-  >(new Map());
-  // データの流れの再生(既存の computeReplaySteps + HappyPathReplay を再利用)
-  const [replayIndex, setReplayIndex] = useState<number | null>(null);
-  const [replayPlaying, setReplayPlaying] = useState(false);
-  const replayTotalRef = useRef(0);
+  // 中央は画面フロー・エディタ(ScreenFlowEditor)が自前の state を持つ。
+  // 旧「コード解析マップ + 要素タグ + 流れ再生」は撤去した。
+  // 「指示」で選んだ画面名(右ペインの追撃をこの画面にスコープする)。
+  const [targetScreen, setTargetScreen] = useState<string | null>(null);
 
   // マウント時:作りかけプロジェクトの一覧を読む。あれば一覧画面から始める(掛け持ち対応)。
   useEffect(() => {
@@ -148,43 +162,9 @@ export function CreateMode({
       // 移行に失敗しても致命的でない
     }
     setProjects(list);
-    setScreen(list.length > 0 ? "list" : "form");
+    setScreen(list.length > 0 ? "list" : "work");
   }, []);
 
-  // マップが変わったら流れの再生をリセット
-  useEffect(() => {
-    setReplayIndex(null);
-    setReplayPlaying(false);
-  }, [mapResult]);
-
-  // 自動再生:一定間隔で次のステージへ。末尾で停止(App.tsx の再生ロジックを踏襲)。
-  useEffect(() => {
-    if (!replayPlaying || replayIndex === null) return;
-    if (replayIndex >= replayTotalRef.current - 1) {
-      setReplayPlaying(false);
-      return;
-    }
-    const id = setTimeout(() => {
-      setReplayIndex((i) =>
-        i === null ? i : Math.min(replayTotalRef.current - 1, i + 1),
-      );
-    }, 1900);
-    return () => clearTimeout(id);
-  }, [replayPlaying, replayIndex]);
-
-  const showMap = async () => {
-    if (!workspace.current || mapBusy) return;
-    setMapBusy(true);
-    setMapErr("");
-    try {
-      const outcome = await analyzeFolder(workspace.current, language, engine);
-      setMapResult(outcome.screens);
-    } catch (e) {
-      setMapErr("マップ生成に失敗: " + String(e));
-    } finally {
-      setMapBusy(false);
-    }
-  };
 
   const ensureWorkspace = async (): Promise<string> => {
     if (!workspace.current) {
@@ -241,7 +221,15 @@ export function CreateMode({
       ]);
       setStatus("");
       // 自動保存:プロジェクト一覧に反映(次に開いた時、一覧から続きを開ける)。
-      setProjects(upsertProject({ workspace: ws, desc, updatedAt: Date.now() }));
+      setProjects(
+        upsertProject({
+          workspace: ws,
+          desc,
+          output,
+          flow: flowRef.current,
+          updatedAt: Date.now(),
+        }),
+      );
     } catch (e) {
       const raw = String(e);
       // 認証切れ(OAuth 期限)は「バグ」でなく「再ログインで直る」ので、やさしく案内する。
@@ -257,83 +245,25 @@ export function CreateMode({
     }
   };
 
-  // タグで選んだ変更対象の要素(あれば)。指示のスコープ + 入力欄の表示に使う。
-  const targetNode =
-    targetNodeId != null && mapResult
-      ? mapResult.nodes.find((n) => n.id === targetNodeId) ?? null
-      : null;
-  const targetText = targetNode ? pickLocalized(targetNode.label, language) : null;
-
-  // 流れの再生:stages 計算 + 現在ステージから光らせる要素集合を導出(App.tsx と同じ導出)。
-  const replayPlan = useMemo(
-    () =>
-      mapResult
-        ? computeReplayStepsFine(mapResult)
-        : { stages: [] as number[][], detached: [] as number[] },
-    [mapResult],
-  );
-  const replayStages = replayPlan.stages;
-  const replayDetached = replayPlan.detached;
-  const replayHasDetached = replayDetached.length > 0;
-  const replayTotal = replayStages.length + (replayHasDetached ? 1 : 0);
-  replayTotalRef.current = replayTotal;
-  const activeReplayIndex =
-    replayIndex !== null && replayIndex < replayTotal ? replayIndex : null;
-  const isDetachedStep =
-    activeReplayIndex != null &&
-    replayHasDetached &&
-    activeReplayIndex === replayStages.length;
-  const replayActiveIds =
-    activeReplayIndex == null
-      ? null
-      : isDetachedStep
-        ? new Set(replayDetached)
-        : new Set(replayStages[activeReplayIndex] ?? []);
-  const replayPassedIds =
-    activeReplayIndex == null
-      ? null
-      : isDetachedStep
-        ? new Set(replayStages.flat())
-        : new Set(replayStages.slice(0, activeReplayIndex).flat());
-
-  const startReplay = () => {
-    setReplayIndex(0);
-    setReplayPlaying(true);
-  };
-  const replayTogglePlay = () => {
-    if (replayPlaying) {
-      setReplayPlaying(false);
-    } else {
-      if (replayIndex === null || replayIndex >= replayTotal - 1) {
-        setReplayIndex(0);
-      }
-      setReplayPlaying(true);
+  // 「この流れで作る」:目的 + 期待アウトプット + キャンバスの画面フローをまとめて Claude に渡す。
+  const handleFlowGenerate = () => {
+    if (busy) return;
+    const flowText = flowToText(flowRef.current);
+    const parts: string[] = [];
+    if (desc.trim()) parts.push(`システムの目的:${desc.trim()}`);
+    if (output.trim()) {
+      parts.push(`期待するユーザーへのアウトプット内容:${output.trim()}`);
     }
-  };
-  const replayPrev = () => {
-    setReplayPlaying(false);
-    setReplayIndex((i) => Math.max(0, (i ?? 0) - 1));
-  };
-  const replayNext = () => {
-    setReplayPlaying(false);
-    setReplayIndex((i) => Math.min(replayTotal - 1, (i ?? 0) + 1));
-  };
-  const replayClose = () => {
-    setReplayIndex(null);
-    setReplayPlaying(false);
-  };
-
-  const handleStart = async () => {
-    if (!desc.trim() || busy) return;
-    setScreen("work");
-    await build(desc.trim());
+    if (flowText) parts.push(flowText);
+    if (!parts.length) return; // 目的もフローも空なら何もしない
+    void build(parts.join("\n"));
   };
 
   const handleFollowup = async () => {
     if (!followup.trim() || busy) return;
     const f = followup.trim();
-    // タグで要素を選んでいれば、その要素にスコープした指示にする(優先的にその要素を変更)。
-    const scoped = targetText ? `「${targetText}」の部分について、${f}` : f;
+    // 「指示」で画面を選んでいれば、その画面にスコープした指示にする。
+    const scoped = targetScreen ? `「${targetScreen}」画面について、${f}` : f;
     setFollowup("");
     await build(scoped);
   };
@@ -375,7 +305,13 @@ export function CreateMode({
       return;
     }
     setProjects(
-      upsertProject({ workspace: workspace.current, desc, updatedAt: Date.now() }),
+      upsertProject({
+        workspace: workspace.current,
+        desc,
+        output,
+        flow: flowRef.current,
+        updatedAt: Date.now(),
+      }),
     );
     setLog((l) => [
       ...l,
@@ -388,11 +324,14 @@ export function CreateMode({
   const openProject = async (p: ProjectEntry) => {
     workspace.current = p.workspace;
     setDesc(p.desc);
+    setOutput(p.output ?? "");
+    const loadedFlow: FlowData = p.flow ?? { screens: [], edges: [] };
+    flowRef.current = loadedFlow;
+    setFlowInitial(loadedFlow);
     setLog([]);
-    setMapResult(null);
     setPort(null);
     setAuthNeeded(false);
-    setSelectedNodeId(null);
+    setTargetScreen(null);
     setScreen("work");
     setStatus("プロジェクトを開いています…");
     try {
@@ -411,11 +350,28 @@ export function CreateMode({
     projectName.current = "app-" + Date.now();
     workspace.current = null;
     setDesc("");
+    setOutput("");
+    flowRef.current = { screens: [], edges: [] };
+    setFlowInitial({ screens: [], edges: [] });
+    setHasFlow(false);
     setLog([]);
-    setMapResult(null);
     setPort(null);
     setAuthNeeded(false);
-    setScreen("form");
+    setTargetScreen(null);
+    setScreen("work");
+  };
+
+  // 実際の削除(確認モーダルの「削除する」から呼ぶ)。ディスクのフォルダも消す(best-effort)→ 一覧から除去。
+  const doRemoveProject = async (p: ProjectEntry) => {
+    setConfirmDelete(null);
+    try {
+      await invoke("delete_project", { workspace: p.workspace });
+    } catch {
+      // 古い Rust で未対応でも一覧からの削除は続行(フォルダ削除は次回のアプリ再起動で有効に)。
+    }
+    const rest = loadProjects().filter((x) => x.workspace !== p.workspace);
+    persistProjects(rest);
+    setProjects(rest);
   };
 
   // 作業中から一覧へ戻る。現在のプレビュー(dev サーバ)は止めてから。
@@ -468,91 +424,109 @@ export function CreateMode({
           </button>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, maxWidth: 640 }}>
             {projects.map((p) => (
-              <button
+              <div
                 key={p.workspace}
-                onClick={() => openProject(p)}
                 style={{
-                  textAlign: "left",
+                  position: "relative",
                   background: "#fff",
                   border: "1px solid #e5e7eb",
                   borderRadius: 10,
-                  padding: "14px 16px",
-                  cursor: "pointer",
                 }}
               >
-                <div style={{ fontSize: 15, fontWeight: 600, color: "#111827" }}>
-                  {p.desc || "(無題のアプリ)"}
-                </div>
-                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
-                  最終更新: {new Date(p.updatedAt).toLocaleString()}
-                </div>
-              </button>
+                <button
+                  onClick={() => openProject(p)}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    background: "transparent",
+                    border: "none",
+                    borderRadius: 10,
+                    padding: "14px 16px",
+                    paddingRight: 72,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ fontSize: 15, fontWeight: 600, color: "#111827" }}>
+                    {p.desc || "(無題のアプリ)"}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
+                    最終更新: {new Date(p.updatedAt).toLocaleString()}
+                  </div>
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(p)}
+                  style={{
+                    position: "absolute",
+                    top: 10,
+                    right: 10,
+                    fontSize: 11,
+                    padding: "4px 10px",
+                    border: "1px solid #fecaca",
+                    borderRadius: 8,
+                    background: "#fff",
+                    color: "#dc2626",
+                    cursor: "pointer",
+                  }}
+                >
+                  削除
+                </button>
+              </div>
             ))}
           </div>
         </div>
-      </div>
-    );
-  }
-
-  // ① 新規作成:まず1問だけ
-  if (screen === "form") {
-    return (
-      <div style={overlayBase}>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 16px" }}>
-          {projects.length > 0 ? (
-            <button onClick={() => setScreen("list")} style={closeBtn}>
-              一覧へ
-            </button>
-          ) : null}
-          <button onClick={handleClose} style={closeBtn}>
-            閉じる
-          </button>
-        </div>
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 16,
-            padding: 24,
-          }}
-        >
-          <div style={{ fontSize: 22, fontWeight: 700, color: "#111827" }}>
-            どんなアプリを作りたい?
-          </div>
-          <input
-            value={desc}
-            onChange={(e) => setDesc(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleStart();
-            }}
-            placeholder="例:予約管理アプリ"
+        {confirmDelete ? (
+          <div
+            onClick={() => setConfirmDelete(null)}
             style={{
-              width: "min(420px, 80%)",
-              padding: "12px 16px",
-              border: "1px solid #d1d5db",
-              borderRadius: 10,
-              fontSize: 16,
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.4)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 60,
             }}
-          />
-          <button
-            onClick={handleStart}
-            disabled={busy}
-            style={{ ...primaryBtn, padding: "10px 22px", fontSize: 15 }}
           >
-            作りはじめる
-          </button>
-          <div style={{ fontSize: 12, color: "#9ca3af" }}>
-            マップもプレビューも、作り始めてから開きます
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                background: "#fff",
+                borderRadius: 12,
+                padding: 24,
+                width: "min(420px, 90%)",
+                boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+              }}
+            >
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 8 }}>
+                本当に削除しますか?
+              </div>
+              <div style={{ fontSize: 13, color: "#374151", marginBottom: 4 }}>
+                「{confirmDelete.desc || "無題のアプリ"}」を削除します。
+              </div>
+              <div style={{ fontSize: 12, color: "#dc2626", marginBottom: 20 }}>
+                この操作は取り消せません。
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button onClick={() => setConfirmDelete(null)} style={closeBtn}>
+                  キャンセル
+                </button>
+                <button
+                  onClick={() => doRemoveProject(confirmDelete)}
+                  style={{ ...closeBtn, background: "#dc2626", color: "#fff", border: "none" }}
+                >
+                  削除する
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
     );
   }
 
-  // ② 作業中/完了:3ペイン
+  // 作業画面:3ペイン(左 プレビュー / 中央 目的+キャンバス / 右 Claude)。
+  // 旧「まず1問だけ」の form 画面は廃止し、中央上部の入力欄に統合した。
   return (
     <div style={overlayBase}>
       <div
@@ -618,88 +592,49 @@ export function CreateMode({
               minHeight: 0,
             }}
           >
-            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>目的</div>
-            <div style={{ fontSize: 14, color: "#111827", marginBottom: 12 }}>{desc}</div>
-            {mapResult && replayTotal >= 2 && activeReplayIndex === null ? (
-              <button
-                onClick={startReplay}
-                style={{
-                  ...primaryBtn,
-                  alignSelf: "flex-start",
-                  padding: "6px 14px",
-                  fontSize: 12,
-                  marginBottom: 8,
-                }}
-              >
-                データの流れを見る
-              </button>
-            ) : null}
-            {mapResult ? (
-              <div style={{ flex: 1, minHeight: 0 }}>
-                <MapCanvas
-                  nodes={mapResult.nodes}
-                  edges={mapResult.edges}
-                  selectedNodeId={selectedNodeId}
-                  onNodeClick={setSelectedNodeId}
-                  language={language}
-                  appSummary={mapResult.appSummary}
-                  appName={desc}
-                  nodeOffsets={nodeOffsets}
-                  onNodeOffsetsChange={setNodeOffsets}
-                  folderPath={workspace.current}
-                  autoFit
-                  fillHeight
-                  replayActiveIds={replayActiveIds}
-                  replayPassedIds={replayPassedIds}
-                  replayDetachedActive={isDetachedStep}
-                  replayStep={activeReplayIndex}
-                />
-              </div>
-            ) : (
-              <div
-                style={{
-                  border: "1px dashed #d1d5db",
-                  borderRadius: 8,
-                  padding: 24,
-                  textAlign: "center",
-                  color: "#6b7280",
-                  fontSize: 13,
-                  lineHeight: 1.8,
-                }}
-              >
-                このアプリの構造(画面・データ・流れ)をマップにできます。
-                <br />
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                <label style={{ ...fieldLabel, flex: 1 }}>
+                  システムの目的
+                  <input
+                    value={desc}
+                    onChange={(e) => setDesc(e.target.value)}
+                    placeholder="例:登録した人に天気を定時でメールする"
+                    style={intentInput}
+                  />
+                </label>
                 <button
-                  onClick={showMap}
-                  disabled={mapBusy || !workspace.current}
-                  style={{ ...primaryBtn, padding: "8px 16px", fontSize: 13, marginTop: 12 }}
+                  onClick={handleFlowGenerate}
+                  disabled={busy || (!desc.trim() && !hasFlow)}
+                  style={{
+                    ...primaryBtn,
+                    padding: "9px 16px",
+                    fontSize: 13,
+                    whiteSpace: "nowrap",
+                  }}
                 >
-                  {mapBusy ? "解析中…" : "構造マップを出す"}
+                  この流れで作る
                 </button>
-                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 8 }}>
-                  ※ AI でコードを読むので少し時間と枠を使います
-                </div>
-                {mapErr ? (
-                  <div style={{ fontSize: 11, color: "#dc2626", marginTop: 8 }}>
-                    {mapErr}
-                  </div>
-                ) : null}
               </div>
-            )}
-            {activeReplayIndex !== null && mapResult ? (
-              <HappyPathReplay
-                stages={replayStages}
-                detached={replayDetached}
-                index={activeReplayIndex}
-                nodes={mapResult.nodes}
-                language={language}
-                playing={replayPlaying}
-                onTogglePlay={replayTogglePlay}
-                onPrev={replayPrev}
-                onNext={replayNext}
-                onClose={replayClose}
-              />
-            ) : null}
+              <label style={{ ...fieldLabel, marginTop: 6 }}>
+                期待するユーザーへのアウトプット内容
+                <input
+                  value={output}
+                  onChange={(e) => setOutput(e.target.value)}
+                  placeholder="例:毎朝、その日の天気がメールで届く"
+                  style={intentInput}
+                />
+              </label>
+            </div>
+            <ScreenFlowEditor
+              key={workspace.current ?? "new"}
+              initial={flowInitial}
+              onTargetChange={setTargetScreen}
+              onChange={(f) => {
+                flowRef.current = f;
+                setHasFlow(f.screens.length > 0);
+              }}
+            />
           </div>
         </div>
 
@@ -707,49 +642,6 @@ export function CreateMode({
         <div style={paneCol("28%")}>
           <div style={paneLabel}>Claude Code</div>
           <div style={{ ...paneBody, display: "flex", flexDirection: "column" }}>
-            {mapResult ? (
-              <div style={{ padding: 8, borderBottom: "1px solid #eee" }}>
-                <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: 4 }}>
-                  要素を選んで指示(クリックでその要素を優先的に変更)
-                </div>
-                <div
-                  style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: 4,
-                    maxHeight: 100,
-                    overflowY: "auto",
-                  }}
-                >
-                  {mapResult.nodes.map((n) => {
-                    const active = targetNodeId === n.id;
-                    return (
-                      <button
-                        key={n.id}
-                        onClick={() => {
-                          const next = active ? null : n.id;
-                          setTargetNodeId(next);
-                          setSelectedNodeId(next);
-                        }}
-                        style={{
-                          fontSize: 10,
-                          padding: "3px 8px",
-                          borderRadius: 999,
-                          border: active
-                            ? "1px solid #0f766e"
-                            : "1px solid #d1d5db",
-                          background: active ? "#14b8a6" : "#fff",
-                          color: active ? "#fff" : "#374151",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {pickLocalized(n.label, language)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
             <div
               style={{
                 flex: 1,
@@ -801,8 +693,8 @@ export function CreateMode({
                 placeholder={
                   busy
                     ? "実装中…"
-                    : targetText
-                      ? `「${targetText}」を変更(例:色を青に)`
+                    : targetScreen
+                      ? `「${targetScreen}」を変更(例:色を青に)`
                       : "AI に頼む(例:色を青に)"
                 }
                 disabled={busy}

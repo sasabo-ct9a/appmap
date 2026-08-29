@@ -970,11 +970,7 @@ function App() {
             </div>
 
             {createOpen ? (
-              <CreateMode
-                onExit={() => setCreateOpen(false)}
-                language={language}
-                engine={engine}
-              />
+              <CreateMode onExit={() => setCreateOpen(false)} />
             ) : null}
 
             {/* 大きいアプリの注意書き:マップは主要ファイルからの AI 要約なので、
