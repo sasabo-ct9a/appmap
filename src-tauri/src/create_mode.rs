@@ -112,6 +112,14 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
         "src/App.tsx",
         include_str!("../templates/react-vite/src/App.tsx"),
     ),
+    (
+        "src/lib/supabase.ts",
+        include_str!("../templates/react-vite/src/lib/supabase.ts"),
+    ),
+    (
+        "src/vite-env.d.ts",
+        include_str!("../templates/react-vite/src/vite-env.d.ts"),
+    ),
 ];
 
 /// `<app_data_dir>/projects/` を返す(無ければ作る)。
@@ -193,6 +201,125 @@ pub fn delete_project(app: tauri::AppHandle, workspace: String) -> Result<(), St
     let ws = resolve_managed_workspace(&app, &workspace)?;
     fs::remove_dir_all(&ws).map_err(|e| format!("failed to delete project: {}", e))?;
     Ok(())
+}
+
+/// プロジェクトの .env に Supabase 接続情報(URL / anon key)を書く。
+/// 秘密はコードに直書きせず env に置く(§6.5)。書いたら preview を再起動して反映する。
+#[tauri::command]
+pub fn set_supabase_env(
+    app: tauri::AppHandle,
+    workspace: String,
+    url: String,
+    anon_key: String,
+) -> Result<(), String> {
+    let ws = resolve_managed_workspace(&app, &workspace)?;
+    let path = ws.join(".env");
+    // 既存の .env を読み、Supabase の2行だけ差し替える(他の変数は残す。Codex P2)。
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = Vec::new();
+    let mut has_url = false;
+    let mut has_key = false;
+    for line in existing.lines() {
+        if line.starts_with("VITE_SUPABASE_URL=") {
+            lines.push(format!("VITE_SUPABASE_URL={}", url.trim()));
+            has_url = true;
+        } else if line.starts_with("VITE_SUPABASE_ANON_KEY=") {
+            lines.push(format!("VITE_SUPABASE_ANON_KEY={}", anon_key.trim()));
+            has_key = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !has_url {
+        lines.push(format!("VITE_SUPABASE_URL={}", url.trim()));
+    }
+    if !has_key {
+        lines.push(format!("VITE_SUPABASE_ANON_KEY={}", anon_key.trim()));
+    }
+    let mut content = lines.join("\n");
+    content.push('\n');
+    fs::write(&path, content).map_err(|e| format!("failed to write .env: {}", e))?;
+    Ok(())
+}
+
+/// プロジェクトの .env から Supabase 接続情報を読む(接続欄の復元用)。無ければ空。
+#[tauri::command]
+pub fn get_supabase_env(
+    app: tauri::AppHandle,
+    workspace: String,
+) -> Result<(String, String), String> {
+    let ws = resolve_managed_workspace(&app, &workspace)?;
+    let text = match fs::read_to_string(ws.join(".env")) {
+        Ok(t) => t,
+        Err(_) => return Ok((String::new(), String::new())),
+    };
+    let mut url = String::new();
+    let mut key = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("VITE_SUPABASE_URL=") {
+            url = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("VITE_SUPABASE_ANON_KEY=") {
+            key = v.trim().to_string();
+        }
+    }
+    Ok((url, key))
+}
+
+/// 既存プロジェクトを本番構成(Supabase)に追いつかせる(Codex P1)。
+/// 旧テンプレで作ったプロジェクトは supabase.ts / 依存が無いので、生成前に補う。
+/// 何か補ったら true(呼び出し側で preview を再起動させる)。
+#[tauri::command]
+pub async fn ensure_supabase_ready(
+    app: tauri::AppHandle,
+    workspace: String,
+) -> Result<bool, String> {
+    let ws = resolve_managed_workspace(&app, &workspace)?;
+    let mut changed = false;
+
+    // 不足しているテンプレファイル(supabase.ts / vite-env.d.ts など)を補う(既存は触らない)。
+    for (rel, contents) in TEMPLATE_FILES {
+        let path = ws.join(rel);
+        if path.exists() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+        }
+        fs::write(&path, contents).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        changed = true;
+    }
+
+    // @supabase/supabase-js が未インストールなら入れる(package.json にも追記される)。
+    let installed = ws
+        .join("node_modules")
+        .join("@supabase")
+        .join("supabase-js")
+        .exists();
+    if !installed {
+        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+        let path_env = crate::augmented_path();
+        let ws2 = ws.clone();
+        let out = tauri::async_runtime::spawn_blocking(move || {
+            StdCommand::new(npm)
+                .args(["install", "@supabase/supabase-js@2"])
+                .current_dir(&ws2)
+                .env("PATH", &path_env)
+                .output()
+        })
+        .await
+        .map_err(|e| format!("join error: {}", e))?
+        .map_err(|e| format!("failed to spawn npm install: {}", e))?;
+        if !out.status.success() {
+            return Err(format!(
+                "npm install @supabase/supabase-js failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        changed = true;
+    }
+
+    Ok(changed)
 }
 
 /// workspace で dev サーバを起こし、プレビュー用ポートを返す。
@@ -338,18 +465,13 @@ pub fn stop_preview(state: tauri::State<'_, CreateState>) -> Result<(), String> 
 pub async fn generate_app(
     app: tauri::AppHandle,
     workspace: String,
-    instruction: String,
+    prompt: String,
 ) -> Result<String, String> {
+    // prompt は TS 側(createPrompt.ts)で本番基礎込みに組み立てて渡す(§7.1)。
+    // ここは受け取った prompt をそのまま claude に流すだけ。
     let ws = resolve_managed_workspace(&app, &workspace)?;
     let exe = crate::find_claude_exe()?;
     let path_env = crate::augmented_path();
-    let prompt = format!(
-        "この Vite + React アプリを、次の要望に沿って作ってください:「{}」。\
-         src/App.tsx を中心に実装し、日本語 UI、シンプルで見やすいインラインスタイルに。\
-         React の useState だけで動く範囲で作る。Vite+React の構成は変えない。\
-         npm パッケージは追加しない。",
-        instruction
-    );
 
     let ws2 = ws.clone();
     let out = tauri::async_runtime::spawn_blocking(move || {
