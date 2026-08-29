@@ -189,9 +189,6 @@ export type Translations = {
     tabSearchNoMatch: string;
     tourButtonLabel: string;
     tourButtonTitle: string;
-    tipTitle: string;
-    tipLine1: string;
-    tipLine2: string;
   };
   topBar: {
     easyTitle: string;
@@ -512,9 +509,6 @@ const JA: Translations = {
     tabSearchNoMatch: "該当なし",
     tourButtonLabel: "ガイド付きツアー",
     tourButtonTitle: "AppMap の使い方を順に案内します",
-    tipTitle: "3 分で理解するコツ",
-    tipLine1: "まずは「できること」から",
-    tipLine2: "全体像をつかみましょう",
   },
   topBar: {
     easyTitle: "かんたんモード",
@@ -845,9 +839,6 @@ const EN: Translations = {
     tabSearchNoMatch: "No match",
     tourButtonLabel: "Guided tour",
     tourButtonTitle: "Walk through AppMap step by step",
-    tipTitle: "Understand in 3 minutes",
-    tipLine1: "Start with what it does,",
-    tipLine2: "then grasp the whole picture.",
   },
   topBar: {
     easyTitle: "Easy mode",

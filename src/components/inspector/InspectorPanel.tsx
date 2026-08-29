@@ -786,7 +786,9 @@ function InspectorPanel({
         </Section>
 
         {/* AppMap→claude:この要素の修正を、自分の Claude / Cursor に頼む文を作ってコピー。
-            CreateMode を使わず外部の Claude で開発する人のための出口。*/}
+            CreateMode を使わず外部の Claude で開発する人のための出口。
+            data-tour="claude-handoff":ガイド ⑧ がこの欄を実際にスポットライトする。*/}
+        <div data-tour="claude-handoff">
         <Section title={tx("この要素を Claude に頼む", "Ask your Claude about this")}>
           <p className="text-[11px] text-ink-soft mb-2 leading-relaxed">
             {tx(
@@ -817,6 +819,7 @@ function InspectorPanel({
               : tx("指示をコピー(Claude に貼る)", "Copy prompt (paste into Claude)")}
           </button>
         </Section>
+        </div>
 
         {/* 関連ファイル(v0.1.8:クリックで外部エディタ起動)*/}
         {files.length > 0 && (

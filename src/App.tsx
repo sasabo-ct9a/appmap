@@ -866,8 +866,12 @@ function App() {
           // ツアーはホーム画面(かんたんモード = マップ表示)基準で作ってあるので、
           // 他のタブ(コードチェック等)にいる時は一旦ホームに戻してから開始
           setActiveNav("intro");
+          // ⑧「Claude に頼む」を実際の場所でスポットライトするには詳細パネルが
+          // 開いている必要がある。入口ノードを選んで開いておく(既に選択中なら維持)。
+          setSelectedNodeId((cur) => (cur !== null ? cur : screens.nodes[0]?.id ?? null));
           setTourOpen(true);
         }}
+        onOpenCreate={() => setCreateOpen(true)}
       />
 
       {/* 中央カラム */}
@@ -951,10 +955,6 @@ function App() {
                 disabled={analysisStatus === "loading"}
               >
                 {T.specDoc.buttonLabel}
-              </Button>
-
-              <Button variant="secondary" onClick={() => setCreateOpen(true)}>
-                作る(実験)
               </Button>
 
               {analysisStatus === "loading" ? (
@@ -1536,9 +1536,10 @@ function buildTourSteps(language: Language): TourStep[] {
         body: "解析に使う AI を切り替えられます:\n・Claude(クラウド):高精度。API 利用料(従量制)\n・ローカル AI:PC 上で動く。無料・オフライン、精度は劣る\n設定では表示言語やエディタも選べます。",
       },
       {
+        target: "claude-handoff",
         title: "⑧ 直したい所を自分の Claude に頼む",
-        body: "要素をクリックして開く詳細パネルの下に「この要素を Claude に頼む」があります。直したいことを書いて「指示をコピー」すると、その要素の情報を添えた指示文ができます。Cursor / Claude Code / claude.ai に貼るだけ。AppMap の外の、自分の Claude で開発する人向けです。",
-        placement: "center",
+        body: "要素をクリックすると、詳細パネルの下にこの欄が出ます。直したいことを書いて「指示をコピー」すると、その要素の情報を添えた指示文ができます。Cursor / Claude Code / claude.ai に貼るだけ。",
+        placement: "left",
       },
       {
         title: "以上です",
@@ -1590,9 +1591,10 @@ function buildTourSteps(language: Language): TourStep[] {
       body: "Switch the AI used for analysis:\n・Claude (cloud): high accuracy. Uses Anthropic's API (pay-per-use)\n・Local AI: runs on your PC — free and offline, but less accurate\nSettings also let you change language and editor.",
     },
     {
+      target: "claude-handoff",
       title: "8. Hand a change to your own Claude",
-      body: "Below the detail panel (opened by clicking an element) is 'Ask your Claude about this'. Write what you want changed, then Copy — you get a prompt with that element's context, ready to paste into Cursor / Claude Code / claude.ai. For people who build with their own Claude outside AppMap.",
-      placement: "center",
+      body: "Click an element and this box appears at the bottom of the detail panel. Write what you want changed, then Copy — you get a prompt with that element's context, ready to paste into Cursor / Claude Code / claude.ai.",
+      placement: "left",
     },
     {
       title: "That's it",

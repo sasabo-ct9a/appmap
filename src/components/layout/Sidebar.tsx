@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import LogoMark from "../ui/LogoMark";
 import type { StoredAnalysis } from "../../lib/storage";
-import { LightbulbIcon } from "../ui/Icons";
 import { t, type Language } from "../../lib/i18n";
 
 /**
@@ -27,6 +26,8 @@ type SidebarProps = {
   language: Language;
   /** v0.1.10:ガイド付きツアーを開始するコールバック */
   onStartTour?: () => void;
+  /** 「作る(実験)」= CreateMode を開くコールバック(旧ヒント位置に移設)。 */
+  onOpenCreate?: () => void;
 };
 
 function shortFolder(path: string): string {
@@ -51,6 +52,7 @@ function Sidebar({
   onCloseTab,
   language,
   onStartTour,
+  onOpenCreate,
 }: SidebarProps) {
   const T = t(language).sidebar;
   const navItems: NavItem[] = [
@@ -357,34 +359,36 @@ function Sidebar({
         </ul>
       </nav>
 
-      {/* tips カード(deep navy 上で teal アクセント)*/}
-      <div
-        className="mx-3 mb-2 rounded-[12px] p-3"
-        style={{ background: "var(--color-nav-bg-card)" }}
-      >
-        <div className="flex items-start gap-2">
-          <LightbulbIcon
-            className="w-4 h-4 flex-shrink-0 mt-0.5"
-            color="var(--color-nav-accent)"
-          />
-          <div className="min-w-0">
-            <div
-              className="text-xs font-semibold"
-              style={{ color: "var(--color-nav-text-strong)" }}
+      {/* 作る(実験):CreateMode を開く。旧「3 分で理解するコツ」ヒントの位置に移設。*/}
+      {onOpenCreate && (
+        <div className="mx-3 mb-2">
+          <button
+            type="button"
+            onClick={onOpenCreate}
+            className="w-full flex items-center justify-center gap-1.5 rounded-[10px] px-3 py-2.5 text-[13px] font-semibold transition-opacity cursor-pointer"
+            style={{ background: "var(--color-nav-accent)", color: "#fff" }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.opacity = "0.9";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.opacity = "1";
+            }}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              className="w-3.5 h-3.5"
+              aria-hidden="true"
             >
-              {T.tipTitle}
-            </div>
-            <div
-              className="text-[11px] mt-1 leading-relaxed"
-              style={{ color: "var(--color-nav-text)" }}
-            >
-              {T.tipLine1}
-              <br />
-              {T.tipLine2}
-            </div>
-          </div>
+              <path d="M12 5 V19 M5 12 H19" />
+            </svg>
+            作る(実験)
+          </button>
         </div>
-      </div>
+      )}
 
       {/* v0.1.10:ガイド付きツアー起動ボタン */}
       {onStartTour && (
