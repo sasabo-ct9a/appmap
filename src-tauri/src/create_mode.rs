@@ -486,6 +486,9 @@ pub async fn generate_app(
             ])
             .current_dir(&ws2)
             .env("PATH", &path_env)
+            // claude -p は stdin も待つため、パイプが無いと約3秒ブロックする。
+            // 生成では stdin を渡さないので null に繋いで即時実行させる。
+            .stdin(Stdio::null())
             .output()
     })
     .await
