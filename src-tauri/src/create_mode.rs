@@ -97,6 +97,10 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
         include_str!("../templates/react-vite/package.json"),
     ),
     (
+        "tsconfig.json",
+        include_str!("../templates/react-vite/tsconfig.json"),
+    ),
+    (
         "vite.config.js",
         include_str!("../templates/react-vite/vite.config.js"),
     ),
