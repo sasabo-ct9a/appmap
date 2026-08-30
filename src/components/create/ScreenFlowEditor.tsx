@@ -101,7 +101,7 @@ export function ScreenFlowEditor({
     const id = "s" + nextId.current++;
     const x = 40 + (n % 4) * (NODE_W + 40);
     const y = 40 + Math.floor(n / 4) * (NODE_H + 40);
-    setScreens((prev) => [...prev, { id, name: `画面${n + 1}`, x, y }]);
+    setScreens((prev) => [...prev, { id, name: `要素${n + 1}`, x, y }]);
     setEditingId(id);
   };
 
@@ -185,12 +185,12 @@ export function ScreenFlowEditor({
       {/* ツールバー */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
         <button onClick={addScreen} style={toolBtn}>
-          ＋ 画面を追加
+          ＋ 要素を追加
         </button>
         <span style={{ fontSize: 11, color: "#6b7280" }}>
           {connectFrom
             ? `「${nameOf(connectFrom)}」のつなぐ先をクリック(Esc で中止)`
-            : "ドラッグで移動 / 「つなぐ」で矢印 / 「指示」で直したい画面を選ぶ"}
+            : "ドラッグで要素移動 / 「つなぐ」→ 行き先をクリック / 「指示」で直したい要素を選んで、Claude で修正"}
         </span>
       </div>
 
@@ -223,7 +223,7 @@ export function ScreenFlowEditor({
               lineHeight: 1.8,
             }}
           >
-            「＋ 画面を追加」で画面を置き、矢印でつないで
+            「＋ 要素を追加」で要素を置き、矢印でつないで
             <br />
             アプリの流れを描いてください。
           </div>
@@ -344,7 +344,7 @@ export function ScreenFlowEditor({
                   style={{ fontSize: 13, fontWeight: 600, color: "#111827", wordBreak: "break-word" }}
                   title="ダブルクリックで名前を編集"
                 >
-                  {s.name || "(無名の画面)"}
+                  {s.name || "(無名の要素)"}
                 </div>
               )}
               {/* ノード下部のミニ操作 */}
@@ -370,7 +370,7 @@ export function ScreenFlowEditor({
                       ? { ...miniBtn, background: "#14b8a6", color: "#fff", borderColor: "#14b8a6" }
                       : miniBtn
                   }
-                  title="この画面を、右の『AI に頼む』の対象にする"
+                  title="この要素を、右の『AI に頼む』の対象にする"
                 >
                   指示
                 </button>
