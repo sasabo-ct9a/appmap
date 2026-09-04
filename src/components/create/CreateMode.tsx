@@ -870,6 +870,25 @@ export function CreateMode({
     padding: "4px 12px",
     cursor: "pointer",
   });
+  // 構造マップで選択中のノード(実体詳細パネル用)。
+  const selNode =
+    asBuilt && mapSelected != null
+      ? (asBuilt.nodes.find((n) => n.id === mapSelected) ?? null)
+      : null;
+  const detailLabel: CSSProperties = {
+    fontSize: 10,
+    fontWeight: 600,
+    color: "#9ca3af",
+    letterSpacing: "0.03em",
+  };
+  const dataChip: CSSProperties = {
+    fontSize: 11,
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#f0fdfa",
+    color: "#0f766e",
+    border: "1px solid #99f6e4",
+  };
   return (
     <div style={overlayBase}>
       <div
@@ -1062,13 +1081,83 @@ export function CreateMode({
                       {pickLocalized(asBuilt.appSummary, "ja")}
                     </div>
                   ) : null}
-                  <div style={{ flex: 1, minHeight: 0 }}>
+                  <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
                     <FlowView
                       screens={asBuilt}
                       language="ja"
                       selectedId={mapSelected}
                       onSelect={setMapSelected}
                     />
+                    {selNode ? (
+                      <div
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          maxHeight: "60%",
+                          overflowY: "auto",
+                          background: "#fff",
+                          borderTop: "1px solid #e5e7eb",
+                          boxShadow: "0 -4px 12px rgba(0,0,0,0.08)",
+                          padding: "10px 12px 14px",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                          <strong style={{ fontSize: 13 }}>
+                            {pickLocalized(selNode.label, "ja")}
+                          </strong>
+                          {selNode.userIntent ? (
+                            <span style={{ fontSize: 11, color: "#6b7280" }}>
+                              {pickLocalized(selNode.userIntent, "ja")}
+                            </span>
+                          ) : null}
+                          <button
+                            onClick={() => setMapSelected(null)}
+                            style={{ ...closeBtn, marginLeft: "auto", padding: "2px 8px", fontSize: 11 }}
+                          >
+                            閉じる
+                          </button>
+                        </div>
+                        {selNode.detail?.body ? (
+                          <div style={{ fontSize: 12, color: "#374151", lineHeight: 1.6, marginBottom: 8 }}>
+                            {pickLocalized(selNode.detail.body, "ja")}
+                          </div>
+                        ) : null}
+                        {selNode.subActions?.length ? (
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={detailLabel}>できること</div>
+                            <ul style={{ margin: "2px 0 0", paddingLeft: 16, fontSize: 12, color: "#374151", lineHeight: 1.6 }}>
+                              {selNode.subActions.map((a, i) => (
+                                <li key={i}>{pickLocalized(a, "ja")}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {selNode.detail?.dataUsed?.length ? (
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={detailLabel}>使うデータ</div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 3 }}>
+                              {selNode.detail.dataUsed.map((d, i) => (
+                                <span key={i} style={dataChip}>
+                                  {pickLocalized(d, "ja")}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {selNode.detail?.files?.length ? (
+                          <div>
+                            <div style={detailLabel}>関連ファイル</div>
+                            <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace", marginTop: 3, lineHeight: 1.7 }}>
+                              {selNode.detail.files.map((f, i) => (
+                                <div key={i}>{f}</div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 </>
               ) : (
