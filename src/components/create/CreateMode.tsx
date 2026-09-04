@@ -293,6 +293,9 @@ export function CreateMode({
           const f = e.payload ?? { screens: [], edges: [] };
           flowRef.current = f;
           setHasFlow(f.screens.length > 0);
+          // 本画面に戻すと中央エディタは再マウントされ initial(=flowInitial)を種に読み直す。
+          // 別窓での編集を種にも反映しないと、戻した瞬間に編集が消える(Codex P1)。
+          setFlowInitial(f);
         }),
       );
       push(
