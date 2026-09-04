@@ -239,6 +239,12 @@ export function CreateMode({
         width: 1280,
         height: 860,
       });
+      // × で閉じられた時(「本画面に戻す」を経由しない)も本ウィンドウを元に戻す(Codex P2)。
+      void canvasWin.current.onCloseRequested(() => {
+        canvasWin.current = null;
+        setPoppedOut(false);
+        setWeights({ pv: 30, ca: 42, cl: 28 });
+      });
       setPoppedOut(true);
       setWeights({ pv: 42, ca: 16, cl: 42 });
     } catch (e) {
@@ -263,8 +269,15 @@ export function CreateMode({
   // 別窓の「戻す」ボタンや × で送られる close を受けたら本ウィンドウを元に戻す。
   useEffect(() => {
     const uns: Array<() => void> = [];
+    let alive = true;
+    // cleanup が listen の await 中に走っても取りこぼさない:解除後に届いた登録は即 unlisten
+    // する(StrictMode の二重マウントで listener が漏れ、canvas:generate が二重発火するのを防ぐ / Codex P1)。
+    const push = (un: () => void) => {
+      if (alive) uns.push(un);
+      else un();
+    };
     void (async () => {
-      uns.push(
+      push(
         await listen("canvas:ready", () => {
           void emit("canvas:init", {
             desc: descRef.current,
@@ -273,21 +286,21 @@ export function CreateMode({
           });
         }),
       );
-      uns.push(await listen<string>("canvas:desc", (e) => setDesc(e.payload ?? "")));
-      uns.push(await listen<string>("canvas:output", (e) => setOutput(e.payload ?? "")));
-      uns.push(
+      push(await listen<string>("canvas:desc", (e) => setDesc(e.payload ?? "")));
+      push(await listen<string>("canvas:output", (e) => setOutput(e.payload ?? "")));
+      push(
         await listen<FlowData>("canvas:flow", (e) => {
           const f = e.payload ?? { screens: [], edges: [] };
           flowRef.current = f;
           setHasFlow(f.screens.length > 0);
         }),
       );
-      uns.push(
+      push(
         await listen<string | null>("canvas:target", (e) => {
           setTargetScreen(e.payload ?? null);
         }),
       );
-      uns.push(
+      push(
         await listen<{ desc: string; output: string; flow: FlowData }>(
           "canvas:generate",
           (e) => {
@@ -296,7 +309,7 @@ export function CreateMode({
           },
         ),
       );
-      uns.push(
+      push(
         await listen("canvas:close", () => {
           canvasWin.current = null;
           setPoppedOut(false);
@@ -304,7 +317,20 @@ export function CreateMode({
         }),
       );
     })();
-    return () => uns.forEach((u) => u());
+    return () => {
+      alive = false;
+      uns.forEach((u) => u());
+    };
+  }, []);
+
+  // アンマウント(クリエイトモードを閉じる等)で、開いたキャンバス窓をオーファンにしない(Codex P2)。
+  // 初回マウント時は canvasWin.current が null なので StrictMode の二重呼び出しでも無害。
+  useEffect(() => {
+    return () => {
+      const w = canvasWin.current;
+      canvasWin.current = null;
+      if (w) void w.close().catch(() => {});
+    };
   }, []);
 
   // 生成中フラグを別ウィンドウ(キャンバス窓)へ伝える(向こうの「作る」ボタンの二重押し防止)。
