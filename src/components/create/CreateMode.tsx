@@ -875,6 +875,8 @@ export function CreateMode({
     asBuilt && mapSelected != null
       ? (asBuilt.nodes.find((n) => n.id === mapSelected) ?? null)
       : null;
+  // 意図 vs 実体の粗い差分:意図キャンバスの画面数と実体マップの画面数を比べる(名前対応はしない)。
+  const intentScreenCount = flowRef.current.screens.length;
   const detailLabel: CSSProperties = {
     fontSize: 10,
     fontWeight: 600,
@@ -1081,6 +1083,37 @@ export function CreateMode({
                       {pickLocalized(asBuilt.appSummary, "ja")}
                     </div>
                   ) : null}
+                  <div
+                    style={{
+                      padding: "0 8px 8px",
+                      display: "flex",
+                      gap: 10,
+                      alignItems: "baseline",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <span style={{ fontSize: 12, color: "#374151" }}>
+                      意図 <b>{intentScreenCount}</b> 画面 → 実体 <b>{asBuilt.nodes.length}</b> 画面
+                    </span>
+                    {(() => {
+                      const d = asBuilt.nodes.length - intentScreenCount;
+                      if (d > 0)
+                        return (
+                          <span style={{ fontSize: 11, color: "#0f766e" }}>
+                            AI が {d} 画面ぶん具体化・追加
+                          </span>
+                        );
+                      if (d < 0)
+                        return (
+                          <span style={{ fontSize: 11, color: "#b45309" }}>
+                            意図より {-d} 画面少ない ― 未実装がないか確認を
+                          </span>
+                        );
+                      return (
+                        <span style={{ fontSize: 11, color: "#9ca3af" }}>画面数は一致</span>
+                      );
+                    })()}
+                  </div>
                   <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
                     <FlowView
                       screens={asBuilt}
