@@ -15,6 +15,7 @@ import ScreenFlowEditor, {
 } from "./ScreenFlowEditor";
 import { buildCreatePrompt, buildRefinePrompt } from "../../lib/createPrompt";
 import { FlowView } from "./FlowView";
+import { MatchView, parseMapping, type MatchPair } from "./MatchView";
 import { analyzeFolder } from "../../lib/engineSelector";
 import { pickLocalized } from "../../lib/i18n";
 import type { ScreenMapResult } from "../../lib/claudeCli";
@@ -175,11 +176,14 @@ export function CreateMode({
   // 戻せる世代数(生成のたびに増える)。-1=チェックポイント不可(git 無し)でボタンを隠す。
   const [undoCount, setUndoCount] = useState(-1);
   // 左ペインのタブ:プレビュー(動く実物)/ 構造マップ(出来た物を実コードから解析した実体)。
-  const [leftTab, setLeftTab] = useState<"preview" | "map">("preview");
+  const [leftTab, setLeftTab] = useState<"preview" | "map" | "match">("preview");
   // 「出来たアプリ」の実体マップ(見るの analyzeFolder で生成物を解析した結果)。null=未解析。
   const [asBuilt, setAsBuilt] = useState<ScreenMapResult | null>(null);
   const [mapBusy, setMapBusy] = useState(false);
   const [mapSelected, setMapSelected] = useState<number | null>(null);
+  // 意図↔実体の対応(突き合わせ)。AI 推定なので確定ではない。null=未実行。
+  const [mapping, setMapping] = useState<MatchPair[] | null>(null);
+  const [mappingBusy, setMappingBusy] = useState(false);
 
   // 境界ドラッグ:leftKey と rightKey の重みを付け替える(合計は一定・各ペイン最低 8%)。
   const startResize = (
@@ -431,8 +435,9 @@ export function CreateMode({
         }),
       );
       void refreshUndo();
-      // 生成でコードが変わった → 前の実体マップは古い。破棄して再解析を促す(偽の現状を見せない)。
+      // 生成でコードが変わった → 前の実体マップ・対応付けは古い。破棄して再解析を促す(偽を見せない)。
       setAsBuilt(null);
+      setMapping(null);
     } catch (e) {
       const raw = String(e);
       // 認証切れ(OAuth 期限)は「バグ」でなく「再ログインで直る」ので、やさしく案内する。
@@ -472,7 +477,8 @@ export function CreateMode({
       setPreviewNonce((n) => n + 1);
       setStatus("1つ前の状態に戻しました");
       setLog((l) => [...l, { role: "ai", text: "1つ前の状態に戻しました。" }]);
-      setAsBuilt(null); // 戻したらコードも変わる → 実体マップは再解析させる
+      setAsBuilt(null); // 戻したらコードも変わる → 実体マップ・対応付けは再解析させる
+      setMapping(null);
     } catch (e) {
       setStatus(String(e));
     }
@@ -490,11 +496,45 @@ export function CreateMode({
       const outcome = await analyzeFolder(ws, "ja", "claude");
       setAsBuilt(outcome.screens);
       setMapSelected(null);
+      setMapping(null); // 実体が変わったら対応付けもやり直し
       setStatus("");
     } catch (e) {
       setStatus("解析に失敗: " + String(e));
     } finally {
       setMapBusy(false);
+    }
+  };
+
+  // 意図(画面フロー)と実体(解析マップ)を Claude で対応付ける。結果は AI 推定(◐)で確定ではない。
+  const runMatch = async () => {
+    if (!asBuilt || mappingBusy || busy) return;
+    const intentNames = flowRef.current.screens.map((s) => s.name.trim()).filter(Boolean);
+    const builtNames = asBuilt.nodes.map((n) => pickLocalized(n.label, "ja"));
+    const builtList = asBuilt.nodes.map((n) => {
+      const name = pickLocalized(n.label, "ja");
+      const it = n.userIntent ? pickLocalized(n.userIntent, "ja") : "";
+      return it ? `${name}(${it})` : name;
+    });
+    const prompt = [
+      "非エンジニアが「作りたい画面」として並べた名前(意図)と、AI が実際に生成したアプリの画面名(実体)です。",
+      "各『実体の画面』が、どの『意図の画面』に対応するかを推測してください。名前が完全一致でなくても、意味・機能・目的が近ければ積極的に対応付けてください(例:「週間予報画面」↔「週間予報」、「アカウント画面」↔「アカウント」、「設定画面」↔「配信設定」は対応する)。意図の名前は曖昧・空(画面4 等)なこともあります。本当にどの意図にも当てはまらない時だけ intent を null(=AI が独自に追加)にしてください。",
+      "",
+      "意図の画面: " + (intentNames.length ? intentNames.join(" / ") : "(なし)"),
+      "実体の画面: " + builtList.join(" / "),
+      "",
+      "出力は JSON 配列のみ(説明・コードフェンス不要)。built は実体の画面名を正確に:",
+      '[{"built":"<実体の画面名>","intent":"<意図の画面名 または null>"}]',
+    ].join("\n");
+    setMappingBusy(true);
+    setStatus("意図と実体を対応付け中…(Claude を使用)");
+    try {
+      const raw = await invoke<string>("claude_ask", { prompt });
+      setMapping(parseMapping(raw, builtNames));
+      setStatus("");
+    } catch (e) {
+      setStatus("対応付けに失敗: " + String(e));
+    } finally {
+      setMappingBusy(false);
     }
   };
 
@@ -971,9 +1011,9 @@ export function CreateMode({
             <button onClick={() => setLeftTab("map")} style={leftTabStyle(leftTab === "map")}>
               構造マップ
             </button>
-            <span style={{ fontSize: 10, color: "#9ca3af", marginLeft: "auto" }}>
-              {leftTab === "preview" ? "動く実物" : "出来た物を実コードから解析"}
-            </span>
+            <button onClick={() => setLeftTab("match")} style={leftTabStyle(leftTab === "match")}>
+              突き合わせ
+            </button>
           </div>
           <div style={{ ...paneBody, display: "flex", flexDirection: "column" }}>
             {/* Supabase 接続バー */}
@@ -1220,6 +1260,76 @@ export function CreateMode({
                     出来たアプリの構造を見る
                   </button>
                   <div style={{ fontSize: 11, color: "#9ca3af" }}>※ 解析に Claude を使います</div>
+                </div>
+              )}
+            </div>
+            {/* 突き合わせ(意図 vs 実体・AI 推定の対応) */}
+            <div
+              style={{
+                flex: 1,
+                minHeight: 0,
+                display: leftTab === "match" ? "flex" : "none",
+                flexDirection: "column",
+              }}
+            >
+              {mappingBusy ? (
+                <div style={{ padding: 20, color: "#0f766e", fontSize: 13 }}>
+                  意図と実体を対応付け中…(Claude を使用)
+                </div>
+              ) : !asBuilt ? (
+                <div style={{ padding: 24, color: "#9ca3af", fontSize: 13, textAlign: "center" }}>
+                  先に「構造マップ」で実体を解析してください。
+                </div>
+              ) : mapping ? (
+                <>
+                  <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 11, color: "#b45309" }}>
+                      ※ 対応は AI の推定(確定ではありません)
+                    </span>
+                    <button
+                      onClick={runMatch}
+                      style={{ ...closeBtn, marginLeft: "auto", padding: "3px 10px", fontSize: 11 }}
+                    >
+                      再対応付け
+                    </button>
+                  </div>
+                  <div style={{ flex: 1, minHeight: 0 }}>
+                    <MatchView
+                      intent={flowRef.current.screens.map((s) => s.name.trim()).filter(Boolean)}
+                      built={asBuilt.nodes.map((n) => pickLocalized(n.label, "ja"))}
+                      mapping={mapping}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 12,
+                    padding: 24,
+                    textAlign: "center",
+                  }}
+                >
+                  <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.7 }}>
+                    あなたの意図(画面フロー)と、実際に出来た画面を AI が対応付けます。
+                    <br />
+                    「頼んだ画面がどうなったか / AI が足した・作らなかった画面」が見えます。
+                  </div>
+                  <button
+                    onClick={runMatch}
+                    disabled={busy || mappingBusy}
+                    style={{ ...primaryBtn, padding: "9px 18px", fontSize: 13 }}
+                  >
+                    意図と実体を対応付ける
+                  </button>
+                  <div style={{ fontSize: 11, color: "#9ca3af" }}>
+                    ※ Claude を使います・対応は推定です
+                  </div>
                 </div>
               )}
             </div>
