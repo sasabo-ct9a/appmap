@@ -60,6 +60,32 @@ function borderPoint(
   return [cx + dx * ext, cy + dy * ext];
 }
 
+/** 「＋要素を追加」で選べる画面プリセット。非エンジニアの「何を置けばいいか分からない」を防ぐ引き出し。
+ *  全部を使う必要はない(選ぶだけ)。hint で「どう使うか」を示し、名前だけでは謎になるのを防ぐ。 */
+const SCREEN_PRESETS: { label: string; items: { name: string; hint: string }[] }[] = [
+  {
+    label: "入口・アカウント",
+    items: [
+      { name: "ログイン画面", hint: "登録済みの人が入る" },
+      { name: "新規登録画面", hint: "初めての人が登録する" },
+      { name: "ホーム画面", hint: "開いて最初に見る画面" },
+      { name: "マイページ", hint: "自分の情報・ログアウト" },
+      { name: "設定画面", hint: "アプリの設定" },
+      { name: "お知らせ画面", hint: "通知・更新情報" },
+    ],
+  },
+  {
+    label: "中身(必要なものだけ)",
+    items: [
+      { name: "一覧画面", hint: "モノを並べて見せる(例:予約一覧・商品リスト)" },
+      { name: "詳細画面", hint: "一覧から1件を開く" },
+      { name: "入力画面", hint: "新しく登録・追加する(例:予約する)" },
+      { name: "検索画面", hint: "絞り込んで探す" },
+      { name: "表示画面", hint: "結果・情報を見せるだけ(例:天気・診断結果)" },
+    ],
+  },
+];
+
 export function ScreenFlowEditor({
   initial,
   onTargetChange,
@@ -77,6 +103,8 @@ export function ScreenFlowEditor({
   // つなぐ操作:1 個目をクリック → connectFrom にセット → 2 個目クリックで矢印を作る。
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // 「＋要素を追加」のプリセット・メニューの開閉。
+  const [menuOpen, setMenuOpen] = useState(false);
   // 「指示」で選んだ画面(右ペインの追加指示のスコープ対象)。
   const [targetId, setTargetId] = useState<string | null>(null);
   // 復元したフローの id と衝突しないよう、既存 id の最大 + 1 から採番する。
@@ -96,13 +124,15 @@ export function ScreenFlowEditor({
     onTargetChange?.(id ? nameOf(id) : null);
   };
 
-  const addScreen = () => {
+  // presetName を渡すとその名前で置く(プリセット選択)。無ければ空要素+即リネーム(従来)。
+  const addScreen = (presetName?: string) => {
     const n = screens.length;
     const id = "s" + nextId.current++;
     const x = 40 + (n % 4) * (NODE_W + 40);
     const y = 40 + Math.floor(n / 4) * (NODE_H + 40);
-    setScreens((prev) => [...prev, { id, name: `要素${n + 1}`, x, y }]);
-    setEditingId(id);
+    setScreens((prev) => [...prev, { id, name: presetName ?? `要素${n + 1}`, x, y }]);
+    if (!presetName) setEditingId(id);
+    setMenuOpen(false);
   };
 
   const removeScreen = (id: string) => {
@@ -150,7 +180,10 @@ export function ScreenFlowEditor({
       drag.current = null;
     };
     const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setConnectFrom(null);
+      if (e.key === "Escape") {
+        setConnectFrom(null);
+        setMenuOpen(false);
+      }
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -184,9 +217,54 @@ export function ScreenFlowEditor({
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       {/* ツールバー */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-        <button onClick={addScreen} style={toolBtn}>
-          ＋ 要素を追加
-        </button>
+        <div style={{ position: "relative" }}>
+          <button onClick={() => setMenuOpen((v) => !v)} style={toolBtn}>
+            ＋ 要素を追加 ▾
+          </button>
+          {menuOpen ? (
+            <>
+              <div
+                onClick={() => setMenuOpen(false)}
+                style={{ position: "fixed", inset: 0, zIndex: 1000 }}
+              />
+              <div style={presetMenu}>
+                <style>{".apm-preset-item:hover{background:#f9fafb;}"}</style>
+                {SCREEN_PRESETS.map((group) => (
+                  <div key={group.label}>
+                    <div style={presetGroupLabel}>{group.label}</div>
+                    {group.items.map((p) => (
+                      <button
+                        key={p.name}
+                        className="apm-preset-item"
+                        onClick={() => addScreen(p.name)}
+                        title={p.hint}
+                        style={presetItem}
+                      >
+                        <div style={{ fontSize: 12, fontWeight: 600, color: "#111827" }}>
+                          {p.name}
+                        </div>
+                        <div style={{ fontSize: 10.5, color: "#6b7280", marginTop: 1 }}>
+                          {p.hint}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+                <div style={presetDivider} />
+                <button
+                  className="apm-preset-item"
+                  onClick={() => addScreen()}
+                  style={presetItem}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#111827" }}>空の要素</div>
+                  <div style={{ fontSize: 10.5, color: "#6b7280", marginTop: 1 }}>
+                    自分で名前をつける
+                  </div>
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
         <span style={{ fontSize: 11, color: "#6b7280" }}>
           {connectFrom
             ? `「${nameOf(connectFrom)}」のつなぐ先をクリック(Esc で中止)`
@@ -411,6 +489,44 @@ const miniBtn: CSSProperties = {
   background: "#f9fafb",
   color: "#6b7280",
   cursor: "pointer",
+};
+
+const presetMenu: CSSProperties = {
+  position: "absolute",
+  top: "calc(100% + 4px)",
+  left: 0,
+  zIndex: 1001,
+  width: 252,
+  maxHeight: 380,
+  overflowY: "auto",
+  background: "#fff",
+  border: "1px solid #e5e7eb",
+  borderRadius: 8,
+  boxShadow: "0 8px 24px rgba(0,0,0,0.14)",
+  padding: "4px 0",
+};
+
+const presetGroupLabel: CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: "#9ca3af",
+  padding: "8px 12px 2px",
+};
+
+const presetItem: CSSProperties = {
+  display: "block",
+  width: "100%",
+  textAlign: "left",
+  padding: "6px 12px",
+  border: "none",
+  background: "transparent",
+  cursor: "pointer",
+};
+
+const presetDivider: CSSProperties = {
+  height: 1,
+  background: "#f3f4f6",
+  margin: "4px 0",
 };
 
 export default ScreenFlowEditor;
