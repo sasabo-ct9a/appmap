@@ -587,3 +587,27 @@ pub fn undo_available(app: tauri::AppHandle, workspace: String) -> Result<i64, S
     }
     Ok((commit_count(&ws) - 1).max(0))
 }
+
+/// 汎用の Claude 問い合わせ(ファイル編集なし・答えのテキストをそのまま返す)。
+/// 意図↔実体の対応付けなど「短い質問→短い答え」に使う。generate_app と違い acceptEdits を付けない。
+#[tauri::command]
+pub async fn claude_ask(prompt: String) -> Result<String, String> {
+    let exe = crate::find_claude_exe()?;
+    let path_env = crate::augmented_path();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        StdCommand::new(&exe)
+            .args(["-p", &prompt, "--model", "sonnet"])
+            .env("PATH", &path_env)
+            .stdin(Stdio::null())
+            .output()
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+    .map_err(|e| format!("failed to spawn claude: {}", e))?;
+    if !out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("claude failed: {} {}", stdout.trim(), stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
