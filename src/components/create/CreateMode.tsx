@@ -1,10 +1,23 @@
-import { useRef, useState, useEffect, type CSSProperties } from "react";
+import {
+  useRef,
+  useState,
+  useEffect,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { availableMonitors } from "@tauri-apps/api/window";
+import { emit, listen } from "@tauri-apps/api/event";
 import ScreenFlowEditor, {
   flowToText,
   type FlowData,
 } from "./ScreenFlowEditor";
 import { buildCreatePrompt, buildRefinePrompt } from "../../lib/createPrompt";
+import { FlowView } from "./FlowView";
+import { analyzeFolder } from "../../lib/engineSelector";
+import { pickLocalized } from "../../lib/i18n";
+import type { ScreenMapResult } from "../../lib/claudeCli";
 
 /**
  * 制作モード(Create Mode)。モックの構成に沿う:
@@ -108,12 +121,6 @@ const paneBody: CSSProperties = {
   borderRadius: 8,
   overflow: "hidden",
 };
-const paneCol = (basis: string, grow = 0): CSSProperties => ({
-  flex: `${grow} 0 ${basis}`,
-  display: "flex",
-  flexDirection: "column",
-  minWidth: 0,
-});
 
 export function CreateMode({
   onExit,
@@ -157,6 +164,161 @@ export function CreateMode({
   // 旧「コード解析マップ + 要素タグ + 流れ再生」は撤去した。
   // 「指示」で選んだ画面名(右ペインの追加指示をこの画面にスコープする)。
   const [targetScreen, setTargetScreen] = useState<string | null>(null);
+
+  // ペイン幅の重み。境界のドラッグ(gutter)で調整。pv=プレビュー / ca=キャンバス / cl=Claude。
+  const [weights, setWeights] = useState({ pv: 30, ca: 42, cl: 28 });
+  // キャンバスを別ウィンドウ(全画面)に出しているか。出している間、本ウィンドウはキャンバスを隠す。
+  const [poppedOut, setPoppedOut] = useState(false);
+  const canvasWin = useRef<WebviewWindow | null>(null);
+  // モニタが2枚以上か。別画面ボタンはこの時だけ出す(1枚では別窓に出す意味がない)。
+  const [multiMonitor, setMultiMonitor] = useState(false);
+  // 戻せる世代数(生成のたびに増える)。-1=チェックポイント不可(git 無し)でボタンを隠す。
+  const [undoCount, setUndoCount] = useState(-1);
+  // 左ペインのタブ:プレビュー(動く実物)/ 構造マップ(出来た物を実コードから解析した実体)。
+  const [leftTab, setLeftTab] = useState<"preview" | "map">("preview");
+  // 「出来たアプリ」の実体マップ(見るの analyzeFolder で生成物を解析した結果)。null=未解析。
+  const [asBuilt, setAsBuilt] = useState<ScreenMapResult | null>(null);
+  const [mapBusy, setMapBusy] = useState(false);
+  const [mapSelected, setMapSelected] = useState<number | null>(null);
+
+  // 境界ドラッグ:leftKey と rightKey の重みを付け替える(合計は一定・各ペイン最低 8%)。
+  const startResize = (
+    leftKey: "pv" | "ca" | "cl",
+    rightKey: "pv" | "ca" | "cl",
+    e: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    e.preventDefault();
+    const row = e.currentTarget.parentElement;
+    if (!row) return;
+    const totalPx = row.getBoundingClientRect().width;
+    const startX = e.clientX;
+    const start = { ...weights };
+    const sum = start.pv + start.ca + start.cl;
+    const min = sum * 0.08;
+    const onMove = (ev: PointerEvent) => {
+      const dW = ((ev.clientX - startX) / totalPx) * sum;
+      let l = start[leftKey] + dW;
+      let r = start[rightKey] - dW;
+      if (l < min) {
+        r -= min - l;
+        l = min;
+      }
+      if (r < min) {
+        l -= min - r;
+        r = min;
+      }
+      setWeights({ ...start, [leftKey]: l, [rightKey]: r });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  // 「キャンバスを別画面で開く」:キャンバス専用ウィンドウ(#canvas)を開き、本ウィンドウは
+  // キャンバスを隠してプレビュー+Claude を広く使う。フローはイベントで双方向に同期する。
+  const openCanvasWindow = async () => {
+    if (poppedOut) {
+      try {
+        await canvasWin.current?.setFocus();
+      } catch {
+        /* 無視 */
+      }
+      return;
+    }
+    try {
+      canvasWin.current = new WebviewWindow("canvas", {
+        url: `${window.location.origin}/#canvas`,
+        title: "キャンバス — AppMap",
+        width: 1280,
+        height: 860,
+      });
+      setPoppedOut(true);
+      setWeights({ pv: 42, ca: 16, cl: 42 });
+    } catch (e) {
+      alert("キャンバスウィンドウを開けませんでした: " + String(e));
+    }
+  };
+
+  // 「本画面に戻す」:別ウィンドウを閉じ、本ウィンドウにキャンバスを戻す。
+  const closeCanvasWindow = async () => {
+    try {
+      await canvasWin.current?.close();
+    } catch {
+      /* 既に閉じている等は無視 */
+    }
+    canvasWin.current = null;
+    setPoppedOut(false);
+    setWeights({ pv: 30, ca: 42, cl: 28 });
+  };
+
+  // 別ウィンドウ(キャンバス)との同期:ready で初期値(目的/出力/フロー)を送り、
+  // 入力の変化(desc/output/flow/target)と「作る」(generate)を受け取る。
+  // 別窓の「戻す」ボタンや × で送られる close を受けたら本ウィンドウを元に戻す。
+  useEffect(() => {
+    const uns: Array<() => void> = [];
+    void (async () => {
+      uns.push(
+        await listen("canvas:ready", () => {
+          void emit("canvas:init", {
+            desc: descRef.current,
+            output: outputRef.current,
+            flow: flowRef.current,
+          });
+        }),
+      );
+      uns.push(await listen<string>("canvas:desc", (e) => setDesc(e.payload ?? "")));
+      uns.push(await listen<string>("canvas:output", (e) => setOutput(e.payload ?? "")));
+      uns.push(
+        await listen<FlowData>("canvas:flow", (e) => {
+          const f = e.payload ?? { screens: [], edges: [] };
+          flowRef.current = f;
+          setHasFlow(f.screens.length > 0);
+        }),
+      );
+      uns.push(
+        await listen<string | null>("canvas:target", (e) => {
+          setTargetScreen(e.payload ?? null);
+        }),
+      );
+      uns.push(
+        await listen<{ desc: string; output: string; flow: FlowData }>(
+          "canvas:generate",
+          (e) => {
+            const p = e.payload;
+            if (p) runGenerateRef.current(p.desc, p.output, p.flow);
+          },
+        ),
+      );
+      uns.push(
+        await listen("canvas:close", () => {
+          canvasWin.current = null;
+          setPoppedOut(false);
+          setWeights({ pv: 30, ca: 42, cl: 28 });
+        }),
+      );
+    })();
+    return () => uns.forEach((u) => u());
+  }, []);
+
+  // 生成中フラグを別ウィンドウ(キャンバス窓)へ伝える(向こうの「作る」ボタンの二重押し防止)。
+  useEffect(() => {
+    if (poppedOut) void emit("canvas:busy", busy);
+  }, [busy, poppedOut]);
+
+  // モニタ枚数を検出(マウント時 + ウィンドウがフォーカスされた時=接続変更に追従)。
+  useEffect(() => {
+    const check = () => {
+      void availableMonitors()
+        .then((m) => setMultiMonitor(m.length >= 2))
+        .catch(() => setMultiMonitor(false));
+    };
+    check();
+    window.addEventListener("focus", check);
+    return () => window.removeEventListener("focus", check);
+  }, []);
 
   // マウント時:作りかけプロジェクトの一覧を読む。あれば一覧画面から始める(掛け持ち対応)。
   useEffect(() => {
@@ -268,6 +430,9 @@ export function CreateMode({
           updatedAt: Date.now(),
         }),
       );
+      void refreshUndo();
+      // 生成でコードが変わった → 前の実体マップは古い。破棄して再解析を促す(偽の現状を見せない)。
+      setAsBuilt(null);
     } catch (e) {
       const raw = String(e);
       // 認証切れ(OAuth 期限)は「バグ」でなく「再ログインで直る」ので、やさしく案内する。
@@ -283,21 +448,80 @@ export function CreateMode({
     }
   };
 
+  // 「元に戻す」用:戻せる世代数を取得する(git 未導入は -1 → ボタン非表示)。
+  const refreshUndo = async () => {
+    const ws = workspace.current;
+    if (!ws) {
+      setUndoCount(-1);
+      return;
+    }
+    try {
+      setUndoCount(await invoke<number>("undo_available", { workspace: ws }));
+    } catch {
+      setUndoCount(-1);
+    }
+  };
+
+  // 直前の生成を取り消して1つ前の状態へ。プレビューを貼り直して反映する。
+  const handleUndo = async () => {
+    const ws = workspace.current;
+    if (!ws || busy) return;
+    try {
+      const remaining = await invoke<number>("undo_generation", { workspace: ws });
+      setUndoCount(remaining);
+      setPreviewNonce((n) => n + 1);
+      setStatus("1つ前の状態に戻しました");
+      setLog((l) => [...l, { role: "ai", text: "1つ前の状態に戻しました。" }]);
+      setAsBuilt(null); // 戻したらコードも変わる → 実体マップは再解析させる
+    } catch (e) {
+      setStatus(String(e));
+    }
+  };
+
+  // 「出来たアプリ」を実際のコードから解析して構造マップにする(=見るを作るの出力へ適用)。
+  // Claude を使うのでオンデマンド(ボタン)。既存の analyzeFolder + MapCanvas を再利用する。
+  // 実体マップは必ず"実コード解析"で作る(意図キャンバスの再表示にしない)。
+  const analyzeAsBuilt = async () => {
+    const ws = workspace.current;
+    if (!ws || mapBusy || busy) return;
+    setMapBusy(true);
+    setStatus("出来たアプリを解析中…(Claude を使用)");
+    try {
+      const outcome = await analyzeFolder(ws, "ja", "claude");
+      setAsBuilt(outcome.screens);
+      setMapSelected(null);
+      setStatus("");
+    } catch (e) {
+      setStatus("解析に失敗: " + String(e));
+    } finally {
+      setMapBusy(false);
+    }
+  };
+
   // 「この流れで作る」:目的 + 期待アウトプット + キャンバスの画面フローをまとめて Claude に渡す。
-  const handleFlowGenerate = () => {
+  // 目的 + 期待アウトプット + キャンバスのフローをまとめて本番プロンプトにして生成する。
+  // 引数で受けるのは、別ウィンドウ(キャンバス窓)の canvas:generate からも同じ経路で呼ぶため。
+  const runGenerate = (d: string, o: string, flow: FlowData) => {
     if (busy) return;
-    const flowText = flowToText(flowRef.current);
+    const flowText = flowToText(flow);
     const parts: string[] = [];
-    if (desc.trim()) parts.push(`システムの目的:${desc.trim()}`);
-    if (output.trim()) {
-      parts.push(`期待するユーザーへのアウトプット内容:${output.trim()}`);
+    if (d.trim()) parts.push(`システムの目的:${d.trim()}`);
+    if (o.trim()) {
+      parts.push(`期待するユーザーへのアウトプット内容:${o.trim()}`);
     }
     if (flowText) parts.push(flowText);
     if (!parts.length) return; // 目的もフローも空なら何もしない
-    // 初回/作り直し:本番の基礎プロンプトを付ける。
     const instruction = parts.join("\n");
     void build(instruction, buildCreatePrompt(instruction));
   };
+  const handleFlowGenerate = () => runGenerate(desc, output, flowRef.current);
+  // 一度だけ張るイベントリスナから最新の値/関数を使うための参照(stale closure 回避)。
+  const descRef = useRef(desc);
+  descRef.current = desc;
+  const outputRef = useRef(output);
+  outputRef.current = output;
+  const runGenerateRef = useRef(runGenerate);
+  runGenerateRef.current = runGenerate;
 
   const handleFollowup = async () => {
     if (!followup.trim() || busy) return;
@@ -386,6 +610,7 @@ export function CreateMode({
     setPort(null);
     setAuthNeeded(false);
     setTargetScreen(null);
+    void refreshUndo();
     setScreen("work");
     setStatus("プロジェクトを開いています…");
     try {
@@ -491,7 +716,7 @@ export function CreateMode({
             borderBottom: "1px solid #e5e7eb",
           }}
         >
-          <strong style={{ fontSize: 14 }}>作る(実験)</strong>
+          <strong style={{ fontSize: 14 }}>クリエイトモード</strong>
           <span style={{ fontSize: 12, color: "#6b7280" }}>あなたのプロジェクト</span>
           <button onClick={handleClose} style={{ ...closeBtn, marginLeft: "auto" }}>
             閉じる
@@ -609,6 +834,42 @@ export function CreateMode({
 
   // 作業画面:3ペイン(左 プレビュー / 中央 目的+キャンバス / 右 Claude)。
   // 旧「まず1問だけ」の form 画面は廃止し、中央上部の入力欄に統合した。
+  // 2画面モードは order で [キャンバス | プレビュー | Claude] に並べ替え、キャンバス列を左モニタ幅にする。
+  // ペインの視覚順(2画面時はキャンバスを左端に)。幅は weights を flex-grow に、並びは order で。
+  // gutter は order 1・3 に置くと、視覚的に隣り合う2ペインの境界に入る(DOM 位置は無関係)。
+  const visualOrder = (
+    poppedOut ? ["pv", "cl"] : ["pv", "ca", "cl"]
+  ) as ("pv" | "ca" | "cl")[];
+  const colFor = (k: "pv" | "ca" | "cl"): CSSProperties => ({
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 120,
+    flex: `${weights[k]} 1 0`,
+    order: visualOrder.indexOf(k) * 2,
+  });
+  const previewCol = colFor("pv");
+  const canvasCol = colFor("ca");
+  const claudeCol = colFor("cl");
+  // 境界の仕切り(ドラッグで幅変更)。中央に細い線、カーソルは col-resize。
+  const gutterStyle: CSSProperties = {
+    flex: "0 0 8px",
+    cursor: "col-resize",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "stretch",
+  };
+  // 左ペインのタブ(プレビュー / 構造マップ)のボタン見た目。
+  const leftTabStyle = (active: boolean): CSSProperties => ({
+    fontSize: 12,
+    fontWeight: active ? 700 : 500,
+    color: active ? "#0f766e" : "#6b7280",
+    background: active ? "#ccfbf1" : "transparent",
+    border: "1px solid " + (active ? "#5eead4" : "#e5e7eb"),
+    borderRadius: 7,
+    padding: "4px 12px",
+    cursor: "pointer",
+  });
   return (
     <div style={overlayBase}>
       <div
@@ -621,15 +882,38 @@ export function CreateMode({
           borderBottom: "1px solid #e5e7eb",
         }}
       >
-        <strong style={{ fontSize: 14 }}>作る(実験)</strong>
+        <strong style={{ fontSize: 14 }}>クリエイトモード</strong>
         <span style={{ color: busy ? "#0f766e" : "#6b7280", fontSize: 12 }}>
           {status || (port ? "準備できました" : "")}
         </span>
+        <div style={{ marginLeft: "auto" }} />
+        {undoCount >= 0 && (
+          <button
+            onClick={handleUndo}
+            disabled={undoCount === 0 || busy}
+            style={{
+              ...closeBtn,
+              opacity: undoCount === 0 || busy ? 0.5 : 1,
+              cursor: undoCount === 0 || busy ? "not-allowed" : "pointer",
+            }}
+            title="直前の生成を取り消して1つ前の状態に戻す"
+          >
+            元に戻す
+          </button>
+        )}
+        {(multiMonitor || poppedOut) && (
+          <button
+            onClick={poppedOut ? closeCanvasWindow : openCanvasWindow}
+            style={closeBtn}
+            title="キャンバスを別ウィンドウ(全画面)で開く。モニタ1に置いて全画面にできる"
+          >
+            {poppedOut ? "キャンバスを本画面に戻す" : "キャンバスを別画面で開く"}
+          </button>
+        )}
         <button
           onClick={saveProject}
           style={{
             ...closeBtn,
-            marginLeft: "auto",
             background: "#14b8a6",
             color: "#fff",
             border: "none",
@@ -645,10 +929,31 @@ export function CreateMode({
         </button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8, padding: 8 }}>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 0, padding: 8 }}>
+        {/* 境界の gutter。視覚的に隣り合う2ペインの間(order 奇数)に入る。表示ペイン数−1 枚。 */}
+        {visualOrder.slice(0, -1).map((k, i) => (
+          <div
+            key={`gutter-${k}`}
+            style={{ ...gutterStyle, order: i * 2 + 1 }}
+            onPointerDown={(e) => startResize(visualOrder[i], visualOrder[i + 1], e)}
+            title="ドラッグで幅を変更"
+          >
+            <div style={{ width: 2, height: "100%", background: "#e5e7eb" }} />
+          </div>
+        ))}
         {/* 左:プレビュー(実物) */}
-        <div style={paneCol("30%")}>
-          <div style={paneLabel}>プレビュー(実物)</div>
+        <div style={previewCol}>
+          <div style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}>
+            <button onClick={() => setLeftTab("preview")} style={leftTabStyle(leftTab === "preview")}>
+              プレビュー
+            </button>
+            <button onClick={() => setLeftTab("map")} style={leftTabStyle(leftTab === "map")}>
+              構造マップ
+            </button>
+            <span style={{ fontSize: 10, color: "#9ca3af", marginLeft: "auto" }}>
+              {leftTab === "preview" ? "動く実物" : "出来た物を実コードから解析"}
+            </span>
+          </div>
           <div style={{ ...paneBody, display: "flex", flexDirection: "column" }}>
             {/* Supabase 接続バー */}
             <div style={{ padding: 8, borderBottom: "1px solid #eee" }}>
@@ -704,7 +1009,8 @@ export function CreateMode({
                 </div>
               ) : null}
             </div>
-            <div style={{ flex: 1, minHeight: 0 }}>
+            {/* プレビュー(動く実物)。タブ切替でも iframe は残す(display 切替=再読込を避ける)。 */}
+            <div style={{ flex: 1, minHeight: 0, display: leftTab === "preview" ? "block" : "none" }}>
               {port ? (
                 <iframe
                   key={previewNonce}
@@ -718,69 +1024,148 @@ export function CreateMode({
                 </div>
               )}
             </div>
+            {/* 構造マップ(出来た物を実コードから解析した実体)。オンデマンド解析。 */}
+            <div
+              style={{
+                flex: 1,
+                minHeight: 0,
+                display: leftTab === "map" ? "flex" : "none",
+                flexDirection: "column",
+              }}
+            >
+              {mapBusy ? (
+                <div style={{ padding: 20, color: "#0f766e", fontSize: 13 }}>
+                  出来たアプリを解析中…(Claude を使用)
+                </div>
+              ) : asBuilt ? (
+                <>
+                  <div style={{ padding: "6px 8px", display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 11, color: "#6b7280" }}>
+                      実際のコードから解析した構造
+                    </span>
+                    <button
+                      onClick={analyzeAsBuilt}
+                      style={{ ...closeBtn, marginLeft: "auto", padding: "3px 10px", fontSize: 11 }}
+                    >
+                      再解析
+                    </button>
+                  </div>
+                  {asBuilt.appSummary ? (
+                    <div
+                      style={{
+                        padding: "0 8px 6px",
+                        fontSize: 12,
+                        color: "#374151",
+                        lineHeight: 1.6,
+                      }}
+                    >
+                      {pickLocalized(asBuilt.appSummary, "ja")}
+                    </div>
+                  ) : null}
+                  <div style={{ flex: 1, minHeight: 0 }}>
+                    <FlowView
+                      screens={asBuilt}
+                      language="ja"
+                      selectedId={mapSelected}
+                      onSelect={setMapSelected}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 12,
+                    padding: 24,
+                    textAlign: "center",
+                  }}
+                >
+                  <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.7 }}>
+                    出来たアプリの構造を、<b>実際のコードから</b>解析して地図にします。
+                    <br />
+                    「作ったつもり」でなく「実際に何が出来たか」が見えます。
+                  </div>
+                  <button
+                    onClick={analyzeAsBuilt}
+                    disabled={busy || mapBusy}
+                    style={{ ...primaryBtn, padding: "9px 18px", fontSize: 13 }}
+                  >
+                    出来たアプリの構造を見る
+                  </button>
+                  <div style={{ fontSize: 11, color: "#9ca3af" }}>※ 解析に Claude を使います</div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* 中央:意図 + マップ */}
-        <div style={paneCol("0", 1)}>
-          <div style={paneLabel}>このアプリ</div>
-          <div
-            style={{
-              ...paneBody,
-              padding: 12,
-              display: "flex",
-              flexDirection: "column",
-              minHeight: 0,
-            }}
-          >
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                <label style={{ ...fieldLabel, flex: 1 }}>
-                  システムの目的
+        {/* 中央:意図 + マップ。キャンバスを別画面に出している間は丸ごと隠す(2枚表示にする)。 */}
+        {!poppedOut && (
+          <div style={canvasCol}>
+            <div style={paneLabel}>このアプリ</div>
+            <div
+              style={{
+                ...paneBody,
+                padding: 12,
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 0,
+              }}
+            >
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                  <label style={{ ...fieldLabel, flex: 1 }}>
+                    システムの目的
+                    <input
+                      value={desc}
+                      onChange={(e) => setDesc(e.target.value)}
+                      placeholder="例:登録した人に天気を定時でメールする"
+                      style={intentInput}
+                    />
+                  </label>
+                  <button
+                    onClick={handleFlowGenerate}
+                    disabled={busy || (!desc.trim() && !hasFlow)}
+                    style={{
+                      ...primaryBtn,
+                      padding: "9px 16px",
+                      fontSize: 13,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    この流れで作る
+                  </button>
+                </div>
+                <label style={{ ...fieldLabel, marginTop: 6 }}>
+                  期待するユーザーへのアウトプット内容
                   <input
-                    value={desc}
-                    onChange={(e) => setDesc(e.target.value)}
-                    placeholder="例:登録した人に天気を定時でメールする"
+                    value={output}
+                    onChange={(e) => setOutput(e.target.value)}
+                    placeholder="例:毎朝、その日の天気がメールで届く"
                     style={intentInput}
                   />
                 </label>
-                <button
-                  onClick={handleFlowGenerate}
-                  disabled={busy || (!desc.trim() && !hasFlow)}
-                  style={{
-                    ...primaryBtn,
-                    padding: "9px 16px",
-                    fontSize: 13,
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  この流れで作る
-                </button>
               </div>
-              <label style={{ ...fieldLabel, marginTop: 6 }}>
-                期待するユーザーへのアウトプット内容
-                <input
-                  value={output}
-                  onChange={(e) => setOutput(e.target.value)}
-                  placeholder="例:毎朝、その日の天気がメールで届く"
-                  style={intentInput}
-                />
-              </label>
+              <ScreenFlowEditor
+                key={workspace.current ?? "new"}
+                initial={flowInitial}
+                onTargetChange={setTargetScreen}
+                onChange={(f) => {
+                  flowRef.current = f;
+                  setHasFlow(f.screens.length > 0);
+                }}
+              />
             </div>
-            <ScreenFlowEditor
-              key={workspace.current ?? "new"}
-              initial={flowInitial}
-              onTargetChange={setTargetScreen}
-              onChange={(f) => {
-                flowRef.current = f;
-                setHasFlow(f.screens.length > 0);
-              }}
-            />
           </div>
-        </div>
+        )}
 
         {/* 右:Claude Code */}
-        <div style={paneCol("28%")}>
+        <div style={claudeCol}>
           <div style={paneLabel}>Claude Code</div>
           <div style={{ ...paneBody, display: "flex", flexDirection: "column" }}>
             <div

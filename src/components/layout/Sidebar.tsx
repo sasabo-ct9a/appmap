@@ -26,7 +26,7 @@ type SidebarProps = {
   language: Language;
   /** v0.1.10:ガイド付きツアーを開始するコールバック */
   onStartTour?: () => void;
-  /** 「作る(実験)」= CreateMode を開くコールバック(旧ヒント位置に移設)。 */
+  /** 「クリエイトモード」= CreateMode を開くコールバック(旧ヒント位置に移設)。 */
   onOpenCreate?: () => void;
 };
 
@@ -359,7 +359,7 @@ function Sidebar({
         </ul>
       </nav>
 
-      {/* 作る(実験):CreateMode を開く。旧「3 分で理解するコツ」ヒントの位置に移設。*/}
+      {/* クリエイトモード:CreateMode を開く。旧「3 分で理解するコツ」ヒントの位置に移設。*/}
       {onOpenCreate && (
         <div className="mx-3 mb-2">
           <button
@@ -385,7 +385,7 @@ function Sidebar({
             >
               <path d="M12 5 V19 M5 12 H19" />
             </svg>
-            作る(実験)
+            クリエイトモード
           </button>
         </div>
       )}
