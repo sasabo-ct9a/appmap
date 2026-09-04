@@ -42,6 +42,53 @@ export function parseMapping(raw: string, builtNames: string[]): MatchPair[] {
   }
 }
 
+/** 画面名を突き合わせ用に正規化する:括弧書きの説明・「画面」・空白を落として比較しやすくする。
+ *  例:「週間予報画面(7日間…)」→「週間予報」。「週間予報」→「週間予報」→ 一致。 */
+export function normalizeScreenName(s: string): string {
+  return s
+    .replace(/[（(][^）)]*[）)]/g, "") // 括弧書きの説明(全角・半角)
+    .replace(/画面/g, "") // 「画面」
+    .replace(/[\s　]+/g, "") // 空白(半角・全角)
+    .toLowerCase()
+    .trim();
+}
+
+/**
+ * 名前がほぼ同一(正規化して完全一致)の対応だけを機械的に確定する。曖昧なものは残して AI に回す。
+ *
+ * なぜ(§6.5/§6.6):AI 対応付けは実行のたびにブレて、実在する画面を「未実装かも」と取りこぼすことがある。
+ * 「週間予報画面↔週間予報」のような当たり前の対応は AI に聞かず確実に繋ぎ、誤った未実装表示を無くす。
+ * 一致候補が複数ある時(例:「設定」に「初期設定」「配信設定」)は確定せず AI に委ねる(誤マッチを出さない)。
+ */
+export function deterministicMatch(
+  intent: string[],
+  built: string[],
+): { pairs: MatchPair[]; remainingIntent: string[]; remainingBuilt: string[] } {
+  const intentNorm = intent.map(normalizeScreenName);
+  const usedIntent = new Set<number>();
+  const usedBuilt = new Set<number>();
+  const pairs: MatchPair[] = [];
+  built.forEach((b, bi) => {
+    const bn = normalizeScreenName(b);
+    if (!bn) return;
+    const hits = intentNorm
+      .map((n, i) => ({ i, ok: n === bn && !usedIntent.has(i) }))
+      .filter((x) => x.ok);
+    if (hits.length === 1) {
+      // 未使用の一致が1つだけ = 曖昧さなし → 確定。
+      const i = hits[0].i;
+      pairs.push({ built: b, intent: intent[i] });
+      usedIntent.add(i);
+      usedBuilt.add(bi);
+    }
+  });
+  return {
+    pairs,
+    remainingIntent: intent.filter((_, i) => !usedIntent.has(i)),
+    remainingBuilt: built.filter((_, i) => !usedBuilt.has(i)),
+  };
+}
+
 const box = (tint?: "add" | "miss"): CSSProperties => ({
   position: "absolute",
   width: BOX_W,

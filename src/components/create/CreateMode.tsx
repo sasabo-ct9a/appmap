@@ -15,7 +15,7 @@ import ScreenFlowEditor, {
 } from "./ScreenFlowEditor";
 import { buildCreatePrompt, buildRefinePrompt } from "../../lib/createPrompt";
 import { FlowView } from "./FlowView";
-import { MatchView, parseMapping, type MatchPair } from "./MatchView";
+import { MatchView, parseMapping, deterministicMatch, type MatchPair } from "./MatchView";
 import { analyzeFolder } from "../../lib/engineSelector";
 import { pickLocalized } from "../../lib/i18n";
 import type { ScreenMapResult } from "../../lib/claudeCli";
@@ -534,22 +534,35 @@ export function CreateMode({
     }
   };
 
-  // 意図(画面フロー)と実体(解析マップ)を Claude で対応付ける。結果は AI 推定(◐)で確定ではない。
+  // 意図(画面フロー)と実体(解析マップ)を対応付ける。
+  // 手順:まず名前がほぼ同一のものを機械的に確定(AI のブレで実在画面を"未実装"にしない / §6.6)。
+  //       残った曖昧なものだけ Claude に回す(意味マッチと quota 節約 / §6.7)。結果の AI 部分は推定(◐)。
   const runMatch = async () => {
     if (!asBuilt || mappingBusy || busy) return;
     const intentNames = flowRef.current.screens.map((s) => s.name.trim()).filter(Boolean);
     const builtNames = asBuilt.nodes.map((n) => pickLocalized(n.label, "ja"));
-    const builtList = asBuilt.nodes.map((n) => {
+
+    const det = deterministicMatch(intentNames, builtNames);
+    // 実体が全て確実に繋がったら AI を呼ばない(無駄打ちしない)。
+    if (det.remainingBuilt.length === 0) {
+      setMapping(det.pairs);
+      return;
+    }
+
+    // 残りだけを AI へ。実体には userIntent(何をする画面か)を添えて意味マッチを助ける。
+    const detailOf = new Map<string, string>();
+    asBuilt.nodes.forEach((n) => {
       const name = pickLocalized(n.label, "ja");
       const it = n.userIntent ? pickLocalized(n.userIntent, "ja") : "";
-      return it ? `${name}(${it})` : name;
+      detailOf.set(name, it ? `${name}(${it})` : name);
     });
+    const builtListForAi = det.remainingBuilt.map((b) => detailOf.get(b) ?? b);
     const prompt = [
       "非エンジニアが「作りたい画面」として並べた名前(意図)と、AI が実際に生成したアプリの画面名(実体)です。",
-      "各『実体の画面』が、どの『意図の画面』に対応するかを推測してください。名前が完全一致でなくても、意味・機能・目的が近ければ積極的に対応付けてください(例:「週間予報画面」↔「週間予報」、「アカウント画面」↔「アカウント」、「設定画面」↔「配信設定」は対応する)。意図の名前は曖昧・空(画面4 等)なこともあります。本当にどの意図にも当てはまらない時だけ intent を null(=AI が独自に追加)にしてください。",
+      "名前がほぼ同じものは既に対応済みです。残りについて、各『実体の画面』がどの『意図の画面』に対応するかを推測してください。名前が完全一致でなくても、意味・機能・目的が近ければ積極的に対応付けてください(例:「起動画面」↔「読み込み中」、「設定画面」↔「配信設定」)。本当にどの意図にも当てはまらない時だけ intent を null(=AI が独自に追加)にしてください。",
       "",
-      "意図の画面: " + (intentNames.length ? intentNames.join(" / ") : "(なし)"),
-      "実体の画面: " + builtList.join(" / "),
+      "意図の画面(残り): " + (det.remainingIntent.length ? det.remainingIntent.join(" / ") : "(なし)"),
+      "実体の画面(残り): " + builtListForAi.join(" / "),
       "",
       "出力は JSON 配列のみ(説明・コードフェンス不要)。built は実体の画面名を正確に:",
       '[{"built":"<実体の画面名>","intent":"<意図の画面名 または null>"}]',
@@ -558,7 +571,12 @@ export function CreateMode({
     setStatus("意図と実体を対応付け中…(Claude を使用)");
     try {
       const raw = await invoke<string>("claude_ask", { prompt });
-      setMapping(parseMapping(raw, builtNames));
+      // AI が確定済みの意図を再度参照/存在しない名前を返しても壊れないよう、残りの意図に限定。
+      const remain = new Set(det.remainingIntent);
+      const aiPairs = parseMapping(raw, det.remainingBuilt).map((p) =>
+        p.intent && remain.has(p.intent) ? p : { built: p.built, intent: null },
+      );
+      setMapping([...det.pairs, ...aiPairs]);
       setStatus("");
     } catch (e) {
       setStatus("対応付けに失敗: " + String(e));
