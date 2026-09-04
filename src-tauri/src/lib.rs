@@ -3617,6 +3617,8 @@ pub fn run() {
             create_mode::get_supabase_env,
             // 制作モード:既存プロジェクトを本番構成(Supabase)へ移行
             create_mode::ensure_supabase_ready,
+            create_mode::undo_generation,
+            create_mode::undo_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

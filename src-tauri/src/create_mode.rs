@@ -7,7 +7,7 @@
 // localhost の dev サーバを frontend の iframe に映すだけ(tauri.conf.json の CSP は null=素通し)。
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -178,6 +178,50 @@ fn resolve_managed_workspace(
     Ok(ws)
 }
 
+/// workspace で git を実行する(user.name/email はコマンド単位で与え、グローバル設定に依存しない)。
+fn run_git(ws: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let path_env = crate::augmented_path();
+    StdCommand::new("git")
+        .arg("-C")
+        .arg(ws)
+        .args(["-c", "user.name=AppMap", "-c", "user.email=appmap@local"])
+        .args(args)
+        .env("PATH", &path_env)
+        .stdin(Stdio::null())
+        .output()
+}
+
+/// workspace が git チェックポイント管理下(.git 有り)か。
+fn has_git(ws: &Path) -> bool {
+    ws.join(".git").exists()
+}
+
+/// HEAD のコミット数(履歴無し=0)。「戻せる世代数」の計算に使う。
+fn commit_count(ws: &Path) -> i64 {
+    match run_git(ws, &["rev-list", "--count", "HEAD"]) {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// 生成のたびに現在の状態を1コミット(=世代の節目)。git 未導入なら黙って no-op(グレースフル)。
+/// 初回は git init + .gitignore(node_modules / .env / dist を除外)も用意する。
+fn checkpoint(ws: &Path, message: &str) {
+    if !has_git(ws) {
+        let inited = run_git(ws, &["init"])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !inited {
+            return; // git が無い環境:チェックポイント機能はあきらめる。
+        }
+        let _ = fs::write(ws.join(".gitignore"), "node_modules\ndist\n.env\n.env.*\n");
+    }
+    let _ = run_git(ws, &["add", "-A"]);
+    let _ = run_git(ws, &["commit", "-m", message]); // 変更無しの commit 失敗は無視。
+}
+
 /// テンプレを複製して workspace を用意する。既にあるファイルは上書きしない
 /// (生成済みのコードを潰さないため)。workspace の絶対パスを返す。
 #[tauri::command]
@@ -195,6 +239,8 @@ pub fn create_project(app: tauri::AppHandle, name: String) -> Result<String, Str
         }
         fs::write(&path, contents).map_err(|e| format!("write {}: {}", path.display(), e))?;
     }
+    // 元に戻す機能の土台:初期状態を git チェックポイントに(git 未導入なら no-op)。
+    checkpoint(&ws, "初期テンプレート");
     Ok(ws.to_string_lossy().to_string())
 }
 
@@ -506,5 +552,38 @@ pub async fn generate_app(
         let detail = format!("{} {}", stdout.trim(), stderr.trim());
         return Err(format!("claude failed: {}", detail.trim()));
     }
+    // 生成が成功したら、その状態を git チェックポイントに(「元に戻す」の節目)。
+    checkpoint(&ws, "生成");
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// 直前の生成を取り消し、1つ前のチェックポイントへ戻す。戻したあとの「戻せる世代数」を返す。
+#[tauri::command]
+pub fn undo_generation(app: tauri::AppHandle, workspace: String) -> Result<i64, String> {
+    let ws = resolve_managed_workspace(&app, &workspace)?;
+    if !has_git(&ws) {
+        return Err("この構成では元に戻せません(履歴がありません)".to_string());
+    }
+    if commit_count(&ws) <= 1 {
+        return Err("これ以上は戻せません(最初の状態です)".to_string());
+    }
+    let out = run_git(&ws, &["reset", "--hard", "HEAD~1"])
+        .map_err(|e| format!("git reset failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "元に戻せませんでした: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok((commit_count(&ws) - 1).max(0))
+}
+
+/// 戻せる世代数(=コミット数-1)。git 未導入・履歴無しは -1(ボタンを隠す用)。
+#[tauri::command]
+pub fn undo_available(app: tauri::AppHandle, workspace: String) -> Result<i64, String> {
+    let ws = resolve_managed_workspace(&app, &workspace)?;
+    if !has_git(&ws) {
+        return Ok(-1);
+    }
+    Ok((commit_count(&ws) - 1).max(0))
 }
