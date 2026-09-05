@@ -60,6 +60,22 @@ function borderPoint(
   return [cx + dx * ext, cy + dy * ext];
 }
 
+/** 「名前(説明)」を分割する。括弧書きは説明として弱めに出し、長文でも箱を見やすく保つ。
+ *  例:「起動画面(起動時に…)」→ {title:"起動画面", desc:"起動時に…"}。括弧が無ければ desc は空。 */
+function splitScreenName(name: string): { title: string; desc: string } {
+  const m = name.match(/^\s*(.+?)\s*[（(](.+)[）)]\s*$/);
+  if (m && m[1].trim()) return { title: m[1].trim(), desc: m[2].trim() };
+  return { title: name.trim(), desc: "" };
+}
+
+/** テキストを指定行数でクランプ(…で省略)。箱の高さが名前の長さで暴れるのを防ぐ。 */
+const clampLines = (lines: number): CSSProperties => ({
+  display: "-webkit-box",
+  WebkitLineClamp: lines,
+  WebkitBoxOrient: "vertical",
+  overflow: "hidden",
+});
+
 /** 「＋要素を追加」で選べる画面プリセット。非エンジニアの「何を置けばいいか分からない」を防ぐ引き出し。
  *  全部を使う必要はない(選ぶだけ)。hint で「どう使うか」を示し、名前だけでは謎になるのを防ぐ。 */
 const SCREEN_PRESETS: { label: string; items: { name: string; hint: string }[] }[] = [
@@ -365,6 +381,7 @@ export function ScreenFlowEditor({
         {screens.map((s) => {
           const connecting = connectFrom === s.id;
           const isTarget = targetId === s.id;
+          const { title, desc } = splitScreenName(s.name);
           return (
             <div
               key={s.id}
@@ -419,10 +436,33 @@ export function ScreenFlowEditor({
               ) : (
                 <div
                   onDoubleClick={() => setEditingId(s.id)}
-                  style={{ fontSize: 13, fontWeight: 600, color: "#111827", wordBreak: "break-word" }}
-                  title="ダブルクリックで名前を編集"
+                  title={(s.name || "(無名の要素)") + " ― ダブルクリックで編集"}
+                  style={{ cursor: "text" }}
                 >
-                  {s.name || "(無名の要素)"}
+                  <div
+                    style={{
+                      ...clampLines(2),
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: "#111827",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {title || "(無名の要素)"}
+                  </div>
+                  {desc ? (
+                    <div
+                      style={{
+                        ...clampLines(2),
+                        fontSize: 11,
+                        color: "#6b7280",
+                        wordBreak: "break-word",
+                        marginTop: 2,
+                      }}
+                    >
+                      {desc}
+                    </div>
+                  ) : null}
                 </div>
               )}
               {/* ノード下部のミニ操作 */}
