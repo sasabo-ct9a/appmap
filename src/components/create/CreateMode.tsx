@@ -59,6 +59,41 @@ function persistProjects(list: ProjectEntry[]) {
     // localStorage が使えなくても致命的ではない
   }
 }
+
+// 解析結果(構造マップ・突き合わせ)のキャッシュ。コードの revision が同じ間だけ再表示に使い、
+// Claude を呼ばない。コードが変わったら失効させる(古い解析を確定として出さない / §6.6)。
+const ANALYSIS_CACHE_KEY = "appmap.create.analysisCache";
+type AnalysisCacheEntry = {
+  rev: string; // 解析時のコード revision(create_mode::workspace_revision = git HEAD)
+  asBuilt: ScreenMapResult; // 構造マップ
+  mapping?: MatchPair[]; // 突き合わせ(あれば)
+  intentSig?: string; // mapping 時の意図フロー署名(意図が変わったら mapping だけ失効)
+  at: number;
+};
+function loadAnalysisCacheAll(): Record<string, AnalysisCacheEntry> {
+  try {
+    const obj = JSON.parse(localStorage.getItem(ANALYSIS_CACHE_KEY) ?? "{}");
+    return obj && typeof obj === "object" ? (obj as Record<string, AnalysisCacheEntry>) : {};
+  } catch {
+    return {};
+  }
+}
+function readAnalysisCache(ws: string): AnalysisCacheEntry | null {
+  return loadAnalysisCacheAll()[ws] ?? null;
+}
+function writeAnalysisCache(ws: string, entry: AnalysisCacheEntry) {
+  try {
+    const all = loadAnalysisCacheAll();
+    all[ws] = entry;
+    localStorage.setItem(ANALYSIS_CACHE_KEY, JSON.stringify(all));
+  } catch {
+    // localStorage が使えなくてもキャッシュ無しで動く(致命的でない)
+  }
+}
+/** 意図フローの署名(画面名の並び)。これが変われば突き合わせは作り直し。 */
+function intentSignature(flow: FlowData): string {
+  return JSON.stringify(flow.screens.map((s) => s.name.trim()).filter(Boolean));
+}
 // 同じ workspace は 1 つに畳んで先頭(最新)へ。
 function upsertProject(entry: ProjectEntry): ProjectEntry[] {
   const rest = loadProjects().filter((p) => p.workspace !== entry.workspace);
@@ -184,6 +219,9 @@ export function CreateMode({
   // 意図↔実体の対応(突き合わせ)。AI 推定なので確定ではない。null=未実行。
   const [mapping, setMapping] = useState<MatchPair[] | null>(null);
   const [mappingBusy, setMappingBusy] = useState(false);
+  // 解析キャッシュ用:現在のコード revision と、「キャッシュはあるがコードが変わった」フラグ。
+  const [codeRev, setCodeRev] = useState("");
+  const [analysisStale, setAnalysisStale] = useState(false);
 
   // 境界ドラッグ:leftKey と rightKey の重みを付け替える(合計は一定・各ペイン最低 8%)。
   const startResize = (
@@ -467,6 +505,7 @@ export function CreateMode({
       // 生成でコードが変わった → 前の実体マップ・対応付けは古い。破棄して再解析を促す(偽を見せない)。
       setAsBuilt(null);
       setMapping(null);
+      void refreshAnalysisStale();
     } catch (e) {
       const raw = String(e);
       // 認証切れ(OAuth 期限)は「バグ」でなく「再ログインで直る」ので、やさしく案内する。
@@ -508,9 +547,62 @@ export function CreateMode({
       setLog((l) => [...l, { role: "ai", text: "1つ前の状態に戻しました。" }]);
       setAsBuilt(null); // 戻したらコードも変わる → 実体マップ・対応付けは再解析させる
       setMapping(null);
+      void refreshAnalysisStale();
     } catch (e) {
       setStatus(String(e));
     }
+  };
+
+  // 解析キャッシュ:コードが変わっていなければ構造マップ・突き合わせを Claude 無しで復元する。
+  const restoreAnalysis = async (ws: string, flow: FlowData) => {
+    let rev = "";
+    try {
+      rev = await invoke<string>("workspace_revision", { workspace: ws });
+    } catch {
+      rev = "";
+    }
+    setCodeRev(rev);
+    setMapSelected(null);
+    const cached = readAnalysisCache(ws);
+    if (cached && rev && cached.rev === rev) {
+      // コード未変更 → そのまま再表示。意図が変わっていれば突き合わせだけ作り直させる。
+      setAsBuilt(cached.asBuilt);
+      setMapping(
+        cached.mapping && cached.intentSig === intentSignature(flow) ? cached.mapping : null,
+      );
+      setAnalysisStale(false);
+    } else {
+      setAsBuilt(null);
+      setMapping(null);
+      setAnalysisStale(!!(cached && rev !== "" && cached.rev !== rev));
+    }
+  };
+
+  // 生成・元に戻すの後:rev を取り直し、古いキャッシュがあれば「要・再解析」を立てる。
+  const refreshAnalysisStale = async () => {
+    const ws = workspace.current;
+    if (!ws) return;
+    let rev = "";
+    try {
+      rev = await invoke<string>("workspace_revision", { workspace: ws });
+    } catch {
+      rev = "";
+    }
+    setCodeRev(rev);
+    const cached = readAnalysisCache(ws);
+    setAnalysisStale(!!(cached && rev !== "" && cached.rev !== rev));
+  };
+
+  // 突き合わせ結果を(構造マップと同じ rev の時だけ)キャッシュへ載せる。
+  const cacheMapping = (ws: string, pairs: MatchPair[]) => {
+    const existing = readAnalysisCache(ws);
+    if (!existing || !codeRev || existing.rev !== codeRev) return;
+    writeAnalysisCache(ws, {
+      ...existing,
+      mapping: pairs,
+      intentSig: intentSignature(flowRef.current),
+      at: Date.now(),
+    });
   };
 
   // 「出来たアプリ」を実際のコードから解析して構造マップにする(=見るを作るの出力へ適用)。
@@ -523,9 +615,19 @@ export function CreateMode({
     setStatus("出来たアプリを解析中…(Claude を使用)");
     try {
       const outcome = await analyzeFolder(ws, "ja", "claude");
+      let rev = "";
+      try {
+        rev = await invoke<string>("workspace_revision", { workspace: ws });
+      } catch {
+        rev = "";
+      }
+      setCodeRev(rev);
       setAsBuilt(outcome.screens);
       setMapSelected(null);
       setMapping(null); // 実体が変わったら対応付けもやり直し
+      setAnalysisStale(false);
+      // コードが変わるまで再表示に使えるようキャッシュ(mapping は作り直しなので載せない)。
+      if (rev) writeAnalysisCache(ws, { rev, asBuilt: outcome.screens, at: Date.now() });
       setStatus("");
     } catch (e) {
       setStatus("解析に失敗: " + String(e));
@@ -539,6 +641,7 @@ export function CreateMode({
   //       残った曖昧なものだけ Claude に回す(意味マッチと quota 節約 / §6.7)。結果の AI 部分は推定(◐)。
   const runMatch = async () => {
     if (!asBuilt || mappingBusy || busy) return;
+    const ws = workspace.current;
     const intentNames = flowRef.current.screens.map((s) => s.name.trim()).filter(Boolean);
     const builtNames = asBuilt.nodes.map((n) => pickLocalized(n.label, "ja"));
 
@@ -546,6 +649,7 @@ export function CreateMode({
     // 実体が全て確実に繋がったら AI を呼ばない(無駄打ちしない)。
     if (det.remainingBuilt.length === 0) {
       setMapping(det.pairs);
+      if (ws) cacheMapping(ws, det.pairs);
       return;
     }
 
@@ -576,7 +680,9 @@ export function CreateMode({
       const aiPairs = parseMapping(raw, det.remainingBuilt).map((p) =>
         p.intent && remain.has(p.intent) ? p : { built: p.built, intent: null },
       );
-      setMapping([...det.pairs, ...aiPairs]);
+      const merged = [...det.pairs, ...aiPairs];
+      setMapping(merged);
+      if (ws) cacheMapping(ws, merged);
       setStatus("");
     } catch (e) {
       setStatus("対応付けに失敗: " + String(e));
@@ -698,6 +804,7 @@ export function CreateMode({
     setAuthNeeded(false);
     setTargetScreen(null);
     void refreshUndo();
+    void restoreAnalysis(p.workspace, loadedFlow);
     setScreen("work");
     setStatus("プロジェクトを開いています…");
     try {
@@ -752,6 +859,11 @@ export function CreateMode({
     setPort(null);
     setAuthNeeded(false);
     setTargetScreen(null);
+    // 解析状態も初期化:前プロジェクトの構造マップ・突き合わせを持ち越さない。
+    setAsBuilt(null);
+    setMapping(null);
+    setAnalysisStale(false);
+    setCodeRev("");
     setScreen("work");
   };
 
@@ -1294,6 +1406,13 @@ export function CreateMode({
                     textAlign: "center",
                   }}
                 >
+                  {analysisStale ? (
+                    <div style={{ fontSize: 12, color: "#b45309", fontWeight: 600, lineHeight: 1.7 }}>
+                      コードが変わっています。
+                      <br />
+                      再解析で最新の構造に更新してください。
+                    </div>
+                  ) : null}
                   <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.7 }}>
                     出来たアプリの構造を、<b>実際のコードから</b>解析して地図にします。
                     <br />
@@ -1304,7 +1423,7 @@ export function CreateMode({
                     disabled={busy || mapBusy}
                     style={{ ...primaryBtn, padding: "9px 18px", fontSize: 13 }}
                   >
-                    出来たアプリの構造を見る
+                    {analysisStale ? "再解析して最新にする" : "出来たアプリの構造を見る"}
                   </button>
                   <div style={{ fontSize: 11, color: "#9ca3af" }}>※ 解析に Claude を使います</div>
                 </div>

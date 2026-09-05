@@ -3619,6 +3619,7 @@ pub fn run() {
             create_mode::ensure_supabase_ready,
             create_mode::undo_generation,
             create_mode::undo_available,
+            create_mode::workspace_revision,
             create_mode::claude_ask,
         ])
         .run(tauri::generate_context!())

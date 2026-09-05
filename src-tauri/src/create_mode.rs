@@ -588,6 +588,21 @@ pub fn undo_available(app: tauri::AppHandle, workspace: String) -> Result<i64, S
     Ok((commit_count(&ws) - 1).max(0))
 }
 
+/// 生成物の現在のコード revision(git HEAD の短い sha)。解析結果キャッシュの有効判定に使う。
+/// 生成・元に戻すのたびに HEAD が動くので、これが同じ = コードが変わっていない、と判定できる。
+/// git 未導入・履歴無しは空文字(= キャッシュ無効、毎回解析)。
+#[tauri::command]
+pub fn workspace_revision(app: tauri::AppHandle, workspace: String) -> Result<String, String> {
+    let ws = resolve_managed_workspace(&app, &workspace)?;
+    if !has_git(&ws) {
+        return Ok(String::new());
+    }
+    match run_git(&ws, &["rev-parse", "--short", "HEAD"]) {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        _ => Ok(String::new()),
+    }
+}
+
 /// 汎用の Claude 問い合わせ(ファイル編集なし・答えのテキストをそのまま返す)。
 /// 意図↔実体の対応付けなど「短い質問→短い答え」に使う。generate_app と違い acceptEdits を付けない。
 #[tauri::command]
