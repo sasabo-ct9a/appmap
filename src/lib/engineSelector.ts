@@ -1,4 +1,8 @@
-import { analyzeFolderToScreenMap, type AnalysisOutcome } from "./claudeCli";
+import {
+  analyzeFolderToScreenMap,
+  analyzeFolderLeanJa,
+  type AnalysisOutcome,
+} from "./claudeCli";
 import { analyzeFolderToScreenMapLocal } from "./llamaClient";
 import { buildFolderStructureMap } from "./fallbackMap";
 import type { Engine } from "./storage";
@@ -43,6 +47,33 @@ export async function analyzeFolder(
     // それ以外は「必ずマップを出す」ためフォルダ構成の簡易マップを返す。実エラーは
     //   デバッグのため console に残す(簡易マップ側で「AI 自動生成に失敗」と明示済み)。
     console.error("[AppMap] 分析失敗、フォルダ構成フォールバックへ:", primaryErr);
+    return buildFolderStructureMap(folder);
+  }
+}
+
+/**
+ * 制作モードの構造マップ用:軽量・日本語のみの解析(claude engine 固定)。
+ *
+ * 本 analyzeFolder と同じく「必ずマップを出す」ためフォールバックを持つが、中身は
+ * LEAN_SYSTEM_PROMPT_JA を使う軽い解析。二言語リッチ版はタイムアウト頻発だったため
+ * 分離した(2026-09-05 実測 6.6分→1.7分)。認証切れだけは UI 導線のため再 throw。
+ */
+export async function analyzeFolderLean(
+  folder: string,
+): Promise<AnalysisOutcome> {
+  try {
+    const outcome = await analyzeFolderLeanJa(folder);
+    if (!outcome.screens || outcome.screens.nodes.length === 0) {
+      throw new Error("empty map: 0 nodes");
+    }
+    return outcome;
+  } catch (primaryErr) {
+    const msg =
+      primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+    if (/認証|auth ?login|authenticat|unauthorized/i.test(msg)) {
+      throw primaryErr;
+    }
+    console.error("[AppMap] 軽量解析失敗、フォルダ構成フォールバックへ:", primaryErr);
     return buildFolderStructureMap(folder);
   }
 }

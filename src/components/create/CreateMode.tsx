@@ -16,7 +16,7 @@ import ScreenFlowEditor, {
 import { buildCreatePrompt, buildRefinePrompt } from "../../lib/createPrompt";
 import { FlowView } from "./FlowView";
 import { MatchView, parseMapping, deterministicMatch, type MatchPair } from "./MatchView";
-import { analyzeFolder } from "../../lib/engineSelector";
+import { analyzeFolderLean } from "../../lib/engineSelector";
 import { pickLocalized } from "../../lib/i18n";
 import type { ScreenMapResult } from "../../lib/claudeCli";
 
@@ -614,7 +614,7 @@ export function CreateMode({
     setMapBusy(true);
     setStatus("出来たアプリを解析中…(Claude を使用)");
     try {
-      const outcome = await analyzeFolder(ws, "ja", "claude");
+      const outcome = await analyzeFolderLean(ws);
       let rev = "";
       try {
         rev = await invoke<string>("workspace_revision", { workspace: ws });

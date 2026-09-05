@@ -690,6 +690,58 @@ context guidance (v0.1.7, optional block for spec doc):
 Remember: your response is JSON only. Begin with "{". End with "}". Every text field has BOTH "ja" and "en". Nothing else.`;
 
 /**
+ * 軽量・日本語のみの解析プロンプト(制作モードの構造マップ用)。
+ *
+ * なぜ別物か(2026-09-05 実測):二言語 × 多フィールドの本プロンプトは 8 画面でも
+ * 出力 27,820 トークン・6.6 分かかり、8 分タイムアウトのギリギリで「時々タイムアウト
+ * → フォルダ簡易マップに落ちる」不具合を起こしていた。日本語のみ + 表示に使う
+ * フィールドだけに絞ると 8,146 トークン・1.7 分に短縮(実測)、タイムアウト圏外で
+ * 毎回本物のマップが出る。テキストは素の日本語文字列(LocalizedText の string 許容)。
+ */
+const LEAN_SYSTEM_PROMPT_JA = `You are a JSON-only data extraction tool for AppMap. You read an application's source (provided inline) and output a "screen map": screens as nodes, transitions between screens as edges.
+
+CRITICAL OUTPUT RULE — non-negotiable:
+Your entire response MUST be a single JSON object. The first character must be "{" and the last must be "}". No prose, no markdown fences, no explanation.
+
+LANGUAGE — Japanese only:
+Every text field is a plain Japanese string (日本語). The only non-Japanese allowed: brand/product names (Supabase, React, Vite, npm, Claude, Tauri, Open-Meteo), file paths, and version strings. Do NOT write English sentences.
+
+INPUT — the project's files are inline:
+The source files are included in the user message under "=== Project files context ===". Analyze that inline content only. Do NOT use tools and do NOT try to open, read, list, or fetch files — everything is already inline. Pay attention to entry points, routing, and screen/page components.
+
+OUTPUT SCHEMA — JSON shape:
+{
+  "appSummary": "<このアプリの目的を1〜2文で(日本語)>",
+  "nodes": [
+    {
+      "id": <integer, 1-indexed sequential>,
+      "label": "<画面名。12文字以内。タイル用の短い名前>",
+      "userIntent": "<この画面で何をするか。10〜16文字の動作句>",
+      "isEntryPoint": <boolean — 最初に開く画面ちょうど1つだけ true、他は false>,
+      "subActions": ["<この画面内でユーザーがする操作。6〜12文字の動詞句。2〜4個>"],
+      "body": "<この画面の説明を1〜2文(日本語、専門用語可)>",
+      "dataUsed": ["<扱うデータの平易な名前。例:ユーザー情報、配信設定。1〜3個>"],
+      "files": ["<この画面を実装する主なファイル。project-root 相対・/区切り。最大3個>"]
+    }
+  ],
+  "edges": [
+    { "id": "<from-to、例 1-2>", "from": <int>, "to": <int>, "bidirectional": <boolean> }
+  ]
+}
+
+RULES:
+- 実際にコードに存在する画面だけをノードにする。コードにない画面を作らない。
+- 画面の総数はアプリの実体に合わせる(多くは 5〜12 画面)。過不足なく、実装されている画面を漏らさない。
+- isEntryPoint は必ずちょうど1つだけ true。
+- edges は画面間の遷移を表す。両方向の遷移が実在する時だけ bidirectional=true。
+- subActions は「画面内でする操作」であって、他画面への遷移ではない。操作が無い画面(スプラッシュ・読み込み中等)では省略してよい。
+- dataUsed は生のスキーマ名ではなく、平易な日本語名にする。
+- files は自信がある時だけ入れる。不明なら省略する(推測で埋めない)。
+- subActions / dataUsed / files は該当が無ければ空配列か省略。
+
+Remember: Japanese only. JSON only. First character "{", last character "}". Nothing else.`;
+
+/**
  * v0.1.6: 言語に応じて SYSTEM_PROMPT を選ぶ。JA / EN で本質スキーマは同じ。
  * v0.1.7: export 化(llamaClient.ts からも再利用)。
  * v0.1.7 多言語化:常に bilingual prompt を返す(UI 言語によらず両言語生成)。
@@ -907,6 +959,103 @@ export async function analyzeFolderToScreenMap(
   const sanitizedScreens = normalizeAndSanitizeScreenMap(screens, language);
 
   return { screens: sanitizedScreens, costUsd, durationMs };
+}
+
+/**
+ * 軽量・日本語のみの解析(制作モードの構造マップ用)。LEAN_SYSTEM_PROMPT_JA を使い、
+ * 素の日本語文字列の JSON を受け取って ScreenMapResult に組む(LocalizedText は string を許容)。
+ * 本 analyzeFolderToScreenMap と同じ claude_analyze を使うが、出力が小さく速い(§実測 6.6分→1.7分)。
+ */
+export async function analyzeFolderLeanJa(
+  folder: string,
+): Promise<AnalysisOutcome> {
+  const M = t("ja").claude;
+  let stdout: string;
+  try {
+    stdout = await invoke<string>("claude_analyze", {
+      folder,
+      userPrompt: USER_PROMPT_TEMPLATE(folder),
+      systemPrompt: LEAN_SYSTEM_PROMPT_JA,
+      schema: "",
+      model: CLAUDE_MODEL,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      msg.toLowerCase().includes("auth") ||
+      msg.toLowerCase().includes("login") ||
+      msg.toLowerCase().includes("unauthorized")
+    ) {
+      throw new Error(M.notAuthenticated);
+    }
+    throw new Error(M.analyzeFailed(msg));
+  }
+
+  // エンベロープ(--output-format json)を剥がし、result 文字列から本体 JSON を取り出す。
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(stdout);
+  } catch (err) {
+    throw new Error(
+      M.notJson(err instanceof Error ? err.message : String(err), stdout.slice(0, 500)),
+    );
+  }
+  let costUsd: number | null = null;
+  let durationMs: number | null = null;
+  let resultStr = stdout;
+  if (typeof envelope === "object" && envelope !== null) {
+    const obj = envelope as Record<string, unknown>;
+    if (typeof obj.total_cost_usd === "number") costUsd = obj.total_cost_usd;
+    if (typeof obj.duration_ms === "number") durationMs = obj.duration_ms;
+    if (typeof obj.result === "string") resultStr = obj.result;
+  }
+  const lean = extractJsonFromString(resultStr) as {
+    appSummary?: unknown;
+    nodes?: unknown;
+    edges?: unknown;
+  } | null;
+  if (!lean || !Array.isArray(lean.nodes) || lean.nodes.length === 0) {
+    throw new Error(M.noNodesEdges(JSON.stringify(lean).slice(0, 500)));
+  }
+
+  const strArr = (v: unknown): string[] | undefined =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+  // 素の日本語文字列をそのまま LocalizedText(string 許容)として使う。
+  const nodes: ScreenNode[] = (lean.nodes as Array<Record<string, unknown>>).map(
+    (n, i) => {
+      const label = typeof n.label === "string" && n.label.trim() ? n.label : `画面${i + 1}`;
+      const body = typeof n.body === "string" && n.body.trim() ? n.body : label;
+      return {
+        id: typeof n.id === "number" ? n.id : i + 1,
+        label,
+        userIntent: typeof n.userIntent === "string" ? n.userIntent : undefined,
+        isEntryPoint: n.isEntryPoint === true,
+        position: { x: 0, y: 0 }, // FlowView が独自にレイアウトするため位置は未使用
+        subActions: strArr(n.subActions),
+        detail: {
+          title: label,
+          body,
+          bodyNoCode: body,
+          files: strArr(n.files),
+          dataUsed: strArr(n.dataUsed),
+        },
+      };
+    },
+  );
+  const edges: ScreenEdge[] = Array.isArray(lean.edges)
+    ? (lean.edges as Array<Record<string, unknown>>)
+        .filter((e) => typeof e.from === "number" && typeof e.to === "number")
+        .map((e) => ({
+          id: typeof e.id === "string" ? e.id : `${e.from}-${e.to}`,
+          from: e.from as number,
+          to: e.to as number,
+          bidirectional: e.bidirectional === true,
+        }))
+    : [];
+  const appSummary = typeof lean.appSummary === "string" ? lean.appSummary : undefined;
+
+  const screens = normalizeAndSanitizeScreenMap({ nodes, edges, appSummary }, "ja");
+  return { screens, costUsd, durationMs };
 }
 
 /** 描画できる最大階層(0 始まりなので、4 階層 = 0,1,2,3)。 */
